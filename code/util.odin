@@ -233,14 +233,19 @@ make_by_pointer_soa_dynamic_array         :: proc (pointer: ^$T/#soa [dynamic] $
 make_by_pointer_soa_dynamic_array_len     :: proc (pointer: ^$T/#soa [dynamic] $E, #any_int len: int,      allocator := context.allocator, loc := #caller_location) -> (result: Allocator_Error) { pointer ^= make(T, len,      allocator, loc) or_return;  return nil }
 make_by_pointer_soa_dynamic_array_len_cap :: proc (pointer: ^$T/#soa [dynamic] $E, #any_int len, cap: int, allocator := context.allocator, loc := #caller_location) -> (result: Allocator_Error) { pointer ^= make(T, len, cap, allocator, loc) or_return;  return nil }
 
-make_shallow_copy :: proc { make_shallow_copy_array, make_shallow_copy_slice }
-make_shallow_copy_array :: proc (source: [dynamic] $T, allocator: Allocator) -> [dynamic] T {
-    result := make([dynamic] T, len(source), allocator)
+make_shallow_copy :: proc { make_shallow_copy_array, make_shallow_copy_slice, make_shallow_copy_soa }
+make_shallow_copy_array :: proc (source: $A/ [dynamic] $T, allocator: Allocator) -> A {
+    result := make(A, len(source), allocator)
     copy(result[:], source[:])
     return result
 }
-make_shallow_copy_slice :: proc (source: [] $T, allocator: Allocator) -> [] T {
-    result := make([] T, len(source), allocator)
+make_shallow_copy_slice :: proc (source: $A/ [] $T, allocator: Allocator) -> A {
+    result := make(A, len(source), allocator)
+    copy(result, source[:])
+    return result
+}
+make_shallow_copy_soa :: proc (source: $A/ #soa [dynamic] $T, allocator: Allocator) -> A {
+    result := make(A, len(source), allocator)
     copy(result, source[:])
     return result
 }
