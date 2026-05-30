@@ -1,8 +1,10 @@
 package main
 
 import "base:intrinsics"
+import "base:runtime"
 import "core:fmt"
 import "core:os"
+import "core:time"
 import "core:mem"
 import la "core:math/linalg"
 import "core:strconv"
@@ -15,6 +17,30 @@ import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 
 ////////////////////////////////////////////////
+
+Frame_Data :: struct {
+    shader_data_buffer: Shader_Data_Buffer,
+    command_buffer:     vk.CommandBuffer,
+    // @note(viktor): constref uses a command_pool per frame, which reset at the start of the frame
+    
+    image_aquired:   vk.Semaphore,
+}
+
+Shader_Data :: struct {
+    projection: m4,
+    view:       m4,
+    model:      [3] m4,
+    light_pos:  [4] v4,
+    selected:   u32,
+}
+
+Shader_Data_Buffer :: struct {
+    allocation:      vma.Allocation,
+    allocation_info: vma.Allocation_Info,
+    buffer:          vk.Buffer,
+    deviceAddress:   vk.DeviceAddress,
+    command_buffer:  vk.CommandBuffer,
+}
 
 Swapchain_Info :: struct {
     image: vk.Image,
@@ -44,16 +70,36 @@ main :: proc () {
     {
         instance_extension_count: u32
         instance_extensions_raw := sdl.Vulkan_GetInstanceExtensions(&instance_extension_count)
-        instance_extensions := instance_extensions_raw[:instance_extension_count]
+        
+        instance_extensions := make([dynamic] cstring, 0, instance_extension_count, context.temp_allocator)
+        for i in 0..<instance_extension_count {
+            append(&instance_extensions, instance_extensions_raw[i])
+        }
+        
+        when ODIN_DEBUG {
+            append(&instance_extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
+        }
         
         instance_create_info := vk.InstanceCreateInfo {
             sType = .INSTANCE_CREATE_INFO,
+            pNext = &vk.DebugUtilsMessengerCreateInfoEXT {
+                sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+                messageSeverity = { .VERBOSE, .WARNING, .ERROR },
+                messageType = { .VALIDATION, .PERFORMANCE },
+                pfnUserCallback = proc "system" (messageSeverity: vk.DebugUtilsMessageSeverityFlagsEXT, messageTypes: vk.DebugUtilsMessageTypeFlagsEXT, pCallbackData: ^vk.DebugUtilsMessengerCallbackDataEXT, pUserData: rawptr) -> b32 {
+                    context = runtime.default_context()
+                    if .WARNING in messageSeverity || .ERROR in messageSeverity {
+                        fmt.printfln("Validation Layer: %v", pCallbackData.pMessage)
+                    }
+                    return false
+                }
+            },
             pApplicationInfo = &vk.ApplicationInfo {
                 sType = .APPLICATION_INFO,
                 pApplicationName = "How to Vulkan",
-                apiVersion = vk.API_VERSION_1_3,
+                apiVersion = vk.API_VERSION_1_4,
             },
-            enabledExtensionCount = instance_extension_count,
+            enabledExtensionCount = auto_cast len(instance_extensions),
             ppEnabledExtensionNames = raw_data(instance_extensions),
         }
         
@@ -117,26 +163,58 @@ main :: proc () {
         
         queue_family_priority := [] f32 { 1 }
         
+        if false {
+            // @todo(viktor): GetPhysicalDeviceFeatures2 crashes
+            f14 := &vk.PhysicalDeviceVulkan14Features { sType = .PHYSICAL_DEVICE_VULKAN_1_4_FEATURES, pNext = nil }
+            f13 := &vk.PhysicalDeviceVulkan13Features { sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, pNext = &f14 }
+            f12 := &vk.PhysicalDeviceVulkan12Features { sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, pNext = &f13 }
+            supported_features := vk.PhysicalDeviceFeatures2 { sType = .PHYSICAL_DEVICE_FEATURES_2, pNext = &f12 }
+            
+            vk.GetPhysicalDeviceFeatures2(physical_device, &supported_features)
+            if !f13.dynamicRendering || 
+                !f13.synchronization2 || 
+                !f12.timelineSemaphore || 
+                !f12.descriptorIndexing || 
+                !f12.shaderSampledImageArrayNonUniformIndexing || 
+                !f12.descriptorBindingVariableDescriptorCount || 
+                !f12.runtimeDescriptorArray || 
+                !f12.bufferDeviceAddress {
+                fmt.printfln("Physical device doesn't meet the feauture requirements")
+                check(false)
+            }
+        }
+        
         device_extensions := [] cstring { vk.KHR_SWAPCHAIN_EXTENSION_NAME }
         
         device_create_info := vk.DeviceCreateInfo {
             sType = .DEVICE_CREATE_INFO,
             
+            // @todo(viktor): is this still needed?
             pEnabledFeatures = &vk.PhysicalDeviceFeatures {
                 samplerAnisotropy = true,
             },
-            pNext = &vk.PhysicalDeviceVulkan13Features {
-                sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-                pNext = &vk.PhysicalDeviceVulkan12Features {
-                    sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-                    descriptorIndexing                        = true,
-                    shaderSampledImageArrayNonUniformIndexing = true,
-                    descriptorBindingVariableDescriptorCount  = true,
-                    runtimeDescriptorArray                    = true,
-                    bufferDeviceAddress                       = true,
+            pNext = &vk.PhysicalDeviceVulkan14Features {
+                sType = .PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
+                
+                // @todo(viktor): check if this would help the texture upload hostImageCopy
+                
+                pNext = &vk.PhysicalDeviceVulkan13Features {
+                    sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+                    
+                    synchronization2 = true,
+                    dynamicRendering = true,
+                    
+                    pNext = &vk.PhysicalDeviceVulkan12Features {
+                        sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+                    
+                        descriptorIndexing                        = true,
+                        shaderSampledImageArrayNonUniformIndexing = true,
+                        descriptorBindingVariableDescriptorCount  = true,
+                        runtimeDescriptorArray                    = true,
+                        bufferDeviceAddress                       = true,
+                        timelineSemaphore                         = true,
+                    },
                 },
-                synchronization2 = true,
-                dynamicRendering = true,
             },
             
             queueCreateInfoCount = 1,
@@ -172,7 +250,7 @@ main :: proc () {
     swapchain: vk.SwapchainKHR
     swapchain_create_info: vk.SwapchainCreateInfoKHR
     surface_capabilities: vk.SurfaceCapabilitiesKHR
-    image_format := vk.Format.B8G8R8A8_SRGB
+    swapchain_format := vk.Format.B8G8R8A8_SRGB
     {
         check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &surface_capabilities))
         
@@ -185,7 +263,7 @@ main :: proc () {
             sType = .SWAPCHAIN_CREATE_INFO_KHR,
             surface          = surface,
             minImageCount    = surface_capabilities.minImageCount,
-            imageFormat      = image_format,
+            imageFormat      = swapchain_format,
             imageColorSpace  = .SRGB_NONLINEAR,
             imageExtent      = swapchain_extent,
             imageArrayLayers = 1,
@@ -199,7 +277,7 @@ main :: proc () {
     
     swapchain_infos: #soa [dynamic] Swapchain_Info
     image_count: u32
-    vk_recreate_swapchain(device, image_format, &image_count, &swapchain_infos, swapchain)
+    vk_recreate_swapchain(device, swapchain_format, &image_count, &swapchain_infos, swapchain)
     
     ////////////////////////////////////////////////
     
@@ -208,7 +286,7 @@ main :: proc () {
         vma_vulkan_functions := vma.create_vulkan_functions()
         
         allocator_create_info := vma.Allocator_Create_Info {
-            flags            = {.Buffer_Device_Address},
+            flags            = { .Buffer_Device_Address },
             instance         = instance,
             physical_device  = physical_device,
             device           = device,
@@ -287,34 +365,11 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    Shader_Data :: struct {
-        projection: m4,
-        view:       m4,
-        model:      [3] m4,
-        light_pos:  [4] v4,
-        selected:   u32,
-    }
     shader_data := Shader_Data {
         light_pos = { 0, -10, 10, 0 },
         selected  = 1,
     }
-    
-    Frame_Data :: struct {
-        shader_data_buffer: Shader_Data_Buffer,
-        command_buffer:     vk.CommandBuffer,
-        
-        fence:           vk.Fence,
-        image_aquired:   vk.Semaphore,
-    }
-    
-    Shader_Data_Buffer :: struct {
-        allocation:      vma.Allocation,
-        allocation_info: vma.Allocation_Info,
-        buffer:          vk.Buffer,
-        deviceAddress:   vk.DeviceAddress,
-        command_buffer:  vk.CommandBuffer,
-    }
-    
+
     MaxFramesInFlight :: 2
     
     frames := #soa [MaxFramesInFlight] Frame_Data {}
@@ -343,13 +398,12 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     for &frame in frames {
-        frame.fence = vk_create_fence(device, { .SIGNALED })
         frame.image_aquired = vk_create_semaphore(device)
     }
     
     ////////////////////////////////////////////////
     
-    commandPool: vk.CommandPool
+    command_pool: vk.CommandPool
     {
         command_pool_create_info := vk.CommandPoolCreateInfo {
             sType = .COMMAND_POOL_CREATE_INFO,
@@ -357,11 +411,11 @@ main :: proc () {
             queueFamilyIndex = queue_family_index,
         }
         
-        check(vk.CreateCommandPool(device, &command_pool_create_info, nil, &commandPool))
+        check(vk.CreateCommandPool(device, &command_pool_create_info, nil, &command_pool))
         
         command_buffer_allocate_info := vk.CommandBufferAllocateInfo {
             sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-            commandPool = commandPool,
+            commandPool = command_pool,
             commandBufferCount = len(frames.command_buffer),
         }
         check(vk.AllocateCommandBuffers(device, &command_buffer_allocate_info, &frames.command_buffer[0]))
@@ -430,7 +484,7 @@ main :: proc () {
             cb_once: vk.CommandBuffer
             cb_once_allocate_info := vk.CommandBufferAllocateInfo {
                 sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-                commandPool = commandPool,
+                commandPool = command_pool,
                 commandBufferCount = 1,
             }
             check(vk.AllocateCommandBuffers(device, &cb_once_allocate_info, &cb_once))
@@ -663,7 +717,7 @@ main :: proc () {
             pNext = &vk.PipelineRenderingCreateInfo {
                 sType = .PIPELINE_RENDERING_CREATE_INFO,
                 colorAttachmentCount = 1,
-                pColorAttachmentFormats = &image_format,
+                pColorAttachmentFormats = &swapchain_format,
                 depthAttachmentFormat = depth_format,
             },
             stageCount = auto_cast len(shader_stages),
@@ -690,6 +744,7 @@ main :: proc () {
             },
             pRasterizationState = &vk.PipelineRasterizationStateCreateInfo {
                 sType = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+                cullMode = { .BACK },
                 lineWidth = 1,
             },
             pMultisampleState = &vk.PipelineMultisampleStateCreateInfo {
@@ -722,23 +777,69 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
+    // @todo(viktor): this should replace most fences
+    timeline_semaphore: vk.Semaphore
+    {
+        semaphore_create_info := vk.SemaphoreCreateInfo {
+            sType = .SEMAPHORE_CREATE_INFO,
+            pNext = &vk.SemaphoreTypeCreateInfo {
+                sType = .SEMAPHORE_TYPE_CREATE_INFO,
+                semaphoreType = .TIMELINE,
+                initialValue = MaxFramesInFlight,
+            },
+        }
+        check(vk.CreateSemaphore(device, &semaphore_create_info, nil, &timeline_semaphore))
+    }
+    
+    ////////////////////////////////////////////////
+    
     cam_pos := v3{ 0, 0, -6 }
     object_rotations: [3] v3
     
-    last_time := sdl.GetTicks()
     
     frame_index: u32
     image_index: u32
     Timeout :: max(u64)
     quit: bool
+    next_signal_value: u64 = MaxFramesInFlight + 1
+    
+    last_time := time.tick_now()
+    
+    Smooth :: struct {
+        value: f32,
+        last_value: f32,
+    }
+
+    smooth_update :: proc (frame_time: f32, smooth: ^Smooth, value: f32) {
+        // @speed We could precompute ks if needed as it only depends on h and frame time, not the smooth itself.
+        h :: 5.0 // = the amount of time it takes for the filter to converge to 90% of a fixed input value
+        k := power(power(cast(f32) .1, 1 / h), frame_time)
+        
+        smooth.value = linear_blend(value, smooth.last_value, k)
+        smooth.last_value = smooth.value
+    }
+        
+    smooth_frame_time: Smooth
     for !quit {
         free_all(context.temp_allocator)
         
         ////////////////////////////////////////////////
         
-        current_time := sdl.GetTicks()
-        delta_time := cast(f32) (current_time - last_time) / 1000
+        current_time := time.tick_now()
+        delta_tick := time.tick_diff(last_time, current_time)
+        delta_time := cast(f32) time.duration_seconds(delta_tick)
         last_time = current_time
+        
+        smooth_update(delta_time, &smooth_frame_time, delta_time)
+        
+        ////////////////////////////////////////////////
+        
+        xx :: proc (seconds: f32) -> time.Duration {
+            return time.duration_round(cast(time.Duration) (seconds * cast(f32) time.Second), 10 * time.Microsecond)
+        }
+        sdl.SetWindowTitle(window, fmt.ctprintf("Frame time: %.3v", xx(smooth_frame_time.value)))
+        
+        ////////////////////////////////////////////////
         
         for event: sdl.Event; sdl.PollEvent(&event); {
             #partial switch event.type {
@@ -787,7 +888,7 @@ main :: proc () {
                 vk.DestroySemaphore(device, info.render_completed, nil)
             }
              
-            vk_recreate_swapchain(device, image_format, &image_count, &swapchain_infos, swapchain)
+            vk_recreate_swapchain(device, swapchain_format, &image_count, &swapchain_infos, swapchain)
             
             vk.DestroySwapchainKHR(device, swapchain_create_info.oldSwapchain, nil)
             
@@ -797,15 +898,31 @@ main :: proc () {
             depth_image, depth_image_view, depth_image_allocation = vk_create_depth_image(device, depth_format, cast(uv2) window_size, allocator)
         }
         
-        frame := &frames[frame_index]
-        check(vk.WaitForFences(device, 1, &frame.fence, true, Timeout))
-        check(vk.ResetFences(device, 1, &frame.fence))
+        ////////////////////////////////////////////////
         
-        check(vk.AcquireNextImageKHR(device, swapchain, Timeout, frame.image_aquired, {}, &image_index), outofdate_recreates_swapchain = true)
+        signal_value := next_signal_value
+        next_signal_value += 1
+        wait_value := signal_value - MaxFramesInFlight
+        
+        wait_info := vk.SemaphoreWaitInfo {
+            sType = .SEMAPHORE_WAIT_INFO,
+            semaphoreCount = 1,
+            pSemaphores = &timeline_semaphore,
+            pValues = &wait_value,
+        }
+        vk.WaitSemaphores(device, &wait_info, Timeout)
+        
+        frame := &frames[frame_index]
+        frame_index = (frame_index + 1) % MaxFramesInFlight
+        
+        result := vk.AcquireNextImageKHR(device, swapchain, Timeout, frame.image_aquired, {}, &image_index)
+        if result == .ERROR_OUT_OF_DATE_KHR || result == .SUBOPTIMAL_KHR {
+            recreate_swapchain = true
+            continue
+        }
+        check(result)
         
         swapchain_info := &swapchain_infos[image_index]
-        
-        ////////////////////////////////////////////////
         
         ////////////////////////////////////////////////
         
@@ -820,6 +937,7 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
+        // vk.ResetCommandPool(device, command_pool, {})
         cb := frame.command_buffer
         check(vk.ResetCommandBuffer(cb, {}))
         
@@ -918,9 +1036,9 @@ main :: proc () {
         
         barrier_present := vk.ImageMemoryBarrier2 {
             sType = .IMAGE_MEMORY_BARRIER_2,
-            srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
+            srcStageMask  = { .COLOR_ATTACHMENT_OUTPUT },
             srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
-            dstStageMask = { .COLOR_ATTACHMENT_OUTPUT },
+            dstStageMask  = {},
             dstAccessMask = {},
             oldLayout = .ATTACHMENT_OPTIMAL,
             newLayout = .PRESENT_SRC_KHR,
@@ -939,22 +1057,37 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        wait_stages := vk.PipelineStageFlags { .COLOR_ATTACHMENT_OUTPUT }
-        submit_info := vk.SubmitInfo {
-            sType = .SUBMIT_INFO,
-            waitSemaphoreCount = 1,
-            pWaitSemaphores = &frame.image_aquired,
-            pWaitDstStageMask = &wait_stages,
-            commandBufferCount = 1,
-            pCommandBuffers = &cb,
-            signalSemaphoreCount = 1,
-            pSignalSemaphores = &swapchain_info.render_completed,
+        render_complete_and_timeline_submit_info := [] vk.SemaphoreSubmitInfo {
+            {
+                sType = .SEMAPHORE_SUBMIT_INFO,
+                semaphore = swapchain_info.render_completed,
+                stageMask = { .ALL_GRAPHICS },
+            },
+            {
+                sType = .SEMAPHORE_SUBMIT_INFO,
+                semaphore = timeline_semaphore,
+                value = signal_value,
+                stageMask = { .ALL_COMMANDS },
+            },
         }
-        check(vk.QueueSubmit(queue, 1, &submit_info, frame.fence))
         
-        ////////////////////////////////////////////////
-        
-        frame_index = (frame_index + 1) % MaxFramesInFlight
+        submit_info := vk.SubmitInfo2 {
+            sType = .SUBMIT_INFO_2,
+            waitSemaphoreInfoCount = 1,
+            pWaitSemaphoreInfos = &vk.SemaphoreSubmitInfo {
+                sType = .SEMAPHORE_SUBMIT_INFO,
+                semaphore = frame.image_aquired,
+                stageMask = { .COLOR_ATTACHMENT_OUTPUT },
+            },
+            commandBufferInfoCount = 1,
+            pCommandBufferInfos = &vk.CommandBufferSubmitInfo {
+                sType = .COMMAND_BUFFER_SUBMIT_INFO,
+                commandBuffer = frame.command_buffer,
+            },
+            signalSemaphoreInfoCount = auto_cast len(render_complete_and_timeline_submit_info),
+            pSignalSemaphoreInfos = raw_data(render_complete_and_timeline_submit_info),
+        }
+        vk.QueueSubmit2(queue, 1, &submit_info, 0)
         
         ////////////////////////////////////////////////
         
@@ -967,14 +1100,16 @@ main :: proc () {
             pImageIndices = &image_index,
         }
         check(vk.QueuePresentKHR(queue, &present_info), outofdate_recreates_swapchain = true)
-        
-        ////////////////////////////////////////////////
-    }
+    }    
+    
+    ////////////////////////////////////////////////
+    // Cleanup and Shutdown
     
 	check(vk.DeviceWaitIdle(device))
     
+    vk.DestroySemaphore(device, timeline_semaphore, nil)
+    
     for frame in frames {
-		vk.DestroyFence(device, frame.fence, nil)
 		vk.DestroySemaphore(device, frame.image_aquired, nil)
 		vma.destroy_buffer(allocator, frame.shader_data_buffer.buffer, frame.shader_data_buffer.allocation)
     }
@@ -1000,7 +1135,7 @@ main :: proc () {
 	vk.DestroyPipeline(device, pipeline, nil)
 	vk.DestroySwapchainKHR(device, swapchain, nil)
 	vk.DestroySurfaceKHR(instance, surface, nil)
-	vk.DestroyCommandPool(device, commandPool, nil)
+	vk.DestroyCommandPool(device, command_pool, nil)
 	vk.DestroyShaderModule(device, shader_module, nil)
 	vma.destroy_allocator(allocator)
 	vk.DestroyDevice(device, nil)
