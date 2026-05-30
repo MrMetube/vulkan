@@ -11,7 +11,7 @@ import "../libs/tobj"
 import "../libs/ktx"
 import "../libs/slang/slang"
 
-import sdl "vendor:sdl2"
+import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 
 ////////////////////////////////////////////////
@@ -27,10 +27,11 @@ recreate_swapchain: bool
 ////////////////////////////////////////////////
 
 main :: proc () {
-    check_sdl(sdl.Init(sdl.INIT_VIDEO) == 0)
+    check(sdl.InitSubSystem({ .VIDEO }))
+    defer sdl.QuitSubSystem({ .VIDEO })
     defer sdl.Quit()
     
-    window := sdl.CreateWindow("How to Vulkan", sdl.WINDOWPOS_UNDEFINED, sdl.WINDOWPOS_UNDEFINED, 1280, 720, sdl.WINDOW_VULKAN | sdl.WINDOW_RESIZABLE)
+    window := sdl.CreateWindow("How to Vulkan", 1280, 720, sdl.WINDOW_VULKAN | sdl.WINDOW_RESIZABLE)
     check_sdl(window != nil)
     defer sdl.DestroyWindow(window)
     
@@ -42,12 +43,8 @@ main :: proc () {
     instance: vk.Instance
     {
         instance_extension_count: u32
-        sdl.Vulkan_GetInstanceExtensions(window, &instance_extension_count, nil)
-        instance_extensions := make([]cstring, instance_extension_count, context.temp_allocator)
-        sdl.Vulkan_GetInstanceExtensions(window, &instance_extension_count, raw_data(instance_extensions))
-        when false {
-            instance_extensions := sdl.Vulkan_GetInstanceExtensions(&instance_extension_count)
-        }
+        instance_extensions_raw := sdl.Vulkan_GetInstanceExtensions(&instance_extension_count)
+        instance_extensions := instance_extensions_raw[:instance_extension_count]
         
         instance_create_info := vk.InstanceCreateInfo {
             sType = .INSTANCE_CREATE_INFO,
@@ -165,7 +162,7 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     surface: vk.SurfaceKHR
-    check(sdl.Vulkan_CreateSurface(window, instance, &surface))
+    check(sdl.Vulkan_CreateSurface(window, instance, nil, &surface))
     
     window_size: iv2
     sdl.GetWindowSize(window, &window_size.x, &window_size.y)
@@ -737,14 +734,6 @@ main :: proc () {
     for !quit {
         free_all(context.temp_allocator)
         
-        frame := &frames[frame_index]
-        check(vk.WaitForFences(device, 1, &frame.fence, true, Timeout))
-        check(vk.ResetFences(device, 1, &frame.fence))
-        
-        check(vk.AcquireNextImageKHR(device, swapchain, Timeout, frame.image_aquired, {}, &image_index), outofdate_recreates_swapchain = true)
-        
-        swapchain_info := &swapchain_infos[image_index]
-        
         ////////////////////////////////////////////////
         
         current_time := sdl.GetTicks()
@@ -756,27 +745,25 @@ main :: proc () {
             case .QUIT:
                 quit = true
             
-            case .MOUSEMOTION:
+            case .MOUSE_MOTION:
                 if event.button.button == sdl.BUTTON_LEFT {
-                    object_rotations[shader_data.selected].x -= cast(f32) event.motion.yrel * delta_time
-                    object_rotations[shader_data.selected].y += cast(f32) event.motion.xrel * delta_time
+                    object_rotations[shader_data.selected].x -= event.motion.yrel * delta_time
+                    object_rotations[shader_data.selected].y += event.motion.xrel * delta_time
                 }
                 
-            case .MOUSEWHEEL:
-                cam_pos.z += cast(f32) event.wheel.y * 10 * delta_time
+            case .MOUSE_WHEEL:
+                cam_pos.z += event.wheel.y * 10 * delta_time
                 
-            case .KEYDOWN:
-                if event.key.keysym.sym == .PLUS || event.key.keysym.sym == .KP_PLUS {
+            case .KEY_DOWN:
+                if event.key.key == sdl.K_PLUS || event.key.key == sdl.K_KP_PLUS {
                     shader_data.selected = (shader_data.selected + 1) % len(shader_data.model)
                 }
-                if event.key.keysym.sym == .MINUS || event.key.keysym.sym == .KP_MINUS {
+                if event.key.key == sdl.K_MINUS || event.key.key == sdl.K_KP_MINUS {
                     shader_data.selected = (shader_data.selected + len(shader_data.model) - 1) % len(shader_data.model)
                 }
                 
-            case .WINDOWEVENT:
-                if event.window.event == .RESIZED {
-                    recreate_swapchain = true
-                }
+            case .WINDOW_RESIZED:
+                recreate_swapchain = true
             }
         }
         
@@ -809,6 +796,16 @@ main :: proc () {
             
             depth_image, depth_image_view, depth_image_allocation = vk_create_depth_image(device, depth_format, cast(uv2) window_size, allocator)
         }
+        
+        frame := &frames[frame_index]
+        check(vk.WaitForFences(device, 1, &frame.fence, true, Timeout))
+        check(vk.ResetFences(device, 1, &frame.fence))
+        
+        check(vk.AcquireNextImageKHR(device, swapchain, Timeout, frame.image_aquired, {}, &image_index), outofdate_recreates_swapchain = true)
+        
+        swapchain_info := &swapchain_infos[image_index]
+        
+        ////////////////////////////////////////////////
         
         ////////////////////////////////////////////////
         
@@ -1010,8 +1007,6 @@ main :: proc () {
 	vk.DestroyInstance(instance, nil)
     
 	sdl.DestroyWindow(window)
-	sdl.QuitSubSystem({.VIDEO})
-	sdl.Quit()
 }
 ////////////////////////////////////////////////
 
@@ -1118,8 +1113,8 @@ check_ktx :: proc (result: ktx.Result, loc := #caller_location) {
         os.exit(1)
     }
 }
-check_sdl :: proc (result: sdl.bool, loc := #caller_location) {
-    if result != true {
+check_sdl :: proc (result: bool, loc := #caller_location) {
+    if !result {
         fmt.printf("%v:%v:%v: SDL call returned %v", loc.file_path, loc.line, loc.column, sdl.GetError())
         intrinsics.debug_trap()
         os.exit(1)
