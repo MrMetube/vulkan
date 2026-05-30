@@ -4,7 +4,7 @@ optimize :: false
 pedantic :: false
 
 main :: proc () {
-    init_build(run_from_data = false, wait = true)
+    init_build(run_from_data = true, wait = true)
     
     parse_run_and_debug_arguments()
     
