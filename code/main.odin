@@ -16,6 +16,12 @@ import vk "vendor:vulkan"
 
 ////////////////////////////////////////////////
 
+Swapchain_Info :: struct {
+    image: vk.Image,
+    image_view: vk.ImageView,
+    render_completed: vk.Semaphore,
+}
+
 recreate_swapchain: bool
 
 ////////////////////////////////////////////////
@@ -37,7 +43,7 @@ main :: proc () {
     {
         instance_extension_count: u32
         sdl.Vulkan_GetInstanceExtensions(window, &instance_extension_count, nil)
-        instance_extensions := make([]cstring, instance_extension_count)
+        instance_extensions := make([]cstring, instance_extension_count, context.temp_allocator)
         sdl.Vulkan_GetInstanceExtensions(window, &instance_extension_count, raw_data(instance_extensions))
         when false {
             instance_extensions := sdl.Vulkan_GetInstanceExtensions(&instance_extension_count)
@@ -69,21 +75,21 @@ main :: proc () {
     
     physical_device: vk.PhysicalDevice
     {
-        devices: [] vk.PhysicalDevice
+        physical_devices: [] vk.PhysicalDevice
         {
             device_count: u32
             check(vk.EnumeratePhysicalDevices(instance, &device_count, nil))
-            devices = make([] vk.PhysicalDevice, device_count)
-            check(vk.EnumeratePhysicalDevices(instance, &device_count, raw_data(devices)))
+            physical_devices = make([] vk.PhysicalDevice, device_count)
+            check(vk.EnumeratePhysicalDevices(instance, &device_count, raw_data(physical_devices)))
         }
         
         device_index: u32
         if len(os.args) > 1 {
             device_index = cast(u32) (strconv.parse_u64(os.args[1]) or_else 0)
-            assert(device_index < auto_cast len(devices))
+            assert(device_index < auto_cast len(physical_devices))
         }
         
-        physical_device = devices[device_index]
+        physical_device = physical_devices[device_index]
         
         {
             device_properties := vk.PhysicalDeviceProperties2 { sType = .PHYSICAL_DEVICE_PROPERTIES_2 }
@@ -196,7 +202,7 @@ main :: proc () {
     
     swapchain_infos: #soa [dynamic] Swapchain_Info
     image_count: u32
-    swapchain = vk_create_swapchain(device, image_format, &image_count, &swapchain_infos)
+    vk_recreate_swapchain(device, image_format, &image_count, &swapchain_infos, swapchain)
     
     ////////////////////////////////////////////////
     
@@ -226,6 +232,7 @@ main :: proc () {
         for it in depth_format_list {
             format_properties := vk.FormatProperties2 { sType = .FORMAT_PROPERTIES_2 }
             vk.GetPhysicalDeviceFormatProperties2(physical_device, it, &format_properties)
+            
             if .DEPTH_STENCIL_ATTACHMENT in format_properties.formatProperties.optimalTilingFeatures {
                 depth_format = it
                 break
@@ -245,18 +252,18 @@ main :: proc () {
         assert(error == nil)
         model := models[0].mesh
         index_count = cast(u32) len(model.indices)
-        vertices := make([] Vertex, index_count)
-        indices  := make([] i32,  len(vertices))
+        vertices := make([] Vertex, index_count, context.temp_allocator)
+        indices  := make([] i16,  len(vertices), context.temp_allocator)
         
         for index, it_index in model.indices {
             v := Vertex {
-                p = model.vertices[index]        * { 1, -1, 1 },
-                n = model.normals[index]         * { 1, -1, 1 },
+                p  = model.vertices[index]       * { 1, -1, 1 },
+                n  = model.normals[index]        * { 1, -1, 1 },
                 uv = model.texture_coords[index] * { 1, -1 },
             }
             
             vertices[it_index] = v
-            indices[it_index] = auto_cast it_index
+            indices[it_index]  = auto_cast it_index
         }
         
         v_buffer_size  = cast(vk.DeviceSize) len(vertices) * size_of(vertices[0])
@@ -284,13 +291,14 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    shader_data := struct {
+    Shader_Data :: struct {
         projection: m4,
         view:       m4,
         model:      [3] m4,
         light_pos:  [4] v4,
         selected:   u32,
-    } {
+    }
+    shader_data := Shader_Data {
         light_pos = { 0, -10, 10, 0 },
         selected  = 1,
     }
@@ -716,7 +724,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    cam_pos: v3
+    cam_pos := v3{ 0, 0, -6 }
     object_rotations: [3] v3
     
     last_time := sdl.GetTicks()
@@ -792,8 +800,8 @@ main :: proc () {
                 vk.DestroyImageView(device, info.image_view, nil)
                 vk.DestroySemaphore(device, info.render_completed, nil)
             }
-            
-            swapchain = vk_create_swapchain(device, image_format, &image_count, &swapchain_infos)
+             
+            vk_recreate_swapchain(device, image_format, &image_count, &swapchain_infos, swapchain)
             
             vk.DestroySwapchainKHR(device, swapchain_create_info.oldSwapchain, nil)
             
@@ -805,7 +813,7 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        shader_data.projection = la.matrix4_perspective(45 * RadPerDeg, cast(f32) window_size.x / cast(f32) window_size.y, 0.1, 32)
+        shader_data.projection = la.matrix4_perspective(45 * RadPerDeg, cast(f32) window_size.x / cast(f32) window_size.y, 0.1, 128)
         shader_data.view = la.matrix4_translate(cam_pos)
         for &model, i in shader_data.model {
             instance_pos := v3{cast(f32) (i - 1) * 3, 0, 0}
@@ -1018,18 +1026,10 @@ vk_create_depth_image :: proc (device: vk.Device, depth_format: vk.Format, windo
     return image, image_view, allocation
 }
 
-Swapchain_Info :: struct {
-    image: vk.Image,
-    image_view: vk.ImageView,
-    render_completed: vk.Semaphore,
-}
-
-vk_create_swapchain :: proc (device: vk.Device, image_format: vk.Format, image_count: ^u32, swapchain_infos: ^#soa [dynamic] Swapchain_Info) -> vk.SwapchainKHR {
-    result: vk.SwapchainKHR
-    
-    check(vk.GetSwapchainImagesKHR(device, result, image_count, nil))
+vk_recreate_swapchain :: proc (device: vk.Device, image_format: vk.Format, image_count: ^u32, swapchain_infos: ^#soa [dynamic] Swapchain_Info, swapchain: vk.SwapchainKHR) {
+    check(vk.GetSwapchainImagesKHR(device, swapchain, image_count, nil))
     resize(swapchain_infos, image_count^)
-    check(vk.GetSwapchainImagesKHR(device, result, image_count, swapchain_infos.image))
+    check(vk.GetSwapchainImagesKHR(device, swapchain, image_count, swapchain_infos.image))
     
     for &info in swapchain_infos {
         view_create_info := vk.ImageViewCreateInfo {
@@ -1044,8 +1044,6 @@ vk_create_swapchain :: proc (device: vk.Device, image_format: vk.Format, image_c
         
         info.render_completed = vk_create_semaphore(device)
     }
-    
-    return result
 }
 ////////////////////////////////////////////////
 
