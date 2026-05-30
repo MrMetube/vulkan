@@ -226,7 +226,6 @@ main :: proc () {
     depth_image: vk.Image
     depth_image_view: vk.ImageView
     depth_image_allocation: vma.Allocation
-    depth_image_create_info: vk.ImageCreateInfo
     {
         depth_format_list := [] vk.Format { .D32_SFLOAT_S8_UINT, .D24_UNORM_S8_UINT }
         for it in depth_format_list {
@@ -247,8 +246,9 @@ main :: proc () {
     v_buffer: vk.Buffer
     v_buffer_size: vk.DeviceSize
     index_count: u32
+    v_buffer_allocation: vma.Allocation
     {
-        models, materials, error := tobj.load_obj_filename("./tutorial/suzanne.obj", allocator = context.temp_allocator)
+        models, _, error := tobj.load_obj_filename("./tutorial/suzanne.obj", allocator = context.temp_allocator)
         assert(error == nil)
         model := models[0].mesh
         index_count = cast(u32) len(model.indices)
@@ -280,7 +280,6 @@ main :: proc () {
             usage = .Auto,
         }
         
-        v_buffer_allocation: vma.Allocation
         v_buffer_allocation_info: vma.Allocation_Info
         check(vma.create_buffer(allocator, buffer_create_info, v_buffer_alloc_create_info, &v_buffer, &v_buffer_allocation, &v_buffer_allocation_info))
         
@@ -424,10 +423,12 @@ main :: proc () {
             }
             
             check(vma.create_buffer(allocator, image_src_buffer_create_info, image_src_allocation_create_info, &image_src_buffer, &image_src_allocation, &image_src_allocation_info))
+            defer vma.destroy_buffer(allocator, image_src_buffer, image_src_allocation)
             
             mem.copy_non_overlapping(image_src_allocation_info.mapped_data, ktx_texture.pData, auto_cast ktx_texture.dataSize)
             
             fence_once := vk_create_fence(device)
+            defer vk.DestroyFence(device, fence_once, nil)
             
             cb_once: vk.CommandBuffer
             cb_once_allocate_info := vk.CommandBufferAllocateInfo {
@@ -463,8 +464,8 @@ main :: proc () {
             copy_regions := make([dynamic] vk.BufferImageCopy, context.temp_allocator)
             for level in 0..<ktx_texture.numLevels {
                 mip_offset: uint
-                // @todo(viktor): check that this is correct
-                ret := ktx.Texture2_GetImageOffset(cast(^ktx.Texture2) ktx_texture, level, 0, 0, &mip_offset)
+                // @todo(viktor): this is not correct, is the Texture1 binding missing. This causes the mipmaps to be wrong.
+                ktx.Texture2_GetImageOffset(cast(^ktx.Texture2) ktx_texture, level, 0, 0, &mip_offset)
                 append(&copy_regions, vk.BufferImageCopy{
                     bufferOffset = auto_cast mip_offset,
                     imageSubresource = { aspectMask = { .COLOR }, mipLevel = level, layerCount = 1 },
@@ -519,6 +520,7 @@ main :: proc () {
     
     descriptor_set_layout_textures: vk.DescriptorSetLayout
     descriptor_set_textures: vk.DescriptorSet
+    descriptor_pool: vk.DescriptorPool
     {
         desc_layout_textures_create_info := vk.DescriptorSetLayoutCreateInfo {
             sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -547,7 +549,6 @@ main :: proc () {
             },
         }
         
-        descriptor_pool: vk.DescriptorPool
         check(vk.CreateDescriptorPool(device, &desc_pool_create_info, nil, &descriptor_pool))
         
         variable_desc_count := cast(u32) len(textures)
@@ -586,10 +587,10 @@ main :: proc () {
             check(slang.createGlobalSession(slang.API_VERSION, &slang_global_session))
             
             slang_targets := [] slang.TargetDesc {
-                { format = .SPIRV, profile = slang_global_session->findProfile("spirv_1_4") }
+                { format = .SPIRV, profile = slang_global_session->findProfile("spirv_1_4") },
             }
             slang_options := [] slang.CompilerOptionEntry {
-                { name = .EmitSpirvDirectly, value = { kind = .Int, intValue0 = 1 } }
+                { name = .EmitSpirvDirectly, value = { kind = .Int, intValue0 = 1 } },
             }
             slang_session_desc := slang.SessionDesc {
                 targets = raw_data(slang_targets),
@@ -777,8 +778,6 @@ main :: proc () {
                     recreate_swapchain = true
                 }
             }
-            
-                
         }
         
         ////////////////////////////////////////////////
@@ -878,7 +877,7 @@ main :: proc () {
                 imageLayout = .ATTACHMENT_OPTIMAL,
                 loadOp = .CLEAR,
                 storeOp = .STORE,
-                clearValue = { color = { float32 = v4{0, 0, .2, 1 } }}
+                clearValue = { color = { float32 = v4{0, 0, .2, 1 } } },
             },
             pDepthAttachment  = &vk.RenderingAttachmentInfo {
                 sType = .RENDERING_ATTACHMENT_INFO,
@@ -974,8 +973,46 @@ main :: proc () {
         
         ////////////////////////////////////////////////
     }
+    
+	check(vk.DeviceWaitIdle(device))
+    
+    for frame in frames {
+		vk.DestroyFence(device, frame.fence, nil)
+		vk.DestroySemaphore(device, frame.image_aquired, nil)
+		vma.destroy_buffer(allocator, frame.shader_data_buffer.buffer, frame.shader_data_buffer.allocation)
+    }
+    
+    for info in swapchain_infos {
+        vk.DestroySemaphore(device, info.render_completed, nil)
+        vk.DestroyImageView(device, info.image_view, nil)
+	}
+    
+	vma.destroy_image(allocator, depth_image, depth_image_allocation)
+	vk.DestroyImageView(device, depth_image_view, nil)
+	vma.destroy_buffer(allocator, v_buffer, v_buffer_allocation)
+    
+    for texture in textures {
+        vk.DestroyImageView(device, texture.view, nil)
+        vk.DestroySampler(device, texture.sampler, nil)
+        vma.destroy_image(allocator, texture.image, texture.allocation)
+    }
+    
+	vk.DestroyDescriptorSetLayout(device, descriptor_set_layout_textures, nil)
+	vk.DestroyDescriptorPool(device, descriptor_pool, nil)
+	vk.DestroyPipelineLayout(device, pipeline_layout, nil)
+	vk.DestroyPipeline(device, pipeline, nil)
+	vk.DestroySwapchainKHR(device, swapchain, nil)
+	vk.DestroySurfaceKHR(instance, surface, nil)
+	vk.DestroyCommandPool(device, commandPool, nil)
+	vk.DestroyShaderModule(device, shader_module, nil)
+	vma.destroy_allocator(allocator)
+	vk.DestroyDevice(device, nil)
+	vk.DestroyInstance(instance, nil)
+    
+	sdl.DestroyWindow(window)
+	sdl.QuitSubSystem({.VIDEO})
+	sdl.Quit()
 }
-
 ////////////////////////////////////////////////
 
 vk_create_semaphore :: proc (device: vk.Device, flags: vk.SemaphoreCreateFlags = {}) -> vk.Semaphore {
