@@ -280,6 +280,8 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     swapchain_format := vk_get_swapchain_format(ips)
+    // @todo(viktor): move into swapchain structure along with its current size: uv2
+    // @todo(viktor): dont ever use window_size, use swapchain.size
     swapchain_infos: #soa [dynamic] Swapchain_Info
     
     swapchain := vk_create_swapchain(ips, device, window_size, swapchain_format, &swapchain_infos)
@@ -323,36 +325,30 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    v_buffer: vk.Buffer
-    v_buffer_size: vk.DeviceSize
+    // @todo(viktor): currently we allocate twice, we could probably also allocate once and bind both buffers to the same memory, but I am unsure if that would help with anything.
+    vertex_buffer: Buffer
+    index_buffer:  Buffer
     index_count: u32
-    v_buffer_allocation: vma.Allocation
     {
         model := load_obj_model("tutorial/suzanne.obj", context.temp_allocator)
         
         index_count   = model.index_count
-        v_buffer_size = model.v_buffer_size
+        vertex_buffer_size := model.v_buffer_size
         i_buffer_size := model.i_buffer_size
         vertices := model.vertices
         indices := model.indices
         
-        buffer_create_info := vk.BufferCreateInfo {
-            sType = .BUFFER_CREATE_INFO,
-            size  = v_buffer_size + i_buffer_size,
-            usage = { .VERTEX_BUFFER, .INDEX_BUFFER },
-        }
+        // @api the function could store a lookup of the allocation so that we only need to return the actual data: [] u8, making this even more similar to new/make.
+        init_gpu_allocator(ips, device)
         
-        v_buffer_alloc_create_info := vma.Allocation_Create_Info {
-            flags = { .Host_Access_Sequential_Write, .Host_Access_Allow_Transfer_Instead, .Mapped },
-            usage = .Auto,
-        }
+        // @todo(viktor): just make one really big(128mb?) buffer for vertices and indices, then pack all meshes into them
+        // @todo(viktor): vma had flags like { .Host_Access_Sequential_Write, .Host_Access_Allow_Transfer_Instead, .Mapped }
+        // is something like this needed here, or is { .HOST_VISIBLE, .HOST_COHERENT } enough? 
+        vertex_buffer = vk_create_buffer(vertex_buffer_size, { .VERTEX_BUFFER })
+        index_buffer  = vk_create_buffer(i_buffer_size,      { .INDEX_BUFFER  })
         
-        v_buffer_allocation_info: vma.Allocation_Info
-        check(vma.create_buffer(allocator, buffer_create_info, v_buffer_alloc_create_info, &v_buffer, &v_buffer_allocation, &v_buffer_allocation_info))
-        
-        gpu_memory := cast([^] u8) v_buffer_allocation_info.mapped_data
-        mem.copy_non_overlapping(gpu_memory[0:],             raw_data(vertices), auto_cast v_buffer_size)
-        mem.copy_non_overlapping(gpu_memory[v_buffer_size:], raw_data(indices),  auto_cast i_buffer_size)
+        copy(vertex_buffer.data, slice_to_bytes(vertices))
+        copy(index_buffer.data,  slice_to_bytes(indices))
     }
     
     ////////////////////////////////////////////////
@@ -787,10 +783,11 @@ main :: proc () {
         vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D { extent = vk_to_extent(window_size) })
         
         vk.CmdBindPipeline(cb, .GRAPHICS, pipeline)
-        v_offset: vk.DeviceSize
         vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline_layout, 0, 1, &descriptor_set_textures, 0, nil)
-        vk.CmdBindVertexBuffers(cb, 0, 1, &v_buffer, &v_offset)
-        vk.CmdBindIndexBuffer(cb, v_buffer, v_buffer_size, .UINT16)
+        
+        offsets_in_the_vertex_buffer: vk.DeviceSize // @cleanup
+        vk.CmdBindVertexBuffers(cb, 0, 1, &vertex_buffer.buffer, &offsets_in_the_vertex_buffer)
+        vk.CmdBindIndexBuffer(cb, index_buffer.buffer, 0, .UINT16)
         
         vk.CmdPushConstants(cb, pipeline_layout, { .VERTEX }, 0, size_of(vk.DeviceAddress), &frame.shader_data_buffer.deviceAddress)
         
@@ -875,7 +872,8 @@ main :: proc () {
     
 	vma.destroy_image(allocator, depth_image, depth_image_allocation)
 	vk.DestroyImageView(device, depth_image_view, nil)
-	vma.destroy_buffer(allocator, v_buffer, v_buffer_allocation)
+    vk_destroy_buffer(vertex_buffer)
+    vk_destroy_buffer(index_buffer)
     
     for texture in textures {
         vk.DestroyImageView(device, texture.view, nil)

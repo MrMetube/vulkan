@@ -341,6 +341,91 @@ vk_create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_
 
 ////////////////////////////////////////////////
 
+Buffer :: struct {
+    buffer: vk.Buffer,
+    memory: vk.DeviceMemory,
+    
+    data: [] u8,
+}
+
+@(thread_local) gpu_allocator_state: struct {
+    initialized: bool,
+    
+    device: vk.Device,
+    memory_properties: vk.PhysicalDeviceMemoryProperties
+}
+
+init_gpu_allocator :: proc (ips: IPS, device: vk.Device) {
+    memory_properties: vk.PhysicalDeviceMemoryProperties
+    vk.GetPhysicalDeviceMemoryProperties(ips.physical_device, &memory_properties)
+    
+    gpu_allocator_state = {
+        initialized = true,
+        device = device,
+        memory_properties = memory_properties,
+    }
+}
+
+vk_create_buffer :: proc (#any_int size: vk.DeviceSize, usage: vk.BufferUsageFlags) -> Buffer {
+    assert(gpu_allocator_state.initialized)
+    
+    device := gpu_allocator_state.device
+    memory_properties := gpu_allocator_state.memory_properties
+    
+    create_info := vk.BufferCreateInfo {
+        sType = .BUFFER_CREATE_INFO,
+        size  = size,
+        usage = usage,
+    }
+    
+    result: Buffer
+    check(vk.CreateBuffer(device, &create_info, nil, &result.buffer))
+    
+    requirements: vk.MemoryRequirements
+    vk.GetBufferMemoryRequirements(device, result.buffer, &requirements)
+    
+    flags := vk.MemoryPropertyFlags { .HOST_VISIBLE, .HOST_COHERENT }
+    
+    selected_memory_type_index: u32
+    select: {
+        set   := transmute(bit_set[0..=31; u32]) requirements.memoryTypeBits
+        types := memory_properties.memoryTypes[:memory_properties.memoryTypeCount]
+        for type, i in types {
+            if i in set && flags <= type.propertyFlags {
+                selected_memory_type_index = cast(u32) i
+                break select
+            }
+        }
+        
+        assert(false, "No compatible memory type found")
+    }
+    
+    allocate_info := vk.MemoryAllocateInfo {
+        sType = .MEMORY_ALLOCATE_INFO,
+        allocationSize = requirements.size,
+        memoryTypeIndex = selected_memory_type_index,
+    }
+    check(vk.AllocateMemory(device, &allocate_info, nil, &result.memory))
+    
+    check(vk.BindBufferMemory(device, result.buffer, result.memory, 0))
+    
+    raw := cast(^RawSlice) &result.data
+    raw.len = cast(int) size
+    vk.MapMemory(device, result.memory, 0, size, {}, &raw.data)
+    
+    return result
+}
+
+vk_destroy_buffer :: proc (buffer: Buffer) {
+    assert(gpu_allocator_state.initialized)
+    device := gpu_allocator_state.device
+    
+    vk.FreeMemory(device,    buffer.memory, nil)
+    vk.DestroyBuffer(device, buffer.buffer, nil)
+}
+
+////////////////////////////////////////////////
+
 vk_create_semaphore :: proc (device: vk.Device, flags: vk.SemaphoreCreateFlags = {}, timeline_initial_value: Maybe(u64) = nil) -> vk.Semaphore {
     create_info := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO, flags = flags }
     

@@ -6,6 +6,7 @@ import "core:time"
 
 monitored_files: map[string] time.Time
 
+// @todo(viktor): should this also just load the file for the caller?
 hotreload :: proc (filepath: string) -> bool {
     last_modification := monitored_files[filepath] or_else {}
     
