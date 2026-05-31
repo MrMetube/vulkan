@@ -58,11 +58,12 @@ load_obj_model :: proc (filepath: string, allocator: Allocator) -> Model {
     return result
 }
 
+////////////////////////////////////////////////
+
 Loaded_Texture :: struct {
     format: vk.Format,
     
-    data: pmm,
-    len:  int,
+    data: [] u8,
     
     width:  u32,
     height: u32,
@@ -71,25 +72,24 @@ Loaded_Texture :: struct {
     mip_offsets: [] uint, // len == mip_levels
 }
 
-load_ktx_texture :: proc (filename: string) -> Loaded_Texture {
-    data, err := os.read_entire_file(filename, context.temp_allocator); assert(err == nil)
+load_ktx_texture :: proc (filename: string, allocator: Allocator) -> Loaded_Texture {
+    data, err := os.read_entire_file(filename, allocator); assert(err == nil)
     
     texture: ^ktx.Texture
     check(ktx.Texture_CreateFromMemory(&data[0], len(data), { .LOAD_IMAGE_DATA }, &texture))
+    defer ktx.Texture1_Destroy(cast(^ktx.Texture1) texture)
     
     result: Loaded_Texture
-    result.ktx = texture
-    
     result.format = ktx.Texture_GetVkFormat(texture)
     
-    result.data = texture.pData
-    result.len = cast(int) texture.dataSize
+    result.data = make([] u8, texture.dataSize, allocator)
+    copy(result.data, texture.pData[:texture.dataSize])
     
     result.width  = texture.baseWidth
     result.height = texture.baseHeight
     
     result.mip_levels = texture.numLevels
-    result.mip_offsets = make([] uint, result.mip_levels, context.temp_allocator)
+    result.mip_offsets = make([] uint, result.mip_levels, allocator)
     
     for &offset, level in result.mip_offsets {
         // @todo(viktor): this is not correct, is the Texture1 binding missing. This causes the mipmaps to be wrong.
@@ -97,10 +97,6 @@ load_ktx_texture :: proc (filename: string) -> Loaded_Texture {
     }
     
     return result
-}
-
-unload_ktx_texture :: proc (texture: Loaded_Texture) {
-    ktx.Texture1_Destroy(cast(^ktx.Texture1) texture.ktx)
 }
 
 check_ktx :: proc (result: ktx.Result, loc := #caller_location) {

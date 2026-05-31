@@ -134,6 +134,49 @@ vk_create_2d_image_view :: proc (device: vk.Device, image: vk.Image, format: vk.
     return result
 }
 
+@(thread_local)
+transition_state: struct {
+    is_open:  bool,
+    barriers: [dynamic] vk.ImageMemoryBarrier2,
+}
+
+vk_begin_transition_images :: proc () {
+    assert(!transition_state.is_open)
+    
+    transition_state.is_open = true
+}
+
+vk_append_image_memory_barrier_2 :: proc (image: vk.Image, src_stage_mask: vk.PipelineStageFlags2, src_access_mask: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage_mask: vk.PipelineStageFlags2, dst_access_mask: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
+    assert(transition_state.is_open)
+    
+    append(&transition_state.barriers, vk.ImageMemoryBarrier2 {
+        sType = .IMAGE_MEMORY_BARRIER_2,
+        srcStageMask  = src_stage_mask,
+        srcAccessMask = src_access_mask,
+        dstStageMask  = dst_stage_mask,
+        dstAccessMask = dst_access_mask,
+        oldLayout = old_layout,
+        newLayout = new_layout,
+        image = image,
+        subresourceRange = { aspectMask = aspect_mask, levelCount = vk.REMAINING_MIP_LEVELS, layerCount = vk.REMAINING_ARRAY_LAYERS },
+    })
+}
+
+vk_end_transition_images :: proc (command_buffer: vk.CommandBuffer) {
+    assert(transition_state.is_open)
+    
+    vk.CmdPipelineBarrier2(command_buffer, &vk.DependencyInfo {
+        sType = .DEPENDENCY_INFO,
+        imageMemoryBarrierCount = auto_cast len(transition_state.barriers),
+        pImageMemoryBarriers    = raw_data(transition_state.barriers),
+    })
+    
+    clear(&transition_state.barriers)
+    transition_state.is_open = false
+}
+
+////////////////////////////////////////////////
+
 vk_create_semaphore :: proc (device: vk.Device, flags: vk.SemaphoreCreateFlags = {}, timeline_initial_value: Maybe(u64) = nil) -> vk.Semaphore {
     create_info := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO, flags = flags }
     

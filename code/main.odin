@@ -388,8 +388,7 @@ main :: proc () {
         for &texture, index in textures {
             filename := fmt.tprintf("./tutorial/suzanne%v.ktx", index)
             
-            loaded_texture := load_ktx_texture(filename)
-            defer unload_ktx_texture(loaded_texture)
+            loaded_texture := load_ktx_texture(filename, context.temp_allocator)
             
             image_create_info := vk.ImageCreateInfo {
                 sType = .IMAGE_CREATE_INFO,
@@ -415,7 +414,7 @@ main :: proc () {
             
             image_src_buffer_create_info := vk.BufferCreateInfo {
                 sType = .BUFFER_CREATE_INFO,
-                size  = auto_cast loaded_texture.len,
+                size  = auto_cast len(loaded_texture.data),
                 usage = { .TRANSFER_SRC },
             }
             
@@ -427,7 +426,7 @@ main :: proc () {
             check(vma.create_buffer(allocator, image_src_buffer_create_info, image_src_allocation_create_info, &image_src_buffer, &image_src_allocation, &image_src_allocation_info))
             defer vma.destroy_buffer(allocator, image_src_buffer, image_src_allocation)
             
-            mem.copy_non_overlapping(image_src_allocation_info.mapped_data, loaded_texture.data, loaded_texture.len)
+            mem.copy_non_overlapping(image_src_allocation_info.mapped_data, raw_data(loaded_texture.data), len(loaded_texture.data))
             
             fence_once := vk_create_fence(device)
             defer vk.DestroyFence(device, fence_once, nil)
@@ -446,22 +445,11 @@ main :: proc () {
             }
             check(vk.BeginCommandBuffer(cb_once, &cb_once_begin_info))
             
-            barrier_info := vk.DependencyInfo {
-                sType = .DEPENDENCY_INFO,
-                imageMemoryBarrierCount = 1,
-                pImageMemoryBarriers = &vk.ImageMemoryBarrier2 {
-                    sType = .IMAGE_MEMORY_BARRIER_2,
-                    srcStageMask  = {}, // @note(viktor): check if this is correct
-                    srcAccessMask = {},
-                    dstStageMask  = { .TRANSFER },
-                    dstAccessMask = { .TRANSFER_WRITE },
-                    oldLayout = .UNDEFINED,
-                    newLayout = .TRANSFER_DST_OPTIMAL,
-                    image = texture.image,
-                    subresourceRange = { aspectMask = { .COLOR }, levelCount = loaded_texture.mip_levels, layerCount = 1 },
-                },
-            }
-            vk.CmdPipelineBarrier2(cb_once, &barrier_info)// @compression transition image
+            
+            vk_begin_transition_images()
+                // @note(viktor): check if these src masks are correct
+                vk_append_image_memory_barrier_2(texture.image, {}, {}, .UNDEFINED, {.TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
+            vk_end_transition_images(cb_once)
             
             copy_regions := make([dynamic] vk.BufferImageCopy, context.temp_allocator)
             for level in 0..<loaded_texture.mip_levels {
@@ -476,18 +464,9 @@ main :: proc () {
             
             vk.CmdCopyBufferToImage(cb_once, image_src_buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
             
-            barrier_info.pImageMemoryBarriers = &vk.ImageMemoryBarrier2 {
-                sType = .IMAGE_MEMORY_BARRIER_2,
-                srcStageMask  = { .TRANSFER }, // @note(viktor): check if this is correct
-                srcAccessMask = { .TRANSFER_WRITE },
-                dstStageMask  = { .FRAGMENT_SHADER },
-                dstAccessMask = { .SHADER_READ },
-                oldLayout = .TRANSFER_DST_OPTIMAL,
-                newLayout = .READ_ONLY_OPTIMAL,
-                image = texture.image,
-                subresourceRange = { aspectMask = { .COLOR }, levelCount = loaded_texture.mip_levels, layerCount = 1 },
-            }
-            vk.CmdPipelineBarrier2(cb_once, &barrier_info) // @compression transition_image?
+            vk_begin_transition_images()
+                vk_append_image_memory_barrier_2(texture.image, {.TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
+            vk_end_transition_images(cb_once)
             
             check(vk.EndCommandBuffer(cb_once))
             
@@ -829,37 +808,10 @@ main :: proc () {
         }
         check(vk.BeginCommandBuffer(cb, &cb_begin_info))
         
-        output_barriers := [2] vk.ImageMemoryBarrier2 {
-            {
-                sType = .IMAGE_MEMORY_BARRIER_2,
-                srcStageMask = { .COLOR_ATTACHMENT_OUTPUT },
-                srcAccessMask = {},
-                dstStageMask = { .COLOR_ATTACHMENT_OUTPUT },
-                dstAccessMask = { .COLOR_ATTACHMENT_READ, . COLOR_ATTACHMENT_WRITE },
-                oldLayout = .UNDEFINED,
-                newLayout = .ATTACHMENT_OPTIMAL,
-                image = swapchain_info.image,
-                subresourceRange = { aspectMask = { .COLOR }, levelCount = 1, layerCount = 1 },
-            },
-            {
-                sType = .IMAGE_MEMORY_BARRIER_2,
-                srcStageMask = { .LATE_FRAGMENT_TESTS },
-                srcAccessMask = { .DEPTH_STENCIL_ATTACHMENT_WRITE },
-                dstStageMask = { .EARLY_FRAGMENT_TESTS },
-                dstAccessMask = { .DEPTH_STENCIL_ATTACHMENT_WRITE },
-                oldLayout = .UNDEFINED,
-                newLayout = .ATTACHMENT_OPTIMAL,
-                image = depth_image,
-                subresourceRange = { aspectMask = { .DEPTH, .STENCIL }, levelCount = 1, layerCount = 1 },
-            },
-        }
-        
-        barrier_dependency_info := vk.DependencyInfo {
-            sType = .DEPENDENCY_INFO,
-            imageMemoryBarrierCount = len(output_barriers),
-            pImageMemoryBarriers = &output_barriers[0],
-        }
-        vk.CmdPipelineBarrier2(cb, &barrier_dependency_info) // @compression transition image
+        vk_begin_transition_images()
+            vk_append_image_memory_barrier_2(swapchain_info.image, { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT }, { .COLOR_ATTACHMENT_READ, . COLOR_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL)
+            vk_append_image_memory_barrier_2(depth_image, { .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .UNDEFINED, { .EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, aspect_mask = { .DEPTH, .STENCIL })
+        vk_end_transition_images(cb)
         
         ////////////////////////////////////////////////
         
@@ -915,22 +867,9 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        barrier_present_dependency_info := vk.DependencyInfo {
-            sType = .DEPENDENCY_INFO,
-            imageMemoryBarrierCount = 1,
-            pImageMemoryBarriers = &vk.ImageMemoryBarrier2 {
-                sType = .IMAGE_MEMORY_BARRIER_2,
-                srcStageMask  = { .COLOR_ATTACHMENT_OUTPUT },
-                srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
-                dstStageMask  = {},
-                dstAccessMask = {},
-                oldLayout = .ATTACHMENT_OPTIMAL,
-                newLayout = .PRESENT_SRC_KHR,
-                image = swapchain_info.image,
-                subresourceRange = { aspectMask = { .COLOR }, levelCount = 1, layerCount = 1 },
-            },
-        }
-        vk.CmdPipelineBarrier2(cb, &barrier_present_dependency_info) // @compression transition image
+        vk_begin_transition_images()
+            vk_append_image_memory_barrier_2(swapchain_info.image, { .COLOR_ATTACHMENT_OUTPUT }, { .COLOR_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, {}, {}, .PRESENT_SRC_KHR)
+        vk_end_transition_images(cb)
         
         vk.EndCommandBuffer(cb)
         
