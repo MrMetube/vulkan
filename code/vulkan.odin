@@ -1,7 +1,10 @@
+#+vet explicit-allocators
 package main
 
 import "base:runtime"
 import "core:fmt"
+import "core:os"
+
 import vk "vendor:vulkan"
 import "../libs/vma"
 
@@ -173,6 +176,167 @@ vk_end_transition_images :: proc (command_buffer: vk.CommandBuffer) {
     
     clear(&transition_state.barriers)
     transition_state.is_open = false
+}
+
+////////////////////////////////////////////////
+
+vk_create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_format: vk.Format, descriptor_set_layout_textures: vk.DescriptorSetLayout, old_pipeline: vk.Pipeline = 0, old_pipeline_layout: vk.PipelineLayout = 0) ->  (vk.Pipeline, vk.PipelineLayout) {
+    // @study(viktor): is a pipeline cache still a good optimization?
+    pipeline: vk.Pipeline
+    pipeline_layout: vk.PipelineLayout
+    
+    successful: bool
+    
+    shader_source := "tutorial/shader.slang"
+    shader_output := "tutorial/shader.spirv"
+    
+    shader: if hotreload(shader_source) {
+        cmd: Cmd
+        cmd.allocator = context.temp_allocator
+        append(&cmd, "slangc", "-target", "spirv", "-o", shader_output, shader_source)
+        
+        // @todo(viktor): start and test later if its finished?
+        stdout: string
+        stderr: string
+        if !run_command(&cmd, or_exit = false, stdout = &stdout, stderr = &stderr) {
+            // @logging
+            break shader
+        }
+        
+        if stdout != "" {
+            fmt.printfln("Hotreload output: %v", stdout)
+        }
+        
+        if stderr != "" {
+            fmt.printfln("Hotreload error: %v", stderr)
+            break shader
+        }
+        
+        ////////////////////////////////////////////////
+        
+        shader_bytes, err := os.read_entire_file(shader_output, context.temp_allocator)
+        assert(err == nil)
+        
+        shader_module_create_info := vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO,
+            codeSize = len(shader_bytes),
+            pCode = cast(^u32) &shader_bytes[0],
+        }
+        
+        descriptor_set_layout_textures := descriptor_set_layout_textures
+        pipeline_layout_create_info := vk.PipelineLayoutCreateInfo {
+            sType = .PIPELINE_LAYOUT_CREATE_INFO,
+            setLayoutCount = 1,
+            pSetLayouts = &descriptor_set_layout_textures,
+            pushConstantRangeCount = 1,
+            pPushConstantRanges = &vk.PushConstantRange {
+                stageFlags = { .VERTEX },
+                size = size_of(vk.DeviceAddress),
+            },
+        }
+        
+        check(vk.CreatePipelineLayout(device, &pipeline_layout_create_info, nil, &pipeline_layout))
+        
+        vertex_attributes := [] vk.VertexInputAttributeDescription {
+            { location = 0, binding = 0, format = .R32G32B32_SFLOAT },
+            { location = 1, binding = 0, format = .R32G32B32_SFLOAT, offset = auto_cast offset_of(Vertex, n)  },
+            { location = 2, binding = 0, format = .R32G32_SFLOAT,    offset = auto_cast offset_of(Vertex, uv) },
+        }
+        
+        shader_stages := [] vk.PipelineShaderStageCreateInfo {
+            { sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, stage = { .VERTEX },   pName = "main", pNext = &shader_module_create_info },
+            { sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, stage = { .FRAGMENT }, pName = "main", pNext = &shader_module_create_info },
+        }
+        
+        dynamic_states := [] vk.DynamicState { .VIEWPORT, .SCISSOR }
+        
+        swapchain_format := swapchain_format
+        
+        pipeline_create_info := vk.GraphicsPipelineCreateInfo {
+            sType = .GRAPHICS_PIPELINE_CREATE_INFO,
+            pNext = &vk.PipelineRenderingCreateInfo {
+                sType = .PIPELINE_RENDERING_CREATE_INFO,
+                colorAttachmentCount = 1,
+                pColorAttachmentFormats = &swapchain_format,
+                depthAttachmentFormat = depth_format,
+            },
+            stageCount = auto_cast len(shader_stages),
+            pStages = raw_data(shader_stages),
+            pVertexInputState = &vk.PipelineVertexInputStateCreateInfo {
+                sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+                vertexBindingDescriptionCount = 1,
+                pVertexBindingDescriptions = &vk.VertexInputBindingDescription {
+                    binding = 0,
+                    stride = size_of(Vertex),
+                    inputRate = .VERTEX,
+                },
+                vertexAttributeDescriptionCount = auto_cast len(vertex_attributes),
+                pVertexAttributeDescriptions = raw_data(vertex_attributes),
+            },
+            pInputAssemblyState = &vk.PipelineInputAssemblyStateCreateInfo {
+                sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+                topology = .TRIANGLE_LIST,
+            },
+            pViewportState = &vk.PipelineViewportStateCreateInfo {
+                sType = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+                viewportCount = 1,
+                scissorCount  = 1,
+            },
+            pRasterizationState = &vk.PipelineRasterizationStateCreateInfo {
+                sType = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+                cullMode = { .BACK },
+                lineWidth = 1,
+            },
+            pMultisampleState = &vk.PipelineMultisampleStateCreateInfo {
+                sType = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+                rasterizationSamples = { ._1 },
+            },
+            pDepthStencilState = &vk.PipelineDepthStencilStateCreateInfo {
+                sType = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+                depthTestEnable  = true,
+                depthWriteEnable = true,
+                depthCompareOp   = .LESS_OR_EQUAL,
+            },
+            pColorBlendState = &vk.PipelineColorBlendStateCreateInfo {
+                sType = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+                attachmentCount = 1,
+                pAttachments = &vk.PipelineColorBlendAttachmentState {
+                    colorWriteMask = { .R, .G, .B, .A },
+                },
+            },
+            pDynamicState = &vk.PipelineDynamicStateCreateInfo {
+                sType = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+                dynamicStateCount = auto_cast len(dynamic_states),
+                pDynamicStates    = raw_data(dynamic_states),
+            },
+            layout = pipeline_layout,
+        }
+        
+        check(vk.CreateGraphicsPipelines(device, 0, 1,&pipeline_create_info, nil, &pipeline))
+        
+        if old_pipeline_layout != 0 {
+            vk.DestroyPipelineLayout(device, old_pipeline_layout, nil)
+        }
+        
+        if old_pipeline != 0 {
+            vk.DestroyPipeline(device, old_pipeline, nil)
+        }
+        
+        successful = true
+    } else {
+        // @cleanup did not change file
+        return old_pipeline, old_pipeline_layout
+    }
+    
+    if !successful {
+        if old_pipeline == 0 || old_pipeline_layout == 0 {
+            assert(false, "Failed to create graphics pipeline")
+        }
+        pipeline        = old_pipeline
+        pipeline_layout = old_pipeline_layout
+    }
+    
+    return pipeline, pipeline_layout
 }
 
 ////////////////////////////////////////////////

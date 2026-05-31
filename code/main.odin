@@ -1,3 +1,4 @@
+#+vet explicit-allocators
 package main
 
 import "base:intrinsics"
@@ -130,13 +131,59 @@ main :: proc () {
             check(vk.EnumeratePhysicalDevices(ips.instance, &device_count, raw_data(physical_devices)))
         }
         
-        // @todo(viktor): check all devices for the discrete gpu, otherwise fallback to the first listed gpu
-        ips.physical_device = physical_devices[0]
-        
         {
+            discrete: vk.PhysicalDevice
+            fallback: vk.PhysicalDevice
+            
+            vk_get_family_index_with_graphics :: proc (device: vk.PhysicalDevice) -> u32 {
+                queue_family_count: u32
+                vk.GetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, nil)
+                queue_family_properties := make([] vk.QueueFamilyProperties, queue_family_count, context.temp_allocator)
+                vk.GetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, raw_data(queue_family_properties))
+                
+                queue_family_index := vk.QUEUE_FAMILY_IGNORED
+                for props, index in queue_family_properties {
+                    if .GRAPHICS in props.queueFlags {
+                        queue_family_index = auto_cast index
+                        break
+                    }
+                }
+                
+                return queue_family_index
+            }
+            
+            for device in physical_devices {
+                family_index := vk_get_family_index_with_graphics(device)
+                
+                if family_index == vk.QUEUE_FAMILY_IGNORED {
+                    continue
+                }
+                
+                if !sdl.Vulkan_GetPresentationSupport(ips.instance, device, family_index) {
+                    continue
+                }
+                
+                device_properties := vk.PhysicalDeviceProperties2 { sType = .PHYSICAL_DEVICE_PROPERTIES_2 }
+                vk.GetPhysicalDeviceProperties2(device, &device_properties)
+                
+                if discrete == nil && device_properties.properties.deviceType == .DISCRETE_GPU {
+                    discrete = device
+                }
+                
+                if fallback == nil {
+                    fallback = device
+                }
+            }
+            
+            assert(fallback != nil)
+            
+            result := discrete != nil ? discrete : fallback
+        
             device_properties := vk.PhysicalDeviceProperties2 { sType = .PHYSICAL_DEVICE_PROPERTIES_2 }
-            vk.GetPhysicalDeviceProperties2(ips.physical_device, &device_properties)
+            vk.GetPhysicalDeviceProperties2(result, &device_properties)
             fmt.printfln("Selected device: %v", cast(cstring) &device_properties.properties.deviceName[0])
+            
+            ips.physical_device = result
         }
     }
     
@@ -151,21 +198,6 @@ main :: proc () {
     device: vk.Device
     queue_family_index: u32
     {
-        queue_family_count: u32
-        vk.GetPhysicalDeviceQueueFamilyProperties(ips.physical_device, &queue_family_count, nil)
-        queue_family_properties := make([] vk.QueueFamilyProperties, queue_family_count)
-        vk.GetPhysicalDeviceQueueFamilyProperties(ips.physical_device, &queue_family_count, raw_data(queue_family_properties))
-        
-        for props, index in queue_family_properties {
-            if .GRAPHICS in props.queueFlags {
-                queue_family_index = auto_cast index
-            }
-        }
-        
-        if false {
-            check(sdl.Vulkan_GetPresentationSupport(ips.instance, ips.physical_device, queue_family_index))
-        }
-        
         queue_family_priority := [] f32 { 1 }
         
         if false {
@@ -296,7 +328,7 @@ main :: proc () {
     index_count: u32
     v_buffer_allocation: vma.Allocation
     {
-        model := load_obj_model("./tutorial/suzanne.obj", context.temp_allocator)
+        model := load_obj_model("tutorial/suzanne.obj", context.temp_allocator)
         
         index_count   = model.index_count
         v_buffer_size = model.v_buffer_size
@@ -386,7 +418,7 @@ main :: proc () {
     
     {
         for &texture, index in textures {
-            filename := fmt.tprintf("./tutorial/suzanne%v.ktx", index)
+            filename := fmt.tprintf("tutorial/suzanne%v.ktx", index)
             
             loaded_texture := load_ktx_texture(filename, context.temp_allocator)
             
@@ -560,109 +592,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    // @study(viktor): is a pipeline cache still a good optimization?
-    pipeline: vk.Pipeline
-    pipeline_layout: vk.PipelineLayout
-    {
-        // @todo(viktor): recompile and hot reload shaders if files are changed
-        // slangc -target spirv -o ./tutorial/shader.spirv ./tutorial/shader.slang
-        shader_bytes, err := os.read_entire_file("./tutorial/shader.spirv", context.temp_allocator)
-        assert(err == nil)
-        
-        shader_module_create_info := vk.ShaderModuleCreateInfo {
-            sType = .SHADER_MODULE_CREATE_INFO,
-            codeSize = len(shader_bytes),
-            pCode = cast(^u32) &shader_bytes[0],
-        }
-        
-        pipeline_layout_create_info := vk.PipelineLayoutCreateInfo {
-            sType = .PIPELINE_LAYOUT_CREATE_INFO,
-            setLayoutCount = 1,
-            pSetLayouts = &descriptor_set_layout_textures,
-            pushConstantRangeCount = 1,
-            pPushConstantRanges = &vk.PushConstantRange {
-                stageFlags = { .VERTEX },
-                size = size_of(vk.DeviceAddress),
-            },
-        }
-        
-        check(vk.CreatePipelineLayout(device, &pipeline_layout_create_info, nil, &pipeline_layout))
-        
-        vertex_attributes := [] vk.VertexInputAttributeDescription {
-            { location = 0, binding = 0, format = .R32G32B32_SFLOAT },
-            { location = 1, binding = 0, format = .R32G32B32_SFLOAT, offset = auto_cast offset_of(Vertex, n)  },
-            { location = 2, binding = 0, format = .R32G32_SFLOAT,    offset = auto_cast offset_of(Vertex, uv) },
-        }
-        
-        shader_stages := [] vk.PipelineShaderStageCreateInfo {
-            { sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, stage = { .VERTEX },   pName = "main", pNext = &shader_module_create_info },
-            { sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, stage = { .FRAGMENT }, pName = "main", pNext = &shader_module_create_info },
-        }
-        
-        dynamic_states := [] vk.DynamicState { .VIEWPORT, .SCISSOR }
-        
-        pipeline_create_info := vk.GraphicsPipelineCreateInfo {
-            sType = .GRAPHICS_PIPELINE_CREATE_INFO,
-            pNext = &vk.PipelineRenderingCreateInfo {
-                sType = .PIPELINE_RENDERING_CREATE_INFO,
-                colorAttachmentCount = 1,
-                pColorAttachmentFormats = &swapchain_format,
-                depthAttachmentFormat = depth_format,
-            },
-            stageCount = auto_cast len(shader_stages),
-            pStages = raw_data(shader_stages),
-            pVertexInputState = &vk.PipelineVertexInputStateCreateInfo {
-                sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-                vertexBindingDescriptionCount = 1,
-                pVertexBindingDescriptions = &vk.VertexInputBindingDescription {
-                    binding = 0,
-                    stride = size_of(Vertex),
-                    inputRate = .VERTEX,
-                },
-                vertexAttributeDescriptionCount = auto_cast len(vertex_attributes),
-                pVertexAttributeDescriptions = raw_data(vertex_attributes),
-            },
-            pInputAssemblyState = &vk.PipelineInputAssemblyStateCreateInfo {
-                sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-                topology = .TRIANGLE_LIST,
-            },
-            pViewportState = &vk.PipelineViewportStateCreateInfo {
-                sType = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-                viewportCount = 1,
-                scissorCount  = 1,
-            },
-            pRasterizationState = &vk.PipelineRasterizationStateCreateInfo {
-                sType = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-                cullMode = { .BACK },
-                lineWidth = 1,
-            },
-            pMultisampleState = &vk.PipelineMultisampleStateCreateInfo {
-                sType = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-                rasterizationSamples = { ._1 },
-            },
-            pDepthStencilState = &vk.PipelineDepthStencilStateCreateInfo {
-                sType = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-                depthTestEnable  = true,
-                depthWriteEnable = true,
-                depthCompareOp   = .LESS_OR_EQUAL,
-            },
-            pColorBlendState = &vk.PipelineColorBlendStateCreateInfo {
-                sType = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-                attachmentCount = 1,
-                pAttachments = &vk.PipelineColorBlendAttachmentState {
-                    colorWriteMask = { .R, .G, .B, .A },
-                },
-            },
-            pDynamicState = &vk.PipelineDynamicStateCreateInfo {
-                sType = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-                dynamicStateCount = auto_cast len(dynamic_states),
-                pDynamicStates    = raw_data(dynamic_states),
-            },
-            layout = pipeline_layout,
-        }
-        
-        check(vk.CreateGraphicsPipelines(device, 0, 1,&pipeline_create_info, nil, &pipeline))
-    }
+    pipeline, pipeline_layout := vk_create_graphics_pipeline(device, swapchain_format, depth_format, descriptor_set_layout_textures)
     
     ////////////////////////////////////////////////
     
@@ -759,6 +689,9 @@ main :: proc () {
             vk.DestroyImageView(device, depth_image_view, nil)
             depth_image, depth_image_view, depth_image_allocation = vk_create_depth_image(device, depth_format, window_size, allocator)
         }
+        
+        pipeline, pipeline_layout = vk_create_graphics_pipeline(device, swapchain_format, depth_format, descriptor_set_layout_textures, pipeline, pipeline_layout)
+        
         
         ////////////////////////////////////////////////
         
@@ -952,8 +885,10 @@ main :: proc () {
     
 	vk.DestroyDescriptorSetLayout(device, descriptor_set_layout_textures, nil)
 	vk.DestroyDescriptorPool(device, descriptor_pool, nil)
+    // @compression with create_graphics_pipeline
 	vk.DestroyPipelineLayout(device, pipeline_layout, nil)
 	vk.DestroyPipeline(device, pipeline, nil)
+    
 	vk.DestroyCommandPool(device, command_pool, nil)
 	vma.destroy_allocator(allocator)
 	vk.DestroyDevice(device, nil)
