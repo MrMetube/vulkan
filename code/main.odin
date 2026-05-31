@@ -21,9 +21,7 @@ import vk "vendor:vulkan"
 Frame_Data :: struct {
     shader_data_buffer: Shader_Data_Buffer,
     command_buffer:     vk.CommandBuffer,
-    // @note(viktor): constref uses a command_pool per frame, which reset at the start of the frame
-    
-    image_aquired:   vk.Semaphore,
+    image_aquired:      vk.Semaphore,
 }
 
 Shader_Data :: struct {
@@ -46,6 +44,19 @@ Swapchain_Info :: struct {
     image: vk.Image,
     image_view: vk.ImageView,
     render_completed: vk.Semaphore,
+}
+
+Texture :: struct {
+	image:      vk.Image,
+	view:       vk.ImageView,
+	allocation: vma.Allocation,
+	sampler:    vk.Sampler,
+}
+
+Vertex :: struct {
+    p:  v3,
+    n:  v3,
+    uv: v2,
 }
 
 recreate_swapchain: bool
@@ -189,15 +200,15 @@ main :: proc () {
         device_create_info := vk.DeviceCreateInfo {
             sType = .DEVICE_CREATE_INFO,
             
-            // @todo(viktor): is this still needed?
             pEnabledFeatures = &vk.PhysicalDeviceFeatures {
-                samplerAnisotropy = true,
+                samplerAnisotropy = true, // @note(viktor): since 1.4 this is required
             },
             pNext = &vk.PhysicalDeviceVulkan14Features {
                 sType = .PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
                 
                 // @todo(viktor): check if this would help the texture upload hostImageCopy
-                
+                // hostImageCopy = true,
+                // @note(viktor): scalarBlockLayout - struct members are padded like c/c++ would, I assume it make simple memcopy possible
                 pNext = &vk.PhysicalDeviceVulkan13Features {
                     sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
                     
@@ -242,41 +253,15 @@ main :: proc () {
     surface: vk.SurfaceKHR
     check(sdl.Vulkan_CreateSurface(window, instance, nil, &surface))
     
-    window_size: iv2
-    sdl.GetWindowSize(window, &window_size.x, &window_size.y)
+    window_size := sdl_get_window_size(window)
     
     ////////////////////////////////////////////////
     
-    swapchain: vk.SwapchainKHR
-    swapchain_create_info: vk.SwapchainCreateInfoKHR
-    surface_capabilities: vk.SurfaceCapabilitiesKHR
     swapchain_format := vk.Format.B8G8R8A8_SRGB
-    {
-        check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &surface_capabilities))
-        
-        swapchain_extent := surface_capabilities.currentExtent
-        if surface_capabilities.currentExtent.width == 0xFFFFFFFF {
-            swapchain_extent = { width = cast(u32) window_size.x, height = cast(u32) window_size.y }
-        }
-        
-        swapchain_create_info = vk.SwapchainCreateInfoKHR {
-            sType = .SWAPCHAIN_CREATE_INFO_KHR,
-            surface          = surface,
-            minImageCount    = surface_capabilities.minImageCount,
-            imageFormat      = swapchain_format,
-            imageColorSpace  = .SRGB_NONLINEAR,
-            imageExtent      = swapchain_extent,
-            imageArrayLayers = 1,
-            imageUsage       = { .COLOR_ATTACHMENT },
-            preTransform     = { .IDENTITY },
-            compositeAlpha   = { .OPAQUE },
-            presentMode      = .FIFO,
-        }
-        check(vk.CreateSwapchainKHR(device, &swapchain_create_info, nil, &swapchain))
-    }
+    swapchain := vk_create_swapchain(physical_device, surface, device, window_size, swapchain_format)
     
     swapchain_infos: #soa [dynamic] Swapchain_Info
-    image_count: u32
+    image_count: u32 // @cleanup this should be len(swapchain_infos)
     vk_recreate_swapchain(device, swapchain_format, &image_count, &swapchain_infos, swapchain)
     
     ////////////////////////////////////////////////
@@ -313,7 +298,7 @@ main :: proc () {
             }
         }
         
-        depth_image, depth_image_view, depth_image_allocation = vk_create_depth_image(device, depth_format, cast(uv2) window_size, allocator)
+        depth_image, depth_image_view, depth_image_allocation = vk_create_depth_image(device, depth_format, window_size, allocator)
     }
     
     ////////////////////////////////////////////////
@@ -449,14 +434,7 @@ main :: proc () {
             image_allocation_create_info := vma.Allocation_Create_Info { usage = .Auto }
             check(vma.create_image(allocator, image_create_info, image_allocation_create_info, &texture.image, &texture.allocation, nil))
             
-            view_create_info := vk.ImageViewCreateInfo {
-                sType = .IMAGE_VIEW_CREATE_INFO,
-                image = texture.image,
-                viewType = .D2,
-                format = image_create_info.format,
-                subresourceRange = { aspectMask = { .COLOR }, levelCount = ktx_texture.numLevels, layerCount = 1 },
-            }
-            check(vk.CreateImageView(device, &view_create_info, nil, &texture.view))
+            texture.view = vk_create_2d_image_view(device, texture.image, image_create_info.format, { .COLOR }, ktx_texture.numLevels)
             
             image_src_buffer: vk.Buffer
             image_src_allocation: vma.Allocation
@@ -500,9 +478,9 @@ main :: proc () {
                 imageMemoryBarrierCount = 1,
                 pImageMemoryBarriers = &vk.ImageMemoryBarrier2 {
                     sType = .IMAGE_MEMORY_BARRIER_2,
-                    srcStageMask = {}, // @note(viktor): check if this is correct
+                    srcStageMask  = {}, // @note(viktor): check if this is correct
                     srcAccessMask = {},
-                    dstStageMask = { .TRANSFER },
+                    dstStageMask  = { .TRANSFER },
                     dstAccessMask = { .TRANSFER_WRITE },
                     oldLayout = .UNDEFINED,
                     newLayout = .TRANSFER_DST_OPTIMAL,
@@ -510,7 +488,7 @@ main :: proc () {
                     subresourceRange = { aspectMask = { .COLOR }, levelCount = ktx_texture.numLevels, layerCount = 1 },
                 },
             }
-            vk.CmdPipelineBarrier2(cb_once, &barrier_info)
+            vk.CmdPipelineBarrier2(cb_once, &barrier_info)// @compression transition image
             
             copy_regions := make([dynamic] vk.BufferImageCopy, context.temp_allocator)
             for level in 0..<ktx_texture.numLevels {
@@ -528,16 +506,16 @@ main :: proc () {
             
             barrier_info.pImageMemoryBarriers = &vk.ImageMemoryBarrier2 {
                 sType = .IMAGE_MEMORY_BARRIER_2,
-                srcStageMask = { .TRANSFER }, // @note(viktor): check if this is correct
+                srcStageMask  = { .TRANSFER }, // @note(viktor): check if this is correct
                 srcAccessMask = { .TRANSFER_WRITE },
-                dstStageMask = { .FRAGMENT_SHADER },
+                dstStageMask  = { .FRAGMENT_SHADER },
                 dstAccessMask = { .SHADER_READ },
                 oldLayout = .TRANSFER_DST_OPTIMAL,
                 newLayout = .READ_ONLY_OPTIMAL,
                 image = texture.image,
                 subresourceRange = { aspectMask = { .COLOR }, levelCount = ktx_texture.numLevels, layerCount = 1 },
             }
-            vk.CmdPipelineBarrier2(cb_once, &barrier_info)
+            vk.CmdPipelineBarrier2(cb_once, &barrier_info) // @compression transition_image?
             
             check(vk.EndCommandBuffer(cb_once))
             
@@ -631,6 +609,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
+    // @todo(viktor): deprecated, chain vkshadermodulecreateinfo into the pipelineshaderstagecreateinfo
     shader_module: vk.ShaderModule
     {
         when false {
@@ -777,19 +756,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    // @todo(viktor): this should replace most fences
-    timeline_semaphore: vk.Semaphore
-    {
-        semaphore_create_info := vk.SemaphoreCreateInfo {
-            sType = .SEMAPHORE_CREATE_INFO,
-            pNext = &vk.SemaphoreTypeCreateInfo {
-                sType = .SEMAPHORE_TYPE_CREATE_INFO,
-                semaphoreType = .TIMELINE,
-                initialValue = MaxFramesInFlight,
-            },
-        }
-        check(vk.CreateSemaphore(device, &semaphore_create_info, nil, &timeline_semaphore))
-    }
+    timeline_semaphore := vk_create_semaphore(device, timeline_initial_value = MaxFramesInFlight)
     
     ////////////////////////////////////////////////
     
@@ -875,27 +842,46 @@ main :: proc () {
             
             vk.DeviceWaitIdle(device)
             
-            sdl.GetWindowSize(window, &window_size.x, &window_size.y)
+            old_infos := make_shallow_copy(swapchain_infos, context.temp_allocator)
+            old_swapchain := swapchain
             
+            window_size = sdl_get_window_size(window)
+            
+            surface_capabilities: vk.SurfaceCapabilitiesKHR
             check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &surface_capabilities))
             
-            swapchain_create_info.oldSwapchain = swapchain
-            swapchain_create_info.imageExtent = { width = cast(u32) window_size.x, height = cast(u32) window_size.y }
-            check(vk.CreateSwapchainKHR(device, &swapchain_create_info, nil, &swapchain))
+            swapchain_extent := surface_capabilities.currentExtent
+            if surface_capabilities.currentExtent.width == 0xFFFFFFFF {
+                swapchain_extent = vk_to_extent(window_size)
+            }
+            
+            swapchain_create_info := vk.SwapchainCreateInfoKHR {
+                sType = .SWAPCHAIN_CREATE_INFO_KHR,
+                surface          = surface,
+                minImageCount    = surface_capabilities.minImageCount,
+                imageFormat      = swapchain_format,
+                imageColorSpace  = .SRGB_NONLINEAR,
+                imageExtent      = swapchain_extent,
+                imageArrayLayers = 1,
+                imageUsage       = { .COLOR_ATTACHMENT },
+                preTransform     = { .IDENTITY },
+                compositeAlpha   = { .OPAQUE },
+                presentMode      = .FIFO,
+            }
+            swapchain_create_info.oldSwapchain = old_swapchain
+            
+            check(vk.CreateSwapchainKHR(device, &swapchain_create_info, nil, &swapchain)) // @compression this and the original swapchain creation.
+            vk_recreate_swapchain(device, swapchain_format, &image_count, &swapchain_infos, swapchain)
             
             for &info in swapchain_infos {
                 vk.DestroyImageView(device, info.image_view, nil)
                 vk.DestroySemaphore(device, info.render_completed, nil)
             }
-             
-            vk_recreate_swapchain(device, swapchain_format, &image_count, &swapchain_infos, swapchain)
-            
-            vk.DestroySwapchainKHR(device, swapchain_create_info.oldSwapchain, nil)
+            vk.DestroySwapchainKHR(device, old_swapchain, nil) // @compression with cleanup/shutdown
             
             vma.destroy_image(allocator, depth_image, depth_image_allocation)
             vk.DestroyImageView(device, depth_image_view, nil)
-            
-            depth_image, depth_image_view, depth_image_allocation = vk_create_depth_image(device, depth_format, cast(uv2) window_size, allocator)
+            depth_image, depth_image_view, depth_image_allocation = vk_create_depth_image(device, depth_format, window_size, allocator)
         }
         
         ////////////////////////////////////////////////
@@ -937,7 +923,6 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        // vk.ResetCommandPool(device, command_pool, {})
         cb := frame.command_buffer
         check(vk.ResetCommandBuffer(cb, {}))
         
@@ -977,13 +962,13 @@ main :: proc () {
             imageMemoryBarrierCount = len(output_barriers),
             pImageMemoryBarriers = &output_barriers[0],
         }
-        vk.CmdPipelineBarrier2(cb, &barrier_dependency_info)
+        vk.CmdPipelineBarrier2(cb, &barrier_dependency_info) // @compression transition image
         
         ////////////////////////////////////////////////
         
         rendering_info := vk.RenderingInfo {
             sType = .RENDERING_INFO, 
-            renderArea = { extent = { width = cast(u32) window_size.x, height = cast(u32) window_size.y } },
+            renderArea = { extent = vk_to_extent(window_size) },
             layerCount = 1,
             colorAttachmentCount = 1,
             pColorAttachments = &vk.RenderingAttachmentInfo {
@@ -1017,7 +1002,7 @@ main :: proc () {
         
         vk.CmdSetViewport(cb, 0, 1, &viewport)
         
-        scissor := vk.Rect2D { extent = { width = cast(u32) window_size.x, height = cast(u32) window_size.y } }
+        scissor := vk.Rect2D { extent = vk_to_extent(window_size) }
         vk.CmdSetScissor(cb, 0, 1, &scissor)
         
         vk.CmdBindPipeline(cb, .GRAPHICS, pipeline)
@@ -1034,24 +1019,22 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        barrier_present := vk.ImageMemoryBarrier2 {
-            sType = .IMAGE_MEMORY_BARRIER_2,
-            srcStageMask  = { .COLOR_ATTACHMENT_OUTPUT },
-            srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
-            dstStageMask  = {},
-            dstAccessMask = {},
-            oldLayout = .ATTACHMENT_OPTIMAL,
-            newLayout = .PRESENT_SRC_KHR,
-            image = swapchain_info.image,
-            subresourceRange = { aspectMask = { .COLOR }, levelCount = 1, layerCount = 1 },
-        }
-        
         barrier_present_dependency_info := vk.DependencyInfo {
             sType = .DEPENDENCY_INFO,
             imageMemoryBarrierCount = 1,
-            pImageMemoryBarriers = &barrier_present,
+            pImageMemoryBarriers = &vk.ImageMemoryBarrier2 {
+                sType = .IMAGE_MEMORY_BARRIER_2,
+                srcStageMask  = { .COLOR_ATTACHMENT_OUTPUT },
+                srcAccessMask = { .COLOR_ATTACHMENT_WRITE },
+                dstStageMask  = {},
+                dstAccessMask = {},
+                oldLayout = .ATTACHMENT_OPTIMAL,
+                newLayout = .PRESENT_SRC_KHR,
+                image = swapchain_info.image,
+                subresourceRange = { aspectMask = { .COLOR }, levelCount = 1, layerCount = 1 },
+            },
         }
-        vk.CmdPipelineBarrier2(cb, &barrier_present_dependency_info)
+        vk.CmdPipelineBarrier2(cb, &barrier_present_dependency_info) // @compression transition image
         
         vk.EndCommandBuffer(cb)
         
@@ -1145,11 +1128,23 @@ main :: proc () {
 }
 ////////////////////////////////////////////////
 
-vk_create_semaphore :: proc (device: vk.Device, flags: vk.SemaphoreCreateFlags = {}) -> vk.Semaphore {
+vk_create_semaphore :: proc (device: vk.Device, flags: vk.SemaphoreCreateFlags = {}, timeline_initial_value: Maybe(u64) = nil) -> vk.Semaphore {
+    create_info := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO, flags = flags }
+    
+    if timeline_value, is_timeline := timeline_initial_value.?; is_timeline {
+        create_info.pNext = &vk.SemaphoreTypeCreateInfo {
+            sType = .SEMAPHORE_TYPE_CREATE_INFO,
+            semaphoreType = .TIMELINE,
+            initialValue = timeline_value,
+        }
+    }
+    
     result: vk.Semaphore
-    check(vk.CreateSemaphore(device, &vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO, flags = flags }, nil, &result))
+    check(vk.CreateSemaphore(device, &create_info, nil, &result))
+    
     return result
 }
+
 vk_create_fence :: proc (device: vk.Device, flags: vk.FenceCreateFlags = {}) -> vk.Fence {
     result: vk.Fence
     check(vk.CreateFence(device, &vk.FenceCreateInfo { sType = .FENCE_CREATE_INFO, flags = flags }, nil, &result))
@@ -1165,7 +1160,7 @@ vk_create_depth_image :: proc (device: vk.Device, depth_format: vk.Format, windo
         sType = .IMAGE_CREATE_INFO,
         imageType = .D2,
         format = depth_format,
-        extent = { width = window_size.x, height = window_size.y, depth = 1 },
+        extent = vk_to_extent(window_size, depth = 1),
         mipLevels = 1,
         arrayLayers = 1,
         samples = { ._1 },
@@ -1181,16 +1176,39 @@ vk_create_depth_image :: proc (device: vk.Device, depth_format: vk.Format, windo
     
     check(vma.create_image(allocator, depth_image_create_info, alloc_create_info, &image, &allocation, nil))
     
-    depth_image_view_create_info := vk.ImageViewCreateInfo {
-        sType = .IMAGE_VIEW_CREATE_INFO,
-        image = image,
-        viewType = .D2,
-        format = depth_format,
-        subresourceRange = { aspectMask = { .DEPTH }, levelCount = 1, layerCount = 1 },
-    }
-    check(vk.CreateImageView(device, &depth_image_view_create_info, nil, &image_view))
+    image_view = vk_create_2d_image_view(device, image, depth_format, { .DEPTH })
     
     return image, image_view, allocation
+}
+
+vk_create_swapchain :: proc (physical_device: vk.PhysicalDevice, surface: vk.SurfaceKHR, device: vk.Device, window_size: uv2, swapchain_format: vk.Format) -> vk.SwapchainKHR {
+    surface_capabilities: vk.SurfaceCapabilitiesKHR
+    check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &surface_capabilities))
+        
+    swapchain_extent := surface_capabilities.currentExtent
+    if surface_capabilities.currentExtent.width == 0xFFFFFFFF {
+        swapchain_extent = vk_to_extent(window_size)
+    }
+    
+    swapchain_create_info := vk.SwapchainCreateInfoKHR {
+        sType = .SWAPCHAIN_CREATE_INFO_KHR,
+        surface          = surface,
+        minImageCount    = surface_capabilities.minImageCount,
+        imageFormat      = swapchain_format,
+        imageColorSpace  = .SRGB_NONLINEAR,
+        imageExtent      = swapchain_extent,
+        imageArrayLayers = 1,
+        imageUsage       = { .COLOR_ATTACHMENT },
+        preTransform     = { .IDENTITY },
+        compositeAlpha   = { .OPAQUE },
+        presentMode      = .FIFO,
+    }
+    
+    result: vk.SwapchainKHR
+    check(vk.CreateSwapchainKHR(device, &swapchain_create_info, nil, &result))
+    ////////////////////////////////////////////////
+    ////////////////////////////////////////////////
+    return result
 }
 
 vk_recreate_swapchain :: proc (device: vk.Device, image_format: vk.Format, image_count: ^u32, swapchain_infos: ^#soa [dynamic] Swapchain_Info, swapchain: vk.SwapchainKHR) {
@@ -1199,32 +1217,50 @@ vk_recreate_swapchain :: proc (device: vk.Device, image_format: vk.Format, image
     check(vk.GetSwapchainImagesKHR(device, swapchain, image_count, swapchain_infos.image))
     
     for &info in swapchain_infos {
-        view_create_info := vk.ImageViewCreateInfo {
-            sType = .IMAGE_VIEW_CREATE_INFO,
-            image = info.image,
-            viewType = .D2,
-            format = image_format,
-            subresourceRange = { aspectMask = { .COLOR }, levelCount = 1, layerCount = 1 },
-        }
-        
-        check(vk.CreateImageView(device, &view_create_info, nil, &info.image_view))
-        
+        info.image_view = vk_create_2d_image_view(device, info.image, image_format, { .COLOR })
         info.render_completed = vk_create_semaphore(device)
     }
 }
-////////////////////////////////////////////////
 
-Texture :: struct {
-	allocation: vma.Allocation,
-	image:      vk.Image,
-	view:       vk.ImageView,
-	sampler:    vk.Sampler,
+vk_create_2d_image_view :: proc (device: vk.Device, image: vk.Image, format: vk.Format, aspect_mask: vk.ImageAspectFlags, level_count: u32 = 1) -> vk.ImageView {
+    result: vk.ImageView
+    
+    check(vk.CreateImageView(device, &vk.ImageViewCreateInfo {
+        sType = .IMAGE_VIEW_CREATE_INFO,
+        image = image,
+        viewType = .D2,
+        format = format,
+        subresourceRange = { aspectMask = aspect_mask, levelCount = level_count, layerCount = 1 },
+    }, nil, &result))
+    
+    return result
 }
 
-Vertex :: struct {
-    p:  v3,
-    n:  v3,
-    uv: v2,
+////////////////////////////////////////////////
+
+sdl_get_window_size :: proc (window: ^sdl.Window) -> uv2 {
+    result: iv2
+    sdl.GetWindowSize(window, &result.x, &result.y)
+    return cast(uv2) result
+}
+
+////////////////////////////////////////////////
+
+vk_to_extent :: proc { vk_to_extent_2, vk_to_extent_3 }
+vk_to_extent_2 :: proc (size: uv2) -> vk.Extent2D {
+    result := vk.Extent2D {
+        width  = size.x, 
+        height = size.y,
+    }
+    return result
+}
+vk_to_extent_3 :: proc (size: uv2, depth: u32) -> vk.Extent3D {
+    result := vk.Extent3D {
+        width  = size.x, 
+        height = size.y,
+        depth  = depth
+    }
+    return result
 }
 
 ////////////////////////////////////////////////
