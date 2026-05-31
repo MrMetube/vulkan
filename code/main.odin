@@ -9,7 +9,6 @@ import "core:mem"
 import la "core:math/linalg"
 
 import "../libs/vma"
-import "../libs/ktx"
 
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
@@ -297,7 +296,7 @@ main :: proc () {
     index_count: u32
     v_buffer_allocation: vma.Allocation
     {
-        model := load_obj("./tutorial/suzanne.obj", context.temp_allocator)
+        model := load_obj_model("./tutorial/suzanne.obj", context.temp_allocator)
         
         index_count   = model.index_count
         v_buffer_size = model.v_buffer_size
@@ -388,18 +387,16 @@ main :: proc () {
     {
         for &texture, index in textures {
             filename := fmt.tprintf("./tutorial/suzanne%v.ktx", index)
-            data, err := os.read_entire_file(filename, context.temp_allocator); assert(err == nil)
             
-            ktx_texture: ^ktx.Texture
-            check(ktx.Texture_CreateFromMemory(&data[0], len(data), { .LOAD_IMAGE_DATA }, &ktx_texture))
-            defer ktx.Texture1_Destroy(cast(^ktx.Texture1) ktx_texture)
+            loaded_texture := load_ktx_texture(filename)
+            defer unload_ktx_texture(loaded_texture)
             
             image_create_info := vk.ImageCreateInfo {
                 sType = .IMAGE_CREATE_INFO,
                 imageType = .D2,
-                format = ktx.Texture_GetVkFormat(ktx_texture),
-                extent = { width = ktx_texture.baseWidth, height = ktx_texture.baseHeight, depth = 1 },
-                mipLevels = ktx_texture.numLevels,
+                format = loaded_texture.format,
+                extent = { width = loaded_texture.width, height = loaded_texture.height, depth = 1 },
+                mipLevels = loaded_texture.mip_levels,
                 arrayLayers = 1,
                 samples = { ._1 },
                 tiling = .OPTIMAL,
@@ -410,7 +407,7 @@ main :: proc () {
             image_allocation_create_info := vma.Allocation_Create_Info { usage = .Auto }
             check(vma.create_image(allocator, image_create_info, image_allocation_create_info, &texture.image, &texture.allocation, nil))
             
-            texture.view = vk_create_2d_image_view(device, texture.image, image_create_info.format, { .COLOR }, ktx_texture.numLevels)
+            texture.view = vk_create_2d_image_view(device, texture.image, image_create_info.format, { .COLOR }, loaded_texture.mip_levels)
             
             image_src_buffer: vk.Buffer
             image_src_allocation: vma.Allocation
@@ -418,7 +415,7 @@ main :: proc () {
             
             image_src_buffer_create_info := vk.BufferCreateInfo {
                 sType = .BUFFER_CREATE_INFO,
-                size  = auto_cast ktx_texture.dataSize,
+                size  = auto_cast loaded_texture.len,
                 usage = { .TRANSFER_SRC },
             }
             
@@ -430,7 +427,7 @@ main :: proc () {
             check(vma.create_buffer(allocator, image_src_buffer_create_info, image_src_allocation_create_info, &image_src_buffer, &image_src_allocation, &image_src_allocation_info))
             defer vma.destroy_buffer(allocator, image_src_buffer, image_src_allocation)
             
-            mem.copy_non_overlapping(image_src_allocation_info.mapped_data, ktx_texture.pData, auto_cast ktx_texture.dataSize)
+            mem.copy_non_overlapping(image_src_allocation_info.mapped_data, loaded_texture.data, loaded_texture.len)
             
             fence_once := vk_create_fence(device)
             defer vk.DestroyFence(device, fence_once, nil)
@@ -461,20 +458,19 @@ main :: proc () {
                     oldLayout = .UNDEFINED,
                     newLayout = .TRANSFER_DST_OPTIMAL,
                     image = texture.image,
-                    subresourceRange = { aspectMask = { .COLOR }, levelCount = ktx_texture.numLevels, layerCount = 1 },
+                    subresourceRange = { aspectMask = { .COLOR }, levelCount = loaded_texture.mip_levels, layerCount = 1 },
                 },
             }
             vk.CmdPipelineBarrier2(cb_once, &barrier_info)// @compression transition image
             
             copy_regions := make([dynamic] vk.BufferImageCopy, context.temp_allocator)
-            for level in 0..<ktx_texture.numLevels {
-                mip_offset: uint
-                // @todo(viktor): this is not correct, is the Texture1 binding missing. This causes the mipmaps to be wrong.
-                ktx.Texture2_GetImageOffset(cast(^ktx.Texture2) ktx_texture, level, 0, 0, &mip_offset)
+            for level in 0..<loaded_texture.mip_levels {
+                mip_offset: uint = loaded_texture.mip_offsets[level]
+                
                 append(&copy_regions, vk.BufferImageCopy{
                     bufferOffset = auto_cast mip_offset,
                     imageSubresource = { aspectMask = { .COLOR }, mipLevel = level, layerCount = 1 },
-                    imageExtent = { width = ktx_texture.baseWidth >> level, height = ktx_texture.baseHeight >> level, depth = 1 },
+                    imageExtent = { width = loaded_texture.width >> level, height = loaded_texture.height >> level, depth = 1 },
                 })
             }
             
@@ -489,7 +485,7 @@ main :: proc () {
                 oldLayout = .TRANSFER_DST_OPTIMAL,
                 newLayout = .READ_ONLY_OPTIMAL,
                 image = texture.image,
-                subresourceRange = { aspectMask = { .COLOR }, levelCount = ktx_texture.numLevels, layerCount = 1 },
+                subresourceRange = { aspectMask = { .COLOR }, levelCount = loaded_texture.mip_levels, layerCount = 1 },
             }
             vk.CmdPipelineBarrier2(cb_once, &barrier_info) // @compression transition_image?
             
@@ -512,7 +508,7 @@ main :: proc () {
                 mipmapMode = .LINEAR,
                 anisotropyEnable = true,
                 maxAnisotropy = 8,
-                maxLod = cast(f32) ktx_texture.numLevels,
+                maxLod = cast(f32) loaded_texture.mip_levels,
             }
             
             check(vk.CreateSampler(device, &sampler_create_info, nil, &texture.sampler))
@@ -1047,15 +1043,6 @@ check_vulkan :: proc (result: vk.Result, loc := #caller_location) {
         os.exit(1)
     }
 }
-
-check_ktx :: proc (result: ktx.Result, loc := #caller_location) {
-    if result != .SUCCESS {
-        fmt.printf("%v:%v:%v: KTX call returned %v", loc.file_path, loc.line, loc.column, result)
-        intrinsics.debug_trap()
-        os.exit(1)
-    }
-}
-
 check_sdl :: proc (result: bool, loc := #caller_location) {
     if !result {
         fmt.printf("%v:%v:%v: SDL call returned %v", loc.file_path, loc.line, loc.column, sdl.GetError())
