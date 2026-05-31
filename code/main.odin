@@ -2,7 +2,6 @@
 package main
 
 import "base:intrinsics"
-import "base:runtime"
 import "core:fmt"
 import "core:os"
 import "core:time"
@@ -57,9 +56,9 @@ recreate_swapchain: bool
 
 // @naming
 IPS :: struct {
-    instance: vk.Instance,
+    instance:        vk.Instance,
     physical_device: vk.PhysicalDevice,
-    surface: vk.SurfaceKHR
+    surface:         vk.SurfaceKHR,
 }
 
 ////////////////////////////////////////////////
@@ -98,7 +97,7 @@ main :: proc () {
                 sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
                 messageSeverity = { .VERBOSE, .WARNING, .ERROR },
                 messageType = { .VALIDATION, .PERFORMANCE },
-                pfnUserCallback = vk_debug_utils_callback
+                pfnUserCallback = vk_debug_utils_callback,
             },
             pApplicationInfo = &vk.ApplicationInfo {
                 sType = .APPLICATION_INFO,
@@ -110,7 +109,7 @@ main :: proc () {
         }
         
         when ODIN_DEBUG {
-            validation_layers := []cstring{"VK_LAYER_KHRONOS_validation"}
+            validation_layers := []cstring{ "VK_LAYER_KHRONOS_validation" }
             instance_create_info.enabledLayerCount = auto_cast len(validation_layers)
             instance_create_info.ppEnabledLayerNames = raw_data(validation_layers)
         }
@@ -205,23 +204,27 @@ main :: proc () {
             f14 := &vk.PhysicalDeviceVulkan14Features { sType = .PHYSICAL_DEVICE_VULKAN_1_4_FEATURES, pNext = nil }
             f13 := &vk.PhysicalDeviceVulkan13Features { sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, pNext = &f14 }
             f12 := &vk.PhysicalDeviceVulkan12Features { sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, pNext = &f13 }
-            supported_features := vk.PhysicalDeviceFeatures2 { sType = .PHYSICAL_DEVICE_FEATURES_2, pNext = &f12 }
+            f11 := &vk.PhysicalDeviceVulkan11Features { sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, pNext = &f12 }
+            supported_features := vk.PhysicalDeviceFeatures2 { sType = .PHYSICAL_DEVICE_FEATURES_2, pNext = &f11 }
             
             vk.GetPhysicalDeviceFeatures2(ips.physical_device, &supported_features)
-            if !f13.dynamicRendering || 
-                !f13.synchronization2 || 
-                !f12.timelineSemaphore || 
-                !f12.descriptorIndexing || 
+            if 
+                !f14.maintenance5 || !f14.pushDescriptor ||
+                !f13.dynamicRendering ||  !f13.synchronization2 || 
+                !f12.timelineSemaphore || !f12.descriptorIndexing || 
                 !f12.shaderSampledImageArrayNonUniformIndexing || 
                 !f12.descriptorBindingVariableDescriptorCount || 
-                !f12.runtimeDescriptorArray || 
-                !f12.bufferDeviceAddress {
+                !f12.runtimeDescriptorArray || !f12.bufferDeviceAddress ||
+                !f11.shaderDrawParameters {
                 fmt.printfln("Physical device doesn't meet the feauture requirements")
                 check(false)
             }
         }
         
-        device_extensions := [] cstring { vk.KHR_SWAPCHAIN_EXTENSION_NAME }
+        device_extensions := [] cstring { 
+            vk.KHR_SWAPCHAIN_EXTENSION_NAME,
+            vk.KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, // @todo(viktor): isn't this in 1.4?
+        }
         
         device_create_info := vk.DeviceCreateInfo {
             sType = .DEVICE_CREATE_INFO,
@@ -232,8 +235,9 @@ main :: proc () {
             pNext = &vk.PhysicalDeviceVulkan14Features {
                 sType = .PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
                 
-                 maintenance5 = true, // @note(viktor): deprecates ShaderModule
-                 
+                maintenance5   = true, // @note(viktor): deprecates ShaderModule
+                pushDescriptor = true, // @note(viktor): remove the need for CmdBindVertexBuffers
+                
                 // @todo(viktor): check if this would help the texture upload hostImageCopy
                 // hostImageCopy = true,
                 // @note(viktor): scalarBlockLayout - struct members are padded like c/c++ would, I assume it make simple memcopy possible
@@ -246,13 +250,18 @@ main :: proc () {
                     
                     pNext = &vk.PhysicalDeviceVulkan12Features {
                         sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-                    
                         descriptorIndexing                        = true,
                         shaderSampledImageArrayNonUniformIndexing = true,
                         descriptorBindingVariableDescriptorCount  = true,
                         runtimeDescriptorArray                    = true,
                         bufferDeviceAddress                       = true,
                         timelineSemaphore                         = true,
+                        
+                        pNext = &vk.PhysicalDeviceVulkan11Features {
+                            sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+                            
+                            shaderDrawParameters = true,
+                        },
                     },
                 },
             },
@@ -344,7 +353,7 @@ main :: proc () {
         // @todo(viktor): just make one really big(128mb?) buffer for vertices and indices, then pack all meshes into them
         // @todo(viktor): vma had flags like { .Host_Access_Sequential_Write, .Host_Access_Allow_Transfer_Instead, .Mapped }
         // is something like this needed here, or is { .HOST_VISIBLE, .HOST_COHERENT } enough? 
-        vertex_buffer = vk_create_buffer(vertex_buffer_size, { .VERTEX_BUFFER })
+        vertex_buffer = vk_create_buffer(vertex_buffer_size, { .VERTEX_BUFFER, .STORAGE_BUFFER })
         index_buffer  = vk_create_buffer(i_buffer_size,      { .INDEX_BUFFER  })
         
         copy(vertex_buffer.data, slice_to_bytes(vertices))
@@ -526,9 +535,28 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    descriptor_set_layout_textures: vk.DescriptorSetLayout
-    descriptor_set_textures: vk.DescriptorSet
-    descriptor_pool: vk.DescriptorPool
+    vertices_descriptor_set_layout: vk.DescriptorSetLayout
+    {
+        vertices_descriptor_layout_create_info := vk.DescriptorSetLayoutCreateInfo{
+            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            flags = { .PUSH_DESCRIPTOR },
+            bindingCount = 1,
+            pBindings = &vk.DescriptorSetLayoutBinding {
+                binding = 0,
+                descriptorType = .STORAGE_BUFFER,
+                descriptorCount = 1,
+                stageFlags = { .VERTEX },
+            },
+        }
+        
+        check(vk.CreateDescriptorSetLayout(device, &vertices_descriptor_layout_create_info, nil, &vertices_descriptor_set_layout))
+    }
+    
+    ////////////////////////////////////////////////
+    
+    textures_descriptor_set_layout: vk.DescriptorSetLayout
+    textures_descriptor_set: vk.DescriptorSet
+    textures_descriptor_pool: vk.DescriptorPool
     {
         desc_layout_textures_create_info := vk.DescriptorSetLayoutCreateInfo {
             sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -539,13 +567,14 @@ main :: proc () {
             },
             bindingCount = 1,
             pBindings = &vk.DescriptorSetLayoutBinding {
+                binding = 0,
                 descriptorType = .COMBINED_IMAGE_SAMPLER,
                 descriptorCount = len(textures),
                 stageFlags = { .FRAGMENT },
             },
         }
         
-        check(vk.CreateDescriptorSetLayout(device, &desc_layout_textures_create_info, nil, &descriptor_set_layout_textures))
+        check(vk.CreateDescriptorSetLayout(device, &desc_layout_textures_create_info, nil, &textures_descriptor_set_layout))
         
         desc_pool_create_info := vk.DescriptorPoolCreateInfo {
             sType = .DESCRIPTOR_POOL_CREATE_INFO,
@@ -557,7 +586,7 @@ main :: proc () {
             },
         }
         
-        check(vk.CreateDescriptorPool(device, &desc_pool_create_info, nil, &descriptor_pool))
+        check(vk.CreateDescriptorPool(device, &desc_pool_create_info, nil, &textures_descriptor_pool))
         
         variable_desc_count := cast(u32) len(textures)
         
@@ -568,16 +597,16 @@ main :: proc () {
                 descriptorSetCount = 1,
                 pDescriptorCounts = &variable_desc_count,
             },
-            descriptorPool = descriptor_pool,
+            descriptorPool = textures_descriptor_pool,
             descriptorSetCount = 1,
-            pSetLayouts = &descriptor_set_layout_textures,
+            pSetLayouts = &textures_descriptor_set_layout,
         }
         
-        check(vk.AllocateDescriptorSets(device, &textures_desc_set_allocate_info, &descriptor_set_textures))
+        check(vk.AllocateDescriptorSets(device, &textures_desc_set_allocate_info, &textures_descriptor_set))
         
         write_desc_set := vk.WriteDescriptorSet {
             sType = .WRITE_DESCRIPTOR_SET,
-            dstSet = descriptor_set_textures,
+            dstSet = textures_descriptor_set,
             dstBinding = 0,
             descriptorCount = cast(u32) len(texture_descriptors),
             descriptorType = .COMBINED_IMAGE_SAMPLER,
@@ -588,7 +617,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    pipeline, pipeline_layout := vk_create_graphics_pipeline(device, swapchain_format, depth_format, descriptor_set_layout_textures)
+    pipeline, pipeline_layout := vk_create_graphics_pipeline(device, swapchain_format, depth_format, vertices_descriptor_set_layout, textures_descriptor_set_layout)
     
     ////////////////////////////////////////////////
     
@@ -686,7 +715,7 @@ main :: proc () {
             depth_image, depth_image_view, depth_image_allocation = vk_create_depth_image(device, depth_format, window_size, allocator)
         }
         
-        pipeline, pipeline_layout = vk_create_graphics_pipeline(device, swapchain_format, depth_format, descriptor_set_layout_textures, pipeline, pipeline_layout)
+        pipeline, pipeline_layout = vk_create_graphics_pipeline(device, swapchain_format, depth_format, vertices_descriptor_set_layout, textures_descriptor_set_layout, pipeline, pipeline_layout)
         
         
         ////////////////////////////////////////////////
@@ -783,15 +812,25 @@ main :: proc () {
         vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D { extent = vk_to_extent(window_size) })
         
         vk.CmdBindPipeline(cb, .GRAPHICS, pipeline)
-        vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline_layout, 0, 1, &descriptor_set_textures, 0, nil)
         
-        offsets_in_the_vertex_buffer: vk.DeviceSize // @cleanup
-        vk.CmdBindVertexBuffers(cb, 0, 1, &vertex_buffer.buffer, &offsets_in_the_vertex_buffer)
+        write_descriptor_set := vk.WriteDescriptorSet {
+            sType = .WRITE_DESCRIPTOR_SET,
+            dstBinding = 0,
+            descriptorCount = 1,
+            descriptorType = .STORAGE_BUFFER,
+            pBufferInfo = &vk.DescriptorBufferInfo {
+                buffer = vertex_buffer.buffer,
+                offset = 0,
+                range  = auto_cast len(vertex_buffer.data),
+            },
+        }
+        vk.CmdPushDescriptorSet(cb, .GRAPHICS, pipeline_layout, 0, 1, &write_descriptor_set)
+        vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline_layout, 1, 1, &textures_descriptor_set, 0, nil)
         vk.CmdBindIndexBuffer(cb, index_buffer.buffer, 0, .UINT16)
         
         vk.CmdPushConstants(cb, pipeline_layout, { .VERTEX }, 0, size_of(vk.DeviceAddress), &frame.shader_data_buffer.deviceAddress)
         
-        vk.CmdDrawIndexed(cb, index_count, 3, 0, 0, 0)
+        vk.CmdDraw(cb, index_count, 3, 0, 0)
         
         vk.CmdEndRendering(cb)
         
@@ -881,8 +920,9 @@ main :: proc () {
         vma.destroy_image(allocator, texture.image, texture.allocation)
     }
     
-	vk.DestroyDescriptorSetLayout(device, descriptor_set_layout_textures, nil)
-	vk.DestroyDescriptorPool(device, descriptor_pool, nil)
+    vk.DestroyDescriptorSetLayout(device, vertices_descriptor_set_layout, nil)
+	vk.DestroyDescriptorSetLayout(device, textures_descriptor_set_layout, nil)
+	
     // @compression with create_graphics_pipeline
 	vk.DestroyPipelineLayout(device, pipeline_layout, nil)
 	vk.DestroyPipeline(device, pipeline, nil)

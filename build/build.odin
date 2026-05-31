@@ -1,7 +1,7 @@
 package build
 
 optimize :: false
-pedantic :: false
+pedantic :: !false
 
 main :: proc () {
     init_build(run_from_data = true, wait = true)

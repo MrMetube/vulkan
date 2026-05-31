@@ -180,7 +180,7 @@ vk_end_transition_images :: proc (command_buffer: vk.CommandBuffer) {
 
 ////////////////////////////////////////////////
 
-vk_create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_format: vk.Format, descriptor_set_layout_textures: vk.DescriptorSetLayout, old_pipeline: vk.Pipeline = 0, old_pipeline_layout: vk.PipelineLayout = 0) ->  (vk.Pipeline, vk.PipelineLayout) {
+vk_create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_format: vk.Format, vertices_descriptor_set_layout, textures_descriptor_set_layout: vk.DescriptorSetLayout, old_pipeline: vk.Pipeline = 0, old_pipeline_layout: vk.PipelineLayout = 0) ->  (vk.Pipeline, vk.PipelineLayout) {
     // @study(viktor): is a pipeline cache still a good optimization?
     pipeline: vk.Pipeline
     pipeline_layout: vk.PipelineLayout
@@ -193,7 +193,13 @@ vk_create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_
     shader: if hotreload(shader_source) {
         cmd: Cmd
         cmd.allocator = context.temp_allocator
-        append(&cmd, "slangc", "-target", "spirv", "-o", shader_output, shader_source)
+        append(&cmd, "slangc")
+        append(&cmd, "-target", "spirv",)
+        append(&cmd, "-o", shader_output)
+        if ODIN_DEBUG {
+            append(&cmd, "-g1") // @note(viktor): embed shader source code for renderdoc
+        }
+        append(&cmd, shader_source)
         
         // @todo(viktor): start and test later if its finished?
         stdout: string
@@ -223,25 +229,25 @@ vk_create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_
             pCode = cast(^u32) &shader_bytes[0],
         }
         
-        descriptor_set_layout_textures := descriptor_set_layout_textures
+        ////////////////////////////////////////////////
+        
+        set_layouts := [?] vk.DescriptorSetLayout {
+            vertices_descriptor_set_layout,
+            textures_descriptor_set_layout,
+        }
+        
         pipeline_layout_create_info := vk.PipelineLayoutCreateInfo {
             sType = .PIPELINE_LAYOUT_CREATE_INFO,
-            setLayoutCount = 1,
-            pSetLayouts = &descriptor_set_layout_textures,
+            setLayoutCount = len(set_layouts),
+            pSetLayouts    = &set_layouts[0],
             pushConstantRangeCount = 1,
-            pPushConstantRanges = &vk.PushConstantRange {
+            pPushConstantRanges    = &vk.PushConstantRange {
                 stageFlags = { .VERTEX },
                 size = size_of(vk.DeviceAddress),
             },
         }
         
         check(vk.CreatePipelineLayout(device, &pipeline_layout_create_info, nil, &pipeline_layout))
-        
-        vertex_attributes := [] vk.VertexInputAttributeDescription {
-            { location = 0, binding = 0, format = .R32G32B32_SFLOAT },
-            { location = 1, binding = 0, format = .R32G32B32_SFLOAT, offset = auto_cast offset_of(Vertex, n)  },
-            { location = 2, binding = 0, format = .R32G32_SFLOAT,    offset = auto_cast offset_of(Vertex, uv) },
-        }
         
         shader_stages := [] vk.PipelineShaderStageCreateInfo {
             { sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, stage = { .VERTEX },   pName = "main", pNext = &shader_module_create_info },
@@ -262,16 +268,12 @@ vk_create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_
             },
             stageCount = auto_cast len(shader_stages),
             pStages = raw_data(shader_stages),
-            pVertexInputState = &vk.PipelineVertexInputStateCreateInfo {
+            pVertexInputState = &vk.PipelineVertexInputStateCreateInfo { // @cleanup
                 sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-                vertexBindingDescriptionCount = 1,
-                pVertexBindingDescriptions = &vk.VertexInputBindingDescription {
-                    binding = 0,
-                    stride = size_of(Vertex),
-                    inputRate = .VERTEX,
-                },
-                vertexAttributeDescriptionCount = auto_cast len(vertex_attributes),
-                pVertexAttributeDescriptions = raw_data(vertex_attributes),
+                vertexBindingDescriptionCount = 0,
+                pVertexBindingDescriptions = nil,
+                vertexAttributeDescriptionCount = 0,
+                pVertexAttributeDescriptions = nil,
             },
             pInputAssemblyState = &vk.PipelineInputAssemblyStateCreateInfo {
                 sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
@@ -352,7 +354,7 @@ Buffer :: struct {
     initialized: bool,
     
     device: vk.Device,
-    memory_properties: vk.PhysicalDeviceMemoryProperties
+    memory_properties: vk.PhysicalDeviceMemoryProperties,
 }
 
 init_gpu_allocator :: proc (ips: IPS, device: vk.Device) {
@@ -463,7 +465,7 @@ vk_to_extent_3 :: proc (size: uv2, depth: u32) -> vk.Extent3D {
     result := vk.Extent3D {
         width  = size.x, 
         height = size.y,
-        depth  = depth
+        depth  = depth,
     }
     return result
 }
