@@ -33,25 +33,34 @@ Shader_Data :: struct {
 Shader_Data_Buffer :: struct {
     allocation:      vma.Allocation,
     allocation_info: vma.Allocation_Info,
-    buffer:          vk.Buffer,
-    deviceAddress:   vk.DeviceAddress,
-    command_buffer:  vk.CommandBuffer,
+    
+    buffer:        vk.Buffer,
+    deviceAddress: vk.DeviceAddress,
 }
 
 Swapchain_Info :: struct {
     image: vk.Image,
-    image_view: vk.ImageView,
+    view:  vk.ImageView,
+    
     render_completed: vk.Semaphore,
 }
 
 Texture :: struct {
-	image:      vk.Image,
-	view:       vk.ImageView,
+	image: vk.Image,
+	view:  vk.ImageView,
+    
 	allocation: vma.Allocation,
 	sampler:    vk.Sampler,
 }
 
 recreate_swapchain: bool
+
+// @naming
+IPS :: struct {
+    instance: vk.Instance,
+    physical_device: vk.PhysicalDevice,
+    surface: vk.SurfaceKHR
+}
 
 ////////////////////////////////////////////////
 
@@ -69,7 +78,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    instance: vk.Instance
+    ips: IPS
     {
         instance_extension_count: u32
         instance_extensions_raw := sdl.Vulkan_GetInstanceExtensions(&instance_extension_count)
@@ -89,13 +98,7 @@ main :: proc () {
                 sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
                 messageSeverity = { .VERBOSE, .WARNING, .ERROR },
                 messageType = { .VALIDATION, .PERFORMANCE },
-                pfnUserCallback = proc "system" (messageSeverity: vk.DebugUtilsMessageSeverityFlagsEXT, messageTypes: vk.DebugUtilsMessageTypeFlagsEXT, pCallbackData: ^vk.DebugUtilsMessengerCallbackDataEXT, pUserData: rawptr) -> b32 {
-                    context = runtime.default_context()
-                    if .WARNING in messageSeverity || .ERROR in messageSeverity {
-                        fmt.printfln("Validation Layer: %v", pCallbackData.pMessage)
-                    }
-                    return false
-                }
+                pfnUserCallback = vk_debug_utils_callback
             },
             pApplicationInfo = &vk.ApplicationInfo {
                 sType = .APPLICATION_INFO,
@@ -112,32 +115,37 @@ main :: proc () {
             instance_create_info.ppEnabledLayerNames = raw_data(validation_layers)
         }
         
-        check(vk.CreateInstance(&instance_create_info, nil, &instance))
+        check(vk.CreateInstance(&instance_create_info, nil, &ips.instance))
         
-        vk.load_proc_addresses_instance(instance)
+        vk.load_proc_addresses_instance(ips.instance)
     }
     
     ////////////////////////////////////////////////
     
-    physical_device: vk.PhysicalDevice
     {
         physical_devices: [] vk.PhysicalDevice
         {
             device_count: u32
-            check(vk.EnumeratePhysicalDevices(instance, &device_count, nil))
+            check(vk.EnumeratePhysicalDevices(ips.instance, &device_count, nil))
             physical_devices = make([] vk.PhysicalDevice, device_count, context.temp_allocator)
-            check(vk.EnumeratePhysicalDevices(instance, &device_count, raw_data(physical_devices)))
+            check(vk.EnumeratePhysicalDevices(ips.instance, &device_count, raw_data(physical_devices)))
         }
         
         // @todo(viktor): check all devices for the discrete gpu, otherwise fallback to the first listed gpu
-        physical_device = physical_devices[0]
+        ips.physical_device = physical_devices[0]
         
         {
             device_properties := vk.PhysicalDeviceProperties2 { sType = .PHYSICAL_DEVICE_PROPERTIES_2 }
-            vk.GetPhysicalDeviceProperties2(physical_device, &device_properties)
+            vk.GetPhysicalDeviceProperties2(ips.physical_device, &device_properties)
             fmt.printfln("Selected device: %v", cast(cstring) &device_properties.properties.deviceName[0])
         }
     }
+    
+    ////////////////////////////////////////////////
+    
+    check(sdl.Vulkan_CreateSurface(window, ips.instance, nil, &ips.surface))
+    
+    window_size := sdl_get_window_size(window)
     
     ////////////////////////////////////////////////
     
@@ -145,9 +153,9 @@ main :: proc () {
     queue_family_index: u32
     {
         queue_family_count: u32
-        vk.GetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, nil)
+        vk.GetPhysicalDeviceQueueFamilyProperties(ips.physical_device, &queue_family_count, nil)
         queue_family_properties := make([] vk.QueueFamilyProperties, queue_family_count)
-        vk.GetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, raw_data(queue_family_properties))
+        vk.GetPhysicalDeviceQueueFamilyProperties(ips.physical_device, &queue_family_count, raw_data(queue_family_properties))
         
         for props, index in queue_family_properties {
             if .GRAPHICS in props.queueFlags {
@@ -155,8 +163,8 @@ main :: proc () {
             }
         }
         
-        when false {
-            check(sdl.Vulkan_GetPresentationSupport(instance, physical_device, queue_family_index))
+        if false {
+            check(sdl.Vulkan_GetPresentationSupport(ips.instance, ips.physical_device, queue_family_index))
         }
         
         queue_family_priority := [] f32 { 1 }
@@ -168,7 +176,7 @@ main :: proc () {
             f12 := &vk.PhysicalDeviceVulkan12Features { sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, pNext = &f13 }
             supported_features := vk.PhysicalDeviceFeatures2 { sType = .PHYSICAL_DEVICE_FEATURES_2, pNext = &f12 }
             
-            vk.GetPhysicalDeviceFeatures2(physical_device, &supported_features)
+            vk.GetPhysicalDeviceFeatures2(ips.physical_device, &supported_features)
             if !f13.dynamicRendering || 
                 !f13.synchronization2 || 
                 !f12.timelineSemaphore || 
@@ -230,7 +238,7 @@ main :: proc () {
             ppEnabledExtensionNames = raw_data(device_extensions),
         }
         
-        check(vk.CreateDevice(physical_device, &device_create_info, nil, &device))
+        check(vk.CreateDevice(ips.physical_device, &device_create_info, nil, &device))
         
         vk.load_proc_addresses_device(device)
     }
@@ -240,17 +248,10 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    surface: vk.SurfaceKHR
-    check(sdl.Vulkan_CreateSurface(window, instance, nil, &surface))
-    
-    window_size := sdl_get_window_size(window)
-    
-    ////////////////////////////////////////////////
-    
-    swapchain_format := vk.Format.B8G8R8A8_SRGB
+    swapchain_format := vk_get_swapchain_format(ips)
     swapchain_infos: #soa [dynamic] Swapchain_Info
     
-    swapchain := vk_create_swapchain(physical_device, surface, device, window_size, swapchain_format, &swapchain_infos)
+    swapchain := vk_create_swapchain(ips, device, window_size, swapchain_format, &swapchain_infos)
     
     ////////////////////////////////////////////////
     
@@ -260,8 +261,8 @@ main :: proc () {
         
         allocator_create_info := vma.Allocator_Create_Info {
             flags            = { .Buffer_Device_Address },
-            instance         = instance,
-            physical_device  = physical_device,
+            instance         = ips.instance,
+            physical_device  = ips.physical_device,
             device           = device,
             vulkan_functions = &vma_vulkan_functions,
         }
@@ -278,7 +279,7 @@ main :: proc () {
         depth_format_list := [] vk.Format { .D32_SFLOAT_S8_UINT, .D24_UNORM_S8_UINT }
         for it in depth_format_list {
             format_properties := vk.FormatProperties2 { sType = .FORMAT_PROPERTIES_2 }
-            vk.GetPhysicalDeviceFormatProperties2(physical_device, it, &format_properties)
+            vk.GetPhysicalDeviceFormatProperties2(ips.physical_device, it, &format_properties)
             
             if .DEPTH_STENCIL_ATTACHMENT in format_properties.formatProperties.optimalTilingFeatures {
                 depth_format = it
@@ -506,8 +507,8 @@ main :: proc () {
             
             sampler_create_info := vk.SamplerCreateInfo {
                 sType = .SAMPLER_CREATE_INFO,
-                magFilter = .LINEAR,
-                minFilter = .LINEAR,
+                magFilter  = .LINEAR,
+                minFilter  = .LINEAR,
                 mipmapMode = .LINEAR,
                 anisotropyEnable = true,
                 maxAnisotropy = 8,
@@ -777,7 +778,7 @@ main :: proc () {
             
             window_size = sdl_get_window_size(window)
             
-            swapchain = vk_create_swapchain(physical_device, surface, device, window_size, swapchain_format, &swapchain_infos, swapchain)
+            swapchain = vk_create_swapchain(ips, device, window_size, swapchain_format, &swapchain_infos, swapchain)
             
             vma.destroy_image(allocator, depth_image, depth_image_allocation)
             vk.DestroyImageView(device, depth_image_view, nil)
@@ -873,7 +874,7 @@ main :: proc () {
             colorAttachmentCount = 1,
             pColorAttachments = &vk.RenderingAttachmentInfo {
                 sType = .RENDERING_ATTACHMENT_INFO,
-                imageView = swapchain_info.image_view,
+                imageView = swapchain_info.view,
                 imageLayout = .ATTACHMENT_OPTIMAL,
                 loadOp = .CLEAR,
                 storeOp = .STORE,
@@ -1018,11 +1019,12 @@ main :: proc () {
 	vk.DestroyDescriptorPool(device, descriptor_pool, nil)
 	vk.DestroyPipelineLayout(device, pipeline_layout, nil)
 	vk.DestroyPipeline(device, pipeline, nil)
-	vk.DestroySurfaceKHR(instance, surface, nil)
 	vk.DestroyCommandPool(device, command_pool, nil)
 	vma.destroy_allocator(allocator)
 	vk.DestroyDevice(device, nil)
-	vk.DestroyInstance(instance, nil)
+    
+	vk.DestroySurfaceKHR(ips.instance, ips.surface, nil)
+	vk.DestroyInstance(ips.instance, nil)
     
 	sdl.DestroyWindow(window)
 }
@@ -1033,25 +1035,6 @@ sdl_get_window_size :: proc (window: ^sdl.Window) -> uv2 {
     result: iv2
     sdl.GetWindowSize(window, &result.x, &result.y)
     return cast(uv2) result
-}
-
-////////////////////////////////////////////////
-
-vk_to_extent :: proc { vk_to_extent_2, vk_to_extent_3 }
-vk_to_extent_2 :: proc (size: uv2) -> vk.Extent2D {
-    result := vk.Extent2D {
-        width  = size.x, 
-        height = size.y,
-    }
-    return result
-}
-vk_to_extent_3 :: proc (size: uv2, depth: u32) -> vk.Extent3D {
-    result := vk.Extent3D {
-        width  = size.x, 
-        height = size.y,
-        depth  = depth
-    }
-    return result
 }
 
 ////////////////////////////////////////////////
