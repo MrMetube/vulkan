@@ -11,7 +11,6 @@ import "core:strconv"
 import "../libs/vma"
 import "../libs/tobj"
 import "../libs/ktx"
-import "../libs/slang/slang"
 
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
@@ -206,9 +205,12 @@ main :: proc () {
             pNext = &vk.PhysicalDeviceVulkan14Features {
                 sType = .PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
                 
+                 maintenance5 = true, // @note(viktor): deprecates ShaderModule
+                 
                 // @todo(viktor): check if this would help the texture upload hostImageCopy
                 // hostImageCopy = true,
                 // @note(viktor): scalarBlockLayout - struct members are padded like c/c++ would, I assume it make simple memcopy possible
+                
                 pNext = &vk.PhysicalDeviceVulkan13Features {
                     sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
                     
@@ -258,11 +260,9 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     swapchain_format := vk.Format.B8G8R8A8_SRGB
-    swapchain := vk_create_swapchain(physical_device, surface, device, window_size, swapchain_format)
-    
     swapchain_infos: #soa [dynamic] Swapchain_Info
-    image_count: u32 // @cleanup this should be len(swapchain_infos)
-    vk_recreate_swapchain(device, swapchain_format, &image_count, &swapchain_infos, swapchain)
+    
+    swapchain := vk_create_swapchain(physical_device, surface, device, window_size, swapchain_format, &swapchain_infos)
     
     ////////////////////////////////////////////////
     
@@ -609,62 +609,21 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    // @todo(viktor): deprecated, chain vkshadermodulecreateinfo into the pipelineshaderstagecreateinfo
-    shader_module: vk.ShaderModule
-    {
-        when false {
-            slang_global_session: ^slang.IGlobalSession
-            check(slang.createGlobalSession(slang.API_VERSION, &slang_global_session))
-            
-            slang_targets := [] slang.TargetDesc {
-                { format = .SPIRV, profile = slang_global_session->findProfile("spirv_1_4") },
-            }
-            slang_options := [] slang.CompilerOptionEntry {
-                { name = .EmitSpirvDirectly, value = { kind = .Int, intValue0 = 1 } },
-            }
-            slang_session_desc := slang.SessionDesc {
-                targets = raw_data(slang_targets),
-                targetCount = auto_cast len(slang_targets),
-                defaultMatrixLayoutMode = .COLUMN_MAJOR,
-                compilerOptionEntries = raw_data(slang_options),
-                compilerOptionEntryCount = auto_cast len(slang_options),
-            }
-            
-            slang_session: ^slang.ISession
-            check(slang_global_session->createSession(slang_session_desc, &slang_session))
-            
-            slang_module := slang_session->loadModuleFromSource("triangle", "./tutorial/shader.slang", nil, nil)
-            
-            spirv: ^slang.IBlob
-            check(slang_module->getTargetCode(0, &spirv, nil))
-            
-            shader_module_ci := vk.ShaderModuleCreateInfo {
-                sType = .SHADER_MODULE_CREATE_INFO,
-                codeSize = cast(int) spirv->getBufferSize(),
-                pCode = cast(^u32)spirv->getBufferPointer(),
-            }
-        } else {
-            // slangc -target spirv -o ./tutorial/shader.spirv ./tutorial/shader.slang
-            shader_bytes, err := os.read_entire_file("./tutorial/shader.spirv", context.temp_allocator)
-            assert(err == nil)
-            raw_shader_bytes_32 := transmute(RawSlice) shader_bytes
-            raw_shader_bytes_32.len /= size_of(u32) / size_of(u8)
-            shader_bytes_32 := transmute([] u32) raw_shader_bytes_32
-            shader_module_ci := vk.ShaderModuleCreateInfo {
-                sType = .SHADER_MODULE_CREATE_INFO,
-                codeSize = len(shader_bytes),
-                pCode = raw_data(shader_bytes_32),
-            }
-        }
-        
-        check(vk.CreateShaderModule(device, &shader_module_ci, nil, &shader_module))
-    }
-    
-    ////////////////////////////////////////////////
-    
+    // @study(viktor): is a pipeline cache still a good optimization?
     pipeline: vk.Pipeline
     pipeline_layout: vk.PipelineLayout
     {
+        // @todo(viktor): recompile and hot reload shaders if files are changed
+        // slangc -target spirv -o ./tutorial/shader.spirv ./tutorial/shader.slang
+        shader_bytes, err := os.read_entire_file("./tutorial/shader.spirv", context.temp_allocator)
+        assert(err == nil)
+        
+        shader_module_create_info := vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO,
+            codeSize = len(shader_bytes),
+            pCode = cast(^u32) &shader_bytes[0],
+        }
+        
         pipeline_layout_create_info := vk.PipelineLayoutCreateInfo {
             sType = .PIPELINE_LAYOUT_CREATE_INFO,
             setLayoutCount = 1,
@@ -685,8 +644,8 @@ main :: proc () {
         }
         
         shader_stages := [] vk.PipelineShaderStageCreateInfo {
-            { sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, stage = { .VERTEX },   module = shader_module, pName = "main" },
-            { sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, stage = { .FRAGMENT }, module = shader_module, pName = "main" },
+            { sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, stage = { .VERTEX },   pName = "main", pNext = &shader_module_create_info },
+            { sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, stage = { .FRAGMENT }, pName = "main", pNext = &shader_module_create_info },
         }
         
         dynamic_states := [] vk.DynamicState { .VIEWPORT, .SCISSOR }
@@ -762,15 +721,14 @@ main :: proc () {
     
     cam_pos := v3{ 0, 0, -6 }
     object_rotations: [3] v3
+    quit: bool
+    last_time := time.tick_now()
     
+    Timeout :: max(u64)
     
     frame_index: u32
     image_index: u32
-    Timeout :: max(u64)
-    quit: bool
     next_signal_value: u64 = MaxFramesInFlight + 1
-    
-    last_time := time.tick_now()
     
     Smooth :: struct {
         value: f32,
@@ -804,7 +762,7 @@ main :: proc () {
         xx :: proc (seconds: f32) -> time.Duration {
             return time.duration_round(cast(time.Duration) (seconds * cast(f32) time.Second), 10 * time.Microsecond)
         }
-        sdl.SetWindowTitle(window, fmt.ctprintf("Frame time: %.3v", xx(smooth_frame_time.value)))
+        sdl.SetWindowTitle(window, fmt.ctprintf("Frame time: %.3v, FPS: %.0f", xx(smooth_frame_time.value), 1/smooth_frame_time.value))
         
         ////////////////////////////////////////////////
         
@@ -842,42 +800,9 @@ main :: proc () {
             
             vk.DeviceWaitIdle(device)
             
-            old_infos := make_shallow_copy(swapchain_infos, context.temp_allocator)
-            old_swapchain := swapchain
-            
             window_size = sdl_get_window_size(window)
             
-            surface_capabilities: vk.SurfaceCapabilitiesKHR
-            check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &surface_capabilities))
-            
-            swapchain_extent := surface_capabilities.currentExtent
-            if surface_capabilities.currentExtent.width == 0xFFFFFFFF {
-                swapchain_extent = vk_to_extent(window_size)
-            }
-            
-            swapchain_create_info := vk.SwapchainCreateInfoKHR {
-                sType = .SWAPCHAIN_CREATE_INFO_KHR,
-                surface          = surface,
-                minImageCount    = surface_capabilities.minImageCount,
-                imageFormat      = swapchain_format,
-                imageColorSpace  = .SRGB_NONLINEAR,
-                imageExtent      = swapchain_extent,
-                imageArrayLayers = 1,
-                imageUsage       = { .COLOR_ATTACHMENT },
-                preTransform     = { .IDENTITY },
-                compositeAlpha   = { .OPAQUE },
-                presentMode      = .FIFO,
-            }
-            swapchain_create_info.oldSwapchain = old_swapchain
-            
-            check(vk.CreateSwapchainKHR(device, &swapchain_create_info, nil, &swapchain)) // @compression this and the original swapchain creation.
-            vk_recreate_swapchain(device, swapchain_format, &image_count, &swapchain_infos, swapchain)
-            
-            for &info in swapchain_infos {
-                vk.DestroyImageView(device, info.image_view, nil)
-                vk.DestroySemaphore(device, info.render_completed, nil)
-            }
-            vk.DestroySwapchainKHR(device, old_swapchain, nil) // @compression with cleanup/shutdown
+            swapchain = vk_create_swapchain(physical_device, surface, device, window_size, swapchain_format, &swapchain_infos, swapchain)
             
             vma.destroy_image(allocator, depth_image, depth_image_allocation)
             vk.DestroyImageView(device, depth_image_view, nil)
@@ -901,12 +826,12 @@ main :: proc () {
         frame := &frames[frame_index]
         frame_index = (frame_index + 1) % MaxFramesInFlight
         
-        result := vk.AcquireNextImageKHR(device, swapchain, Timeout, frame.image_aquired, {}, &image_index)
-        if result == .ERROR_OUT_OF_DATE_KHR || result == .SUBOPTIMAL_KHR {
+        acquire_result := vk.AcquireNextImageKHR(device, swapchain, Timeout, frame.image_aquired, {}, &image_index)
+        if acquire_result == .ERROR_OUT_OF_DATE_KHR || acquire_result == .SUBOPTIMAL_KHR {
             recreate_swapchain = true
             continue
         }
-        check(result)
+        check(acquire_result)
         
         swapchain_info := &swapchain_infos[image_index]
         
@@ -1082,7 +1007,13 @@ main :: proc () {
             pSwapchains = &swapchain,
             pImageIndices = &image_index,
         }
-        check(vk.QueuePresentKHR(queue, &present_info), outofdate_recreates_swapchain = true)
+        
+        present_result := vk.QueuePresentKHR(queue, &present_info)
+        if present_result == .ERROR_OUT_OF_DATE_KHR {
+            recreate_swapchain = true
+        } else {
+            check(present_result)
+        }
     }    
     
     ////////////////////////////////////////////////
@@ -1097,10 +1028,7 @@ main :: proc () {
 		vma.destroy_buffer(allocator, frame.shader_data_buffer.buffer, frame.shader_data_buffer.allocation)
     }
     
-    for info in swapchain_infos {
-        vk.DestroySemaphore(device, info.render_completed, nil)
-        vk.DestroyImageView(device, info.image_view, nil)
-	}
+    vk_destroy_swapchain(device, swapchain, &swapchain_infos)
     
 	vma.destroy_image(allocator, depth_image, depth_image_allocation)
 	vk.DestroyImageView(device, depth_image_view, nil)
@@ -1116,10 +1044,8 @@ main :: proc () {
 	vk.DestroyDescriptorPool(device, descriptor_pool, nil)
 	vk.DestroyPipelineLayout(device, pipeline_layout, nil)
 	vk.DestroyPipeline(device, pipeline, nil)
-	vk.DestroySwapchainKHR(device, swapchain, nil)
 	vk.DestroySurfaceKHR(instance, surface, nil)
 	vk.DestroyCommandPool(device, command_pool, nil)
-	vk.DestroyShaderModule(device, shader_module, nil)
 	vma.destroy_allocator(allocator)
 	vk.DestroyDevice(device, nil)
 	vk.DestroyInstance(instance, nil)
@@ -1181,10 +1107,10 @@ vk_create_depth_image :: proc (device: vk.Device, depth_format: vk.Format, windo
     return image, image_view, allocation
 }
 
-vk_create_swapchain :: proc (physical_device: vk.PhysicalDevice, surface: vk.SurfaceKHR, device: vk.Device, window_size: uv2, swapchain_format: vk.Format) -> vk.SwapchainKHR {
+vk_create_swapchain :: proc (physical_device: vk.PhysicalDevice, surface: vk.SurfaceKHR, device: vk.Device, window_size: uv2, format: vk.Format, infos: ^#soa [dynamic] Swapchain_Info, old_swapchain: vk.SwapchainKHR = 0) -> vk.SwapchainKHR {
     surface_capabilities: vk.SurfaceCapabilitiesKHR
     check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &surface_capabilities))
-        
+    
     swapchain_extent := surface_capabilities.currentExtent
     if surface_capabilities.currentExtent.width == 0xFFFFFFFF {
         swapchain_extent = vk_to_extent(window_size)
@@ -1194,7 +1120,7 @@ vk_create_swapchain :: proc (physical_device: vk.PhysicalDevice, surface: vk.Sur
         sType = .SWAPCHAIN_CREATE_INFO_KHR,
         surface          = surface,
         minImageCount    = surface_capabilities.minImageCount,
-        imageFormat      = swapchain_format,
+        imageFormat      = format,
         imageColorSpace  = .SRGB_NONLINEAR,
         imageExtent      = swapchain_extent,
         imageArrayLayers = 1,
@@ -1202,24 +1128,37 @@ vk_create_swapchain :: proc (physical_device: vk.PhysicalDevice, surface: vk.Sur
         preTransform     = { .IDENTITY },
         compositeAlpha   = { .OPAQUE },
         presentMode      = .FIFO,
+        
+        oldSwapchain = old_swapchain,
     }
     
     result: vk.SwapchainKHR
     check(vk.CreateSwapchainKHR(device, &swapchain_create_info, nil, &result))
-    ////////////////////////////////////////////////
-    ////////////////////////////////////////////////
+    
+    if old_swapchain != 0 {
+        vk_destroy_swapchain(device, old_swapchain, infos)
+    }
+    
+    image_count: u32
+    check(vk.GetSwapchainImagesKHR(device, result, &image_count, nil))
+    resize(infos, image_count)
+    check(vk.GetSwapchainImagesKHR(device, result, &image_count, infos.image))
+    
+    for &info in infos {
+        info.image_view = vk_create_2d_image_view(device, info.image, format, { .COLOR })
+        info.render_completed = vk_create_semaphore(device)
+    }
+    
     return result
 }
 
-vk_recreate_swapchain :: proc (device: vk.Device, image_format: vk.Format, image_count: ^u32, swapchain_infos: ^#soa [dynamic] Swapchain_Info, swapchain: vk.SwapchainKHR) {
-    check(vk.GetSwapchainImagesKHR(device, swapchain, image_count, nil))
-    resize(swapchain_infos, image_count^)
-    check(vk.GetSwapchainImagesKHR(device, swapchain, image_count, swapchain_infos.image))
-    
-    for &info in swapchain_infos {
-        info.image_view = vk_create_2d_image_view(device, info.image, image_format, { .COLOR })
-        info.render_completed = vk_create_semaphore(device)
+vk_destroy_swapchain :: proc (device: vk.Device, swapchain: vk.SwapchainKHR, infos: ^#soa [dynamic] Swapchain_Info) {
+    for &info in infos {
+        vk.DestroyImageView(device, info.image_view, nil)
+        vk.DestroySemaphore(device, info.render_completed, nil)
     }
+    clear(infos)
+    vk.DestroySwapchainKHR(device, swapchain, nil)
 }
 
 vk_create_2d_image_view :: proc (device: vk.Device, image: vk.Image, format: vk.Format, aspect_mask: vk.ImageAspectFlags, level_count: u32 = 1) -> vk.ImageView {
@@ -1265,18 +1204,15 @@ vk_to_extent_3 :: proc (size: uv2, depth: u32) -> vk.Extent3D {
 
 ////////////////////////////////////////////////
 
-check :: proc { check_vulkan, check_sdl, check_ktx, check_slang }
-check_vulkan :: proc (result: vk.Result, outofdate_recreates_swapchain := false, loc := #caller_location) {
+check :: proc { check_vulkan, check_sdl, check_ktx }
+check_vulkan :: proc (result: vk.Result, loc := #caller_location) {
     if result != .SUCCESS {
-        if outofdate_recreates_swapchain == true && result == .ERROR_OUT_OF_DATE_KHR {
-            recreate_swapchain = true
-        } else {
-            fmt.printf("%v:%v:%v: Vulkan call returned %v", loc.file_path, loc.line, loc.column, result)
-            intrinsics.debug_trap()
-            os.exit(1)
-        }
+        fmt.printf("%v:%v:%v: Vulkan call returned %v", loc.file_path, loc.line, loc.column, result)
+        intrinsics.debug_trap()
+        os.exit(1)
     }
 }
+
 check_ktx :: proc (result: ktx.Result, loc := #caller_location) {
     if result != .SUCCESS {
         fmt.printf("%v:%v:%v: KTX call returned %v", loc.file_path, loc.line, loc.column, result)
@@ -1284,53 +1220,11 @@ check_ktx :: proc (result: ktx.Result, loc := #caller_location) {
         os.exit(1)
     }
 }
+
 check_sdl :: proc (result: bool, loc := #caller_location) {
     if !result {
         fmt.printf("%v:%v:%v: SDL call returned %v", loc.file_path, loc.line, loc.column, sdl.GetError())
         intrinsics.debug_trap()
         os.exit(1)
     }
-}
-check_slang :: proc (result: slang.Result, loc := #caller_location) {
-	if slang.FAILED(result) {
-		code := slang.GET_RESULT_CODE(result)
-		facility := slang.GET_RESULT_FACILITY(result)
-		estr: string
-		switch slang.Result(result) {
-		case:
-			estr = "Unknown error"
-		case slang.E_NOT_IMPLEMENTED():
-			estr = "E_NOT_IMPLEMENTED"
-		case slang.E_NO_INTERFACE():
-			estr = "E_NO_INTERFACE"
-		case slang.E_ABORT():
-			estr = "E_ABORT"
-		case slang.E_INVALID_HANDLE():
-			estr = "E_INVALID_HANDLE"
-		case slang.E_INVALID_ARG():
-			estr = "E_INVALID_ARG"
-		case slang.E_OUT_OF_MEMORY():
-			estr = "E_OUT_OF_MEMORY"
-		case slang.E_BUFFER_TOO_SMALL():
-			estr = "E_BUFFER_TOO_SMALL"
-		case slang.E_UNINITIALIZED():
-			estr = "E_UNINITIALIZED"
-		case slang.E_PENDING():
-			estr = "E_PENDING"
-		case slang.E_CANNOT_OPEN():
-			estr = "E_CANNOT_OPEN"
-		case slang.E_NOT_FOUND():
-			estr = "E_NOT_FOUND"
-		case slang.E_INTERNAL_FAIL():
-			estr = "E_INTERNAL_FAIL"
-		case slang.E_NOT_AVAILABLE():
-			estr = "E_NOT_AVAILABLE"
-		case slang.E_TIME_OUT():
-			estr = "E_TIME_OUT"
-		}
-
-        fmt.printf("%v:%v:%v: slang call returned %v (%v) Facility: %v", loc.file_path, loc.line, loc.column, estr, code, facility)
-        intrinsics.debug_trap()
-        os.exit(1)
-	}
 }
