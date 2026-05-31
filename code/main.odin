@@ -7,9 +7,8 @@ import "core:os"
 import "core:time"
 import "core:mem"
 import la "core:math/linalg"
-import "core:strconv"
+
 import "../libs/vma"
-import "../libs/tobj"
 import "../libs/ktx"
 
 import sdl "vendor:sdl3"
@@ -50,12 +49,6 @@ Texture :: struct {
 	view:       vk.ImageView,
 	allocation: vma.Allocation,
 	sampler:    vk.Sampler,
-}
-
-Vertex :: struct {
-    p:  v3,
-    n:  v3,
-    uv: v2,
 }
 
 recreate_swapchain: bool
@@ -132,17 +125,12 @@ main :: proc () {
         {
             device_count: u32
             check(vk.EnumeratePhysicalDevices(instance, &device_count, nil))
-            physical_devices = make([] vk.PhysicalDevice, device_count)
+            physical_devices = make([] vk.PhysicalDevice, device_count, context.temp_allocator)
             check(vk.EnumeratePhysicalDevices(instance, &device_count, raw_data(physical_devices)))
         }
         
-        device_index: u32
-        if len(os.args) > 1 {
-            device_index = cast(u32) (strconv.parse_u64(os.args[1]) or_else 0)
-            assert(device_index < auto_cast len(physical_devices))
-        }
-        
-        physical_device = physical_devices[device_index]
+        // @todo(viktor): check all devices for the discrete gpu, otherwise fallback to the first listed gpu
+        physical_device = physical_devices[0]
         
         {
             device_properties := vk.PhysicalDeviceProperties2 { sType = .PHYSICAL_DEVICE_PROPERTIES_2 }
@@ -308,26 +296,13 @@ main :: proc () {
     index_count: u32
     v_buffer_allocation: vma.Allocation
     {
-        models, _, error := tobj.load_obj_filename("./tutorial/suzanne.obj", allocator = context.temp_allocator)
-        assert(error == nil)
-        model := models[0].mesh
-        index_count = cast(u32) len(model.indices)
-        vertices := make([] Vertex, index_count, context.temp_allocator)
-        indices  := make([] i16,  len(vertices), context.temp_allocator)
+        model := load_obj("./tutorial/suzanne.obj", context.temp_allocator)
         
-        for index, it_index in model.indices {
-            v := Vertex {
-                p  = model.vertices[index]       * { 1, -1, 1 },
-                n  = model.normals[index]        * { 1, -1, 1 },
-                uv = model.texture_coords[index] * { 1, -1 },
-            }
-            
-            vertices[it_index] = v
-            indices[it_index]  = auto_cast it_index
-        }
-        
-        v_buffer_size  = cast(vk.DeviceSize) len(vertices) * size_of(vertices[0])
-        i_buffer_size := cast(vk.DeviceSize) len(indices)  * size_of(indices[0])
+        index_count   = model.index_count
+        v_buffer_size = model.v_buffer_size
+        i_buffer_size := model.i_buffer_size
+        vertices := model.vertices
+        indices := model.indices
         
         buffer_create_info := vk.BufferCreateInfo {
             sType = .BUFFER_CREATE_INFO,
@@ -343,7 +318,7 @@ main :: proc () {
         v_buffer_allocation_info: vma.Allocation_Info
         check(vma.create_buffer(allocator, buffer_create_info, v_buffer_alloc_create_info, &v_buffer, &v_buffer_allocation, &v_buffer_allocation_info))
         
-        gpu_memory := cast([^]u8) v_buffer_allocation_info.mapped_data
+        gpu_memory := cast([^] u8) v_buffer_allocation_info.mapped_data
         mem.copy_non_overlapping(gpu_memory[0:],             raw_data(vertices), auto_cast v_buffer_size)
         mem.copy_non_overlapping(gpu_memory[v_buffer_size:], raw_data(indices),  auto_cast i_buffer_size)
     }
@@ -918,17 +893,16 @@ main :: proc () {
         
         vk.CmdBeginRendering(cb, &rendering_info)
         
-        viewport := vk.Viewport {
-            width  = cast(f32) window_size.x,
-            height = cast(f32) window_size.y,
+        vk.CmdSetViewport(cb, 0, 1, &vk.Viewport {
+            x      = 0,
+            y      = 0,
+            width  = cast(f32)  window_size.x,
+            height = cast(f32)  window_size.y,
             minDepth = 0,
             maxDepth = 1,
-        }
+        })
         
-        vk.CmdSetViewport(cb, 0, 1, &viewport)
-        
-        scissor := vk.Rect2D { extent = vk_to_extent(window_size) }
-        vk.CmdSetScissor(cb, 0, 1, &scissor)
+        vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D { extent = vk_to_extent(window_size) })
         
         vk.CmdBindPipeline(cb, .GRAPHICS, pipeline)
         v_offset: vk.DeviceSize
@@ -1051,128 +1025,6 @@ main :: proc () {
 	vk.DestroyInstance(instance, nil)
     
 	sdl.DestroyWindow(window)
-}
-////////////////////////////////////////////////
-
-vk_create_semaphore :: proc (device: vk.Device, flags: vk.SemaphoreCreateFlags = {}, timeline_initial_value: Maybe(u64) = nil) -> vk.Semaphore {
-    create_info := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO, flags = flags }
-    
-    if timeline_value, is_timeline := timeline_initial_value.?; is_timeline {
-        create_info.pNext = &vk.SemaphoreTypeCreateInfo {
-            sType = .SEMAPHORE_TYPE_CREATE_INFO,
-            semaphoreType = .TIMELINE,
-            initialValue = timeline_value,
-        }
-    }
-    
-    result: vk.Semaphore
-    check(vk.CreateSemaphore(device, &create_info, nil, &result))
-    
-    return result
-}
-
-vk_create_fence :: proc (device: vk.Device, flags: vk.FenceCreateFlags = {}) -> vk.Fence {
-    result: vk.Fence
-    check(vk.CreateFence(device, &vk.FenceCreateInfo { sType = .FENCE_CREATE_INFO, flags = flags }, nil, &result))
-    return result
-}
-
-vk_create_depth_image :: proc (device: vk.Device, depth_format: vk.Format, window_size: uv2, allocator: vma.Allocator) -> (vk.Image, vk.ImageView, vma.Allocation) {
-    image: vk.Image
-    allocation: vma.Allocation
-    image_view: vk.ImageView
-    
-    depth_image_create_info := vk.ImageCreateInfo {
-        sType = .IMAGE_CREATE_INFO,
-        imageType = .D2,
-        format = depth_format,
-        extent = vk_to_extent(window_size, depth = 1),
-        mipLevels = 1,
-        arrayLayers = 1,
-        samples = { ._1 },
-        tiling = .OPTIMAL,
-        usage = { .DEPTH_STENCIL_ATTACHMENT },
-        initialLayout = .UNDEFINED,
-    }
-    
-    alloc_create_info := vma.Allocation_Create_Info {
-        flags = { .Dedicated_Memory },
-        usage = .Auto,
-    }
-    
-    check(vma.create_image(allocator, depth_image_create_info, alloc_create_info, &image, &allocation, nil))
-    
-    image_view = vk_create_2d_image_view(device, image, depth_format, { .DEPTH })
-    
-    return image, image_view, allocation
-}
-
-vk_create_swapchain :: proc (physical_device: vk.PhysicalDevice, surface: vk.SurfaceKHR, device: vk.Device, window_size: uv2, format: vk.Format, infos: ^#soa [dynamic] Swapchain_Info, old_swapchain: vk.SwapchainKHR = 0) -> vk.SwapchainKHR {
-    surface_capabilities: vk.SurfaceCapabilitiesKHR
-    check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &surface_capabilities))
-    
-    swapchain_extent := surface_capabilities.currentExtent
-    if surface_capabilities.currentExtent.width == 0xFFFFFFFF {
-        swapchain_extent = vk_to_extent(window_size)
-    }
-    
-    swapchain_create_info := vk.SwapchainCreateInfoKHR {
-        sType = .SWAPCHAIN_CREATE_INFO_KHR,
-        surface          = surface,
-        minImageCount    = surface_capabilities.minImageCount,
-        imageFormat      = format,
-        imageColorSpace  = .SRGB_NONLINEAR,
-        imageExtent      = swapchain_extent,
-        imageArrayLayers = 1,
-        imageUsage       = { .COLOR_ATTACHMENT },
-        preTransform     = { .IDENTITY },
-        compositeAlpha   = { .OPAQUE },
-        presentMode      = .FIFO,
-        
-        oldSwapchain = old_swapchain,
-    }
-    
-    result: vk.SwapchainKHR
-    check(vk.CreateSwapchainKHR(device, &swapchain_create_info, nil, &result))
-    
-    if old_swapchain != 0 {
-        vk_destroy_swapchain(device, old_swapchain, infos)
-    }
-    
-    image_count: u32
-    check(vk.GetSwapchainImagesKHR(device, result, &image_count, nil))
-    resize(infos, image_count)
-    check(vk.GetSwapchainImagesKHR(device, result, &image_count, infos.image))
-    
-    for &info in infos {
-        info.image_view = vk_create_2d_image_view(device, info.image, format, { .COLOR })
-        info.render_completed = vk_create_semaphore(device)
-    }
-    
-    return result
-}
-
-vk_destroy_swapchain :: proc (device: vk.Device, swapchain: vk.SwapchainKHR, infos: ^#soa [dynamic] Swapchain_Info) {
-    for &info in infos {
-        vk.DestroyImageView(device, info.image_view, nil)
-        vk.DestroySemaphore(device, info.render_completed, nil)
-    }
-    clear(infos)
-    vk.DestroySwapchainKHR(device, swapchain, nil)
-}
-
-vk_create_2d_image_view :: proc (device: vk.Device, image: vk.Image, format: vk.Format, aspect_mask: vk.ImageAspectFlags, level_count: u32 = 1) -> vk.ImageView {
-    result: vk.ImageView
-    
-    check(vk.CreateImageView(device, &vk.ImageViewCreateInfo {
-        sType = .IMAGE_VIEW_CREATE_INFO,
-        image = image,
-        viewType = .D2,
-        format = format,
-        subresourceRange = { aspectMask = aspect_mask, levelCount = level_count, layerCount = 1 },
-    }, nil, &result))
-    
-    return result
 }
 
 ////////////////////////////////////////////////
