@@ -331,7 +331,7 @@ main :: proc () {
     // @todo(viktor): currently we allocate twice, we could probably also allocate once and bind both buffers to the same memory, but I am unsure if that would help with anything.
     mesh: Mesh
     {
-        mesh = load_obj_mesh("tutorial/suzanne.obj", context.temp_allocator)
+        mesh = load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
         // mesh = load_obj_mesh("models/bunny.obj", context.temp_allocator)
         
         build_meshlets(&mesh)

@@ -1,5 +1,6 @@
 package main
 
+// @speed for cache reasons we should, if possible, do this either whilst loading or combined with other processing, or just offline
 build_meshlets :: proc (mesh: ^Mesh) {
     Missing :: ~cast(u8) 0
     meshlet_vertices := make([] u8, len(mesh.vertices), context.temp_allocator)

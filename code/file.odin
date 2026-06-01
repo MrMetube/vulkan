@@ -10,7 +10,7 @@ import vk "vendor:vulkan"
 import "../libs/tobj"
 import "../libs/ktx"
 
-load_obj_mesh :: proc (filepath: string, allocator: Allocator) -> Mesh {
+load_mesh_from_obj :: proc (filepath: string, allocator: Allocator) -> Mesh {
     models, _, error := tobj.load_obj_filename(filepath, allocator = allocator)
     assert(error == nil)
     model := models[0].mesh
