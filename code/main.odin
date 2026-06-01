@@ -150,7 +150,7 @@ main :: proc () {
     
     check(sdl.Vulkan_CreateSurface(window, ips.instance, nil, &ips.surface))
     
-    window_size := sdl_get_window_size(window)
+    
     
     ////////////////////////////////////////////////
     
@@ -267,12 +267,10 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    swapchain_format := vk_get_swapchain_format(ips)
-    // @todo(viktor): move into swapchain structure along with its current size: uv2
-    // @todo(viktor): dont ever use window_size, use swapchain.size
-    swapchain_infos: #soa [dynamic] Swapchain_Info
+    swapchain: Swapchain
+    swapchain.format = vk_get_swapchain_format(ips)
     
-    swapchain := vk_create_swapchain(ips, device, window_size, swapchain_format, &swapchain_infos)
+    recreate_swapchain(ips, device, sdl_get_window_size(window), &swapchain)
     
     ////////////////////////////////////////////////
     
@@ -308,7 +306,7 @@ main :: proc () {
             }
         }
         
-        depth_image, depth_image_view, depth_image_allocation = vk_create_depth_image(device, depth_format, window_size, allocator)
+        depth_image, depth_image_view, depth_image_allocation = vk_create_depth_image(device, depth_format, swapchain.size, allocator)
         mark_handle(vk.DestroyImageView, depth_image_view)
     }
     
@@ -322,7 +320,6 @@ main :: proc () {
     vertex_buffer  := gpu_make_buffer({ .STORAGE_BUFFER }, 128 * Megabyte)
     meshlet_buffer := gpu_make_buffer({ .STORAGE_BUFFER }, 128 * Megabyte)
     
-    // @todo(viktor): currently we allocate twice, we could probably also allocate once and bind both buffers to the same memory, but I am unsure if that would help with anything.
     mesh: Mesh
     {
         // mesh = load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
@@ -598,7 +595,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
 
-    pipeline := create_graphics_pipeline(device, swapchain_format, depth_format, vertex_descriptor_set_layout, textures_descriptor_set_layout)
+    pipeline := create_graphics_pipeline(device, swapchain.format, depth_format, vertex_descriptor_set_layout, textures_descriptor_set_layout)
     
     ////////////////////////////////////////////////
         
@@ -667,7 +664,7 @@ main :: proc () {
     absolute_frame_index: u64
     image_index: u32
     next_signal_value: u64 = MaxFramesInFlight + 1
-    recreate_swapchain: bool
+    should_recreate_swapchain: bool
     
     Smooth :: struct {
         value:      f64,
@@ -713,27 +710,25 @@ main :: proc () {
                 cam_pos.z += event.wheel.y * 10 * delta_time
                 
             case .WINDOW_RESIZED:
-                recreate_swapchain = true
+                should_recreate_swapchain = true
             }
         }
         
         ////////////////////////////////////////////////
         
-        if recreate_swapchain {
-            recreate_swapchain = false
+        if should_recreate_swapchain {
+            should_recreate_swapchain = false
             
             vk.DeviceWaitIdle(device)
             
-            window_size = sdl_get_window_size(window)
-            
-            swapchain = vk_create_swapchain(ips, device, window_size, swapchain_format, &swapchain_infos, swapchain)
+            recreate_swapchain(ips, device, sdl_get_window_size(window), &swapchain)
             
             vma.destroy_image(allocator, depth_image, depth_image_allocation)
             vk.DestroyImageView(device, depth_image_view, nil)
-            depth_image, depth_image_view, depth_image_allocation = vk_create_depth_image(device, depth_format, window_size, allocator)
+            depth_image, depth_image_view, depth_image_allocation = vk_create_depth_image(device, depth_format, swapchain.size, allocator)
         }
         
-        pipeline = create_graphics_pipeline(device, swapchain_format, depth_format, vertex_descriptor_set_layout, textures_descriptor_set_layout, pipeline)
+        pipeline = create_graphics_pipeline(device, swapchain.format, depth_format, vertex_descriptor_set_layout, textures_descriptor_set_layout, pipeline)
         
         ////////////////////////////////////////////////
         
@@ -752,30 +747,33 @@ main :: proc () {
         frame := &frames[absolute_frame_index % MaxFramesInFlight]
         absolute_frame_index += 1
         
-        acquire_result := vk.AcquireNextImageKHR(device, swapchain, Timeout, frame.image_aquired, {}, &image_index)
+        acquire_result := vk.AcquireNextImageKHR(device, swapchain.swapchain, Timeout, frame.image_aquired, {}, &image_index)
         if acquire_result == .ERROR_OUT_OF_DATE_KHR || acquire_result == .SUBOPTIMAL_KHR {
-            recreate_swapchain = true
+            should_recreate_swapchain = true
             continue
         }
         check(acquire_result)
         
-        swapchain_info := &swapchain_infos[image_index]
+        swapchain_info := &swapchain.infos[image_index]
         
         ////////////////////////////////////////////////
         
-        query_results: [2] u64
-        query_result := vk.GetQueryPoolResults(device, query_pool, 0, len(&query_results), cast(int) size_of_slice(query_results[:]), &query_results[0], size_of(query_results[0]), { ._64 } )
-        
-        if query_result != .NOT_READY {
-            check(query_result)
+        // @note(viktor): QueuePool must be reset before use, but that would require a whole cmd begin-end.
+        if absolute_frame_index > 1 {
+            query_results: [2] u64
+            query_result := vk.GetQueryPoolResults(device, query_pool, 0, len(&query_results), cast(int) size_of_slice(query_results[:]), &query_results[0], size_of(query_results[0]), { ._64 } )
             
-            
-            gpu_begin := cast(f64) query_results[0] * cast(f64) device_properties.properties.limits.timestampPeriod * 1e-9
-            gpu_end   := cast(f64) query_results[1] * cast(f64) device_properties.properties.limits.timestampPeriod * 1e-9
-            gpu_delta := gpu_end - gpu_begin
-            // @note(viktor): this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
-            if gpu_delta > 0 {
-                smooth_update(cast(f64) delta_time, &gpu_time, gpu_delta)
+            if query_result != .NOT_READY {
+                check(query_result)
+                
+                
+                gpu_begin := cast(f64) query_results[0] * cast(f64) device_properties.properties.limits.timestampPeriod * 1e-9
+                gpu_end   := cast(f64) query_results[1] * cast(f64) device_properties.properties.limits.timestampPeriod * 1e-9
+                gpu_delta := gpu_end - gpu_begin
+                // @note(viktor): this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
+                if gpu_delta > 0 {
+                    smooth_update(cast(f64) delta_time, &gpu_time, gpu_delta)
+                }
             }
         }
         
@@ -788,7 +786,7 @@ main :: proc () {
             
         ////////////////////////////////////////////////
         
-        shader_data.projection = la.matrix4_perspective(45 * RadPerDeg, cast(f32) window_size.x / cast(f32) window_size.y, 0.1, 128)
+        shader_data.projection = la.matrix4_perspective(45 * RadPerDeg, cast(f32) swapchain.size.x / cast(f32) swapchain.size.y, 0.1, 128)
         shader_data.view = la.matrix4_translate(cam_pos)
         instance_pos := v3{}
         shader_data.model = la.matrix4_translate(instance_pos) * la.matrix4_from_quaternion(la.quaternion_from_euler_angles_f32(expand_values(object_rotation), .XYX))
@@ -819,7 +817,7 @@ main :: proc () {
         
         rendering_info := vk.RenderingInfo {
             sType = .RENDERING_INFO, 
-            renderArea = { extent = vk_to_extent(window_size) },
+            renderArea = { extent = vk_to_extent(swapchain.size) },
             layerCount = 1,
             colorAttachmentCount = 1,
             pColorAttachments = &vk.RenderingAttachmentInfo {
@@ -847,13 +845,13 @@ main :: proc () {
         vk.CmdSetViewport(cb, 0, 1, &vk.Viewport {
             x      = 0,
             y      = 0,
-            width  = cast(f32)  window_size.x,
-            height = cast(f32)  window_size.y,
+            width  = cast(f32)  swapchain.size.x,
+            height = cast(f32)  swapchain.size.y,
             minDepth = 0,
             maxDepth = 1,
         })
         
-        vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D { extent = vk_to_extent(window_size) })
+        vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D { extent = vk_to_extent(swapchain.size) })
         
         vk.CmdBindPipeline(cb, .GRAPHICS, pipeline.pipeline)
         
@@ -922,13 +920,13 @@ main :: proc () {
             waitSemaphoreCount = 1,
             pWaitSemaphores = &swapchain_info.render_completed,
             swapchainCount = 1,
-            pSwapchains = &swapchain,
+            pSwapchains = &swapchain.swapchain,
             pImageIndices = &image_index,
         }
         
         present_result := vk.QueuePresentKHR(queue, &present_info)
         if present_result == .ERROR_OUT_OF_DATE_KHR {
-            recreate_swapchain = true
+            should_recreate_swapchain = true
         } else {
             check(present_result)
         }
@@ -946,7 +944,7 @@ main :: proc () {
     gpu_delete_buffer(vertex_buffer)
     gpu_delete_buffer(meshlet_buffer)
     
-    destroy_swapchain(device, swapchain, &swapchain_infos)
+    destroy_swapchain(device, &swapchain)
     destroy_pipeline(device, pipeline)
     
 	vma.destroy_image(allocator, depth_image, depth_image_allocation)

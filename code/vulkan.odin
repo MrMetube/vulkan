@@ -16,6 +16,14 @@ IPS :: struct {
     surface:         vk.SurfaceKHR,
 }
 
+Swapchain :: struct {
+    swapchain: vk.SwapchainKHR,
+    infos: #soa [dynamic] Swapchain_Info,
+    size:   uv2,
+    format: vk.Format,
+}
+
+
 Pipeline :: struct {
     pipeline: vk.Pipeline,
     layout:   vk.PipelineLayout,
@@ -136,20 +144,20 @@ vk_get_swapchain_format :: proc (ips: IPS) -> vk.Format {
     return formats[0].format
 }
 
-vk_create_swapchain :: proc (ips: IPS, device: vk.Device, window_size: uv2, format: vk.Format, infos: ^#soa [dynamic] Swapchain_Info, old_swapchain: vk.SwapchainKHR = 0) -> vk.SwapchainKHR {
+recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, old_swapchain: ^Swapchain) {
     surface_capabilities: vk.SurfaceCapabilitiesKHR
     check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(ips.physical_device, ips.surface, &surface_capabilities))
     
     swapchain_extent := surface_capabilities.currentExtent
     if surface_capabilities.currentExtent.width == 0xFFFFFFFF {
-        swapchain_extent = vk_to_extent(window_size)
+        swapchain_extent = vk_to_extent(new_size)
     }
     
     swapchain_create_info := vk.SwapchainCreateInfoKHR {
         sType = .SWAPCHAIN_CREATE_INFO_KHR,
         surface          = ips.surface,
         minImageCount    = surface_capabilities.minImageCount,
-        imageFormat      = format,
+        imageFormat      = old_swapchain.format,
         imageColorSpace  = .SRGB_NONLINEAR,
         imageExtent      = swapchain_extent,
         imageArrayLayers = 1,
@@ -158,36 +166,41 @@ vk_create_swapchain :: proc (ips: IPS, device: vk.Device, window_size: uv2, form
         compositeAlpha   = { .OPAQUE },
         presentMode      = VSync ? .FIFO : .IMMEDIATE,
         
-        oldSwapchain = old_swapchain,
+        oldSwapchain = old_swapchain.swapchain,
     }
     
-    result: vk.SwapchainKHR
-    check(vk.CreateSwapchainKHR(device, &swapchain_create_info, nil, &result))
+    result: Swapchain
+    result.size   = new_size
+    result.format = old_swapchain.format
+    result.infos  = old_swapchain.infos
     
-    if old_swapchain != 0 {
-        destroy_swapchain(device, old_swapchain, infos)
+    check(vk.CreateSwapchainKHR(device, &swapchain_create_info, nil, &result.swapchain))
+    
+    if old_swapchain.swapchain != 0 {
+        destroy_swapchain(device, old_swapchain)
     }
     
     image_count: u32
-    check(vk.GetSwapchainImagesKHR(device, result, &image_count, nil))
-    resize(infos, image_count)
-    check(vk.GetSwapchainImagesKHR(device, result, &image_count, infos.image))
+    check(vk.GetSwapchainImagesKHR(device, result.swapchain, &image_count, nil))
+    resize(&result.infos, image_count)
+    check(vk.GetSwapchainImagesKHR(device, result.swapchain, &image_count, result.infos.image))
     
-    for &info in infos {
-        info.view = vk_create_2d_image_view(device, info.image, format, { .COLOR })
+    for &info in result.infos {
+        info.view = vk_create_2d_image_view(device, info.image, result.format, { .COLOR })
         info.render_completed = vk_create_semaphore(device)
     }
     
-    return result
+    old_swapchain ^= result
 }
 
-destroy_swapchain :: proc (device: vk.Device, swapchain: vk.SwapchainKHR, infos: ^#soa [dynamic] Swapchain_Info) {
-    for &info in infos {
+destroy_swapchain :: proc (device: vk.Device, swapchain: ^Swapchain) {
+    for &info in swapchain.infos {
         vk.DestroyImageView(device, info.view, nil)
         vk.DestroySemaphore(device, info.render_completed, nil)
     }
-    clear(infos)
-    vk.DestroySwapchainKHR(device, swapchain, nil)
+    clear(&swapchain.infos)
+    
+    vk.DestroySwapchainKHR(device, swapchain.swapchain, nil)
 }
 
 // @cleanup this always happens after create_swapchain
