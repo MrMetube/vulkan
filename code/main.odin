@@ -681,7 +681,7 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         xx :: proc (seconds: f32) -> time.Duration {
-            return time.duration_round(cast(time.Duration) (seconds * cast(f32) time.Second), 10 * time.Microsecond)
+            return time.duration_round(cast(time.Duration) (seconds * cast(f32) time.Second), 1 * time.Microsecond)
         }
         sdl.SetWindowTitle(window, fmt.ctprintf("Frame time: %.3v, FPS: %.0f", xx(smooth_frame_time.value), 1/smooth_frame_time.value))
         
