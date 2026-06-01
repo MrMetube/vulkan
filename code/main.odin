@@ -122,68 +122,11 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     {
-        physical_devices: [] vk.PhysicalDevice
-        {
-            device_count: u32
-            check(vk.EnumeratePhysicalDevices(ips.instance, &device_count, nil))
-            physical_devices = make([] vk.PhysicalDevice, device_count, context.temp_allocator)
-            check(vk.EnumeratePhysicalDevices(ips.instance, &device_count, raw_data(physical_devices)))
-        }
+        ips.physical_device = vk_choose_physical_device(ips)
         
-        {
-            discrete: vk.PhysicalDevice
-            fallback: vk.PhysicalDevice
-            
-            vk_get_family_index_with_graphics :: proc (device: vk.PhysicalDevice) -> u32 {
-                queue_family_count: u32
-                vk.GetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, nil)
-                queue_family_properties := make([] vk.QueueFamilyProperties, queue_family_count, context.temp_allocator)
-                vk.GetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, raw_data(queue_family_properties))
-                
-                queue_family_index := vk.QUEUE_FAMILY_IGNORED
-                for props, index in queue_family_properties {
-                    if .GRAPHICS in props.queueFlags {
-                        queue_family_index = auto_cast index
-                        break
-                    }
-                }
-                
-                return queue_family_index
-            }
-            
-            for device in physical_devices {
-                family_index := vk_get_family_index_with_graphics(device)
-                
-                if family_index == vk.QUEUE_FAMILY_IGNORED {
-                    continue
-                }
-                
-                if !sdl.Vulkan_GetPresentationSupport(ips.instance, device, family_index) {
-                    continue
-                }
-                
-                device_properties := vk.PhysicalDeviceProperties2 { sType = .PHYSICAL_DEVICE_PROPERTIES_2 }
-                vk.GetPhysicalDeviceProperties2(device, &device_properties)
-                
-                if discrete == nil && device_properties.properties.deviceType == .DISCRETE_GPU {
-                    discrete = device
-                }
-                
-                if fallback == nil {
-                    fallback = device
-                }
-            }
-            
-            assert(fallback != nil)
-            
-            result := discrete != nil ? discrete : fallback
-        
-            device_properties := vk.PhysicalDeviceProperties2 { sType = .PHYSICAL_DEVICE_PROPERTIES_2 }
-            vk.GetPhysicalDeviceProperties2(result, &device_properties)
-            fmt.printfln("Selected device: %v", cast(cstring) &device_properties.properties.deviceName[0])
-            
-            ips.physical_device = result
-        }
+        device_properties := vk.PhysicalDeviceProperties2 { sType = .PHYSICAL_DEVICE_PROPERTIES_2 }
+        vk.GetPhysicalDeviceProperties2(ips.physical_device, &device_properties)
+        fmt.printfln("Selected device: %v", cast(cstring) &device_properties.properties.deviceName[0])
     }
     
     ////////////////////////////////////////////////

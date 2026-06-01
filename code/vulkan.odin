@@ -6,7 +6,75 @@ import "core:fmt"
 import "core:os"
 
 import vk "vendor:vulkan"
+import sdl "vendor:sdl3"
 import "../libs/vma"
+
+////////////////////////////////////////////////
+
+vk_choose_physical_device :: proc (ips: IPS) -> vk.PhysicalDevice {
+    physical_devices: [] vk.PhysicalDevice
+    {
+        device_count: u32
+        check(vk.EnumeratePhysicalDevices(ips.instance, &device_count, nil))
+        physical_devices = make([] vk.PhysicalDevice, device_count, context.temp_allocator)
+        check(vk.EnumeratePhysicalDevices(ips.instance, &device_count, raw_data(physical_devices)))
+    }
+    
+    discrete: vk.PhysicalDevice
+    fallback: vk.PhysicalDevice
+    
+    vk_get_family_index_with_graphics :: proc (device: vk.PhysicalDevice) -> u32 {
+        queue_family_count: u32
+        vk.GetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, nil)
+        queue_family_properties := make([] vk.QueueFamilyProperties, queue_family_count, context.temp_allocator)
+        vk.GetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, raw_data(queue_family_properties))
+        
+        queue_family_index := vk.QUEUE_FAMILY_IGNORED
+        for props, index in queue_family_properties {
+            if .GRAPHICS in props.queueFlags {
+                queue_family_index = auto_cast index
+                break
+            }
+        }
+        
+        return queue_family_index
+    }
+    
+    for device in physical_devices {
+        family_index := vk_get_family_index_with_graphics(device)
+        
+        if family_index == vk.QUEUE_FAMILY_IGNORED {
+            continue
+        }
+        
+        if !sdl.Vulkan_GetPresentationSupport(ips.instance, device, family_index) {
+            continue
+        }
+        
+        properties := vk.PhysicalDeviceProperties2 { sType = .PHYSICAL_DEVICE_PROPERTIES_2 }
+        vk.GetPhysicalDeviceProperties2(device, &properties)
+        
+        if properties.properties.apiVersion < vk.API_VERSION_1_4 {
+            continue
+        }
+        
+        if discrete == nil && properties.properties.deviceType == .DISCRETE_GPU {
+            discrete = device
+        }
+        
+        if fallback == nil {
+            fallback = device
+        }
+    }
+    
+    assert(fallback != nil, "Could not find any compatible device :(")
+    
+    result := discrete != nil ? discrete : fallback
+    
+    return result
+}
+
+////////////////////////////////////////////////
 
 vk_debug_utils_callback :: proc "system" (messageSeverity: vk.DebugUtilsMessageSeverityFlagsEXT, messageTypes: vk.DebugUtilsMessageTypeFlagsEXT, pCallbackData: ^vk.DebugUtilsMessengerCallbackDataEXT, pUserData: rawptr) -> b32 {
     context = runtime.default_context()
