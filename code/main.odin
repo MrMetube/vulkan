@@ -146,13 +146,12 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    {
-        ips.physical_device = vk_choose_physical_device(ips)
-        
-        device_properties := vk.PhysicalDeviceProperties2 { sType = .PHYSICAL_DEVICE_PROPERTIES_2 }
-        vk.GetPhysicalDeviceProperties2(ips.physical_device, &device_properties)
-        fmt.printfln("Selected device: %v", cast(cstring) &device_properties.properties.deviceName[0])
-    }
+    ips.physical_device = vk_choose_physical_device(ips)
+    
+    device_properties := vk.PhysicalDeviceProperties2 { sType = .PHYSICAL_DEVICE_PROPERTIES_2 }
+    vk.GetPhysicalDeviceProperties2(ips.physical_device, &device_properties)
+    fmt.printfln("Selected device: %v", cast(cstring) &device_properties.properties.deviceName[0])
+    assert(device_properties.properties.limits.timestampComputeAndGraphics)
     
     ////////////////////////////////////////////////
     
@@ -333,6 +332,7 @@ main :: proc () {
     mesh: Mesh
     {
         mesh = load_obj_mesh("tutorial/suzanne.obj", context.temp_allocator)
+        // mesh = load_obj_mesh("models/bunny.obj", context.temp_allocator)
         
         build_meshlets(&mesh)
         
@@ -413,6 +413,7 @@ main :: proc () {
             
             loaded_texture := load_ktx_texture(filename, context.temp_allocator)
             
+            // @cleanup use my allocator and then just copy by hand if possible
             image_create_info := vk.ImageCreateInfo {
                 sType = .IMAGE_CREATE_INFO,
                 imageType = .D2,
@@ -620,6 +621,20 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
+    QueryPoolSize :: 128
+    query_pool: vk.QueryPool
+    {
+        create_info := vk.QueryPoolCreateInfo {
+            sType = .QUERY_POOL_CREATE_INFO,
+            queryType = .TIMESTAMP,
+            queryCount = QueryPoolSize,
+        }
+        check(vk.CreateQueryPool(device, &create_info, nil, &query_pool))
+    }
+    defer vk.DestroyQueryPool(device, query_pool, nil)
+    
+    ////////////////////////////////////////////////
+    
     cam_pos := v3{ 0, 0, -6 }
     object_rotation: v3
     quit: bool
@@ -627,41 +642,36 @@ main :: proc () {
     
     Timeout :: max(u64)
     
-    frame_index: u32
+    absolute_frame_index: u64
     image_index: u32
     next_signal_value: u64 = MaxFramesInFlight + 1
     
     Smooth :: struct {
-        value: f32,
-        last_value: f32,
+        value:      f64,
+        last_value: f64,
     }
 
-    smooth_update :: proc (frame_time: f32, smooth: ^Smooth, value: f32) {
+    smooth_update :: proc (frame_time: f64, smooth: ^Smooth, value: f64) {
         // @speed We could precompute ks if needed as it only depends on h and frame time, not the smooth itself.
         h :: 5.0 // = the amount of time it takes for the filter to converge to 90% of a fixed input value
-        k := power(power(cast(f32) .1, 1 / h), frame_time)
+        k := power(power(cast(f64) .1, 1 / h), frame_time)
         
         smooth.value = linear_blend(value, smooth.last_value, k)
         smooth.last_value = smooth.value
     }
         
-    smooth_frame_time: Smooth
+    cpu_time: Smooth
+    gpu_time: Smooth
     for !quit {
         free_all(context.temp_allocator)
         
         ////////////////////////////////////////////////
         
+        // @todo(viktor): we currently include the time sdl.PollEvents and therefore windows window events take, which can just block us.
         current_time := time.tick_now()
         delta_tick := time.tick_diff(last_time, current_time)
         delta_time := cast(f32) time.duration_seconds(delta_tick)
         last_time = current_time
-        
-        ////////////////////////////////////////////////
-        
-        xx :: proc (seconds: f32) -> time.Duration {
-            return time.duration_round(cast(time.Duration) (seconds * cast(f32) time.Second), 1 * time.Microsecond)
-        }
-        sdl.SetWindowTitle(window, fmt.ctprintf("Frame time: %.3v, FPS: %.0f", xx(smooth_frame_time.value), 1/smooth_frame_time.value))
         
         ////////////////////////////////////////////////
         
@@ -684,9 +694,6 @@ main :: proc () {
             }
         }
         
-        // @todo(viktor): if the window is moved, we are blocked from executing by windows. the next frame time will then distort this smooth, messing with readability
-        smooth_update(delta_time, &smooth_frame_time, delta_time)
-        
         ////////////////////////////////////////////////
         
         if recreate_swapchain {
@@ -705,7 +712,6 @@ main :: proc () {
         
         pipeline, pipeline_layout = vk_create_graphics_pipeline(device, swapchain_format, depth_format, vertices_descriptor_set_layout, textures_descriptor_set_layout, pipeline, pipeline_layout)
         
-        
         ////////////////////////////////////////////////
         
         signal_value := next_signal_value
@@ -720,8 +726,8 @@ main :: proc () {
         }
         vk.WaitSemaphores(device, &wait_info, Timeout)
         
-        frame := &frames[frame_index]
-        frame_index = (frame_index + 1) % MaxFramesInFlight
+        frame := &frames[absolute_frame_index % MaxFramesInFlight]
+        absolute_frame_index += 1
         
         acquire_result := vk.AcquireNextImageKHR(device, swapchain, Timeout, frame.image_aquired, {}, &image_index)
         if acquire_result == .ERROR_OUT_OF_DATE_KHR || acquire_result == .SUBOPTIMAL_KHR {
@@ -732,6 +738,31 @@ main :: proc () {
         
         swapchain_info := &swapchain_infos[image_index]
         
+        ////////////////////////////////////////////////
+        
+        query_results: [2] u64
+        query_result := vk.GetQueryPoolResults(device, query_pool, 0, len(&query_results), cast(int) size_of_slice(query_results[:]), &query_results[0], size_of(query_results[0]), { ._64 } )
+        
+        if query_result != .NOT_READY {
+            check(query_result)
+            
+            
+            gpu_begin := cast(f64) query_results[0] * cast(f64) device_properties.properties.limits.timestampPeriod * 1e-9
+            gpu_end   := cast(f64) query_results[1] * cast(f64) device_properties.properties.limits.timestampPeriod * 1e-9
+            gpu_delta := gpu_end - gpu_begin
+            // @note(viktor): this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
+            if gpu_delta > 0 {
+                smooth_update(cast(f64) delta_time, &gpu_time, gpu_delta)
+            }
+        }
+        
+        smooth_update(cast(f64) delta_time, &cpu_time, cast(f64) delta_time)
+        
+        xx :: proc (seconds: f64) -> time.Duration {
+            return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
+        }
+        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, triangles: %v, meshlets: %v", xx(cpu_time.value), xx(gpu_time.value), view_magnitude(len(mesh.indices)), view_magnitude(len(mesh.meshlets))))
+            
         ////////////////////////////////////////////////
         
         shader_data.projection = la.matrix4_perspective(45 * RadPerDeg, cast(f32) window_size.x / cast(f32) window_size.y, 0.1, 128)
@@ -751,6 +782,10 @@ main :: proc () {
             flags = { .ONE_TIME_SUBMIT },
         }
         check(vk.BeginCommandBuffer(cb, &cb_begin_info))
+        
+        vk.CmdResetQueryPool(cb, query_pool, 0, QueryPoolSize)
+        // @todo(viktor): make a basic region based profiler out of this the labels and shit
+        vk.CmdWriteTimestamp(cb, { .BOTTOM_OF_PIPE }, query_pool, 0)
         
         vk_begin_transition_images()
             vk_append_image_memory_barrier_2(swapchain_info.image, { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT }, { .COLOR_ATTACHMENT_READ, . COLOR_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL)
@@ -839,6 +874,8 @@ main :: proc () {
         vk_begin_transition_images()
             vk_append_image_memory_barrier_2(swapchain_info.image, { .COLOR_ATTACHMENT_OUTPUT }, { .COLOR_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, {}, {}, .PRESENT_SRC_KHR)
         vk_end_transition_images(cb)
+        
+        vk.CmdWriteTimestamp(cb, { .BOTTOM_OF_PIPE }, query_pool, 1)
         
         vk.EndCommandBuffer(cb)
         

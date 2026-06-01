@@ -25,7 +25,7 @@ load_obj_mesh :: proc (filepath: string, allocator: Allocator) -> Mesh {
         v := Vertex {
             p  = model.vertices[index]       * { 1, -1, 1 },
             n  = cast([3] u8) ((normalize_or_zero(n) + 1) * 127),
-            uv = model.texture_coords[index] * { 1, -1 },
+            uv = len(model.texture_coords) != 0 ? model.texture_coords[index] * { 1, -1 } : 0,
         }
         
         vertices[it_index] = v

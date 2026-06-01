@@ -196,14 +196,18 @@ array_from_parts :: proc ($T: typeid, data: pmm, #any_int length, capacity: int,
 }
 
                 
-slice_to_bytes :: proc (value: [] $T) -> (result: [] u8) {
+slice_to_bytes :: proc (value: [] $T) -> [] u8 {
     data := raw_data(value)
-    len  := size_of(T) * len(value)
-    result = slice_from_parts(u8, data, len)
+    len  := size_of_slice(value)
+    result := slice_from_parts(u8, data, len)
     return result
 }
-to_bytes :: proc (value: ^$T) -> (result: [] u8) {
-    result = (cast([^] u8) value)[:size_of(T)]
+size_of_slice :: proc (value: [] $T) -> umm {
+    result := size_of(T) * cast(umm) len(value)
+    return result
+}
+to_bytes :: proc (value: ^$T) -> [] u8 {
+    result := (cast([^] u8) value)[:size_of(T)]
     return result
 }
 
