@@ -830,8 +830,7 @@ main :: proc () {
         vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D { extent = vk_to_extent(window_size) })
         
         vk.CmdBindPipeline(cb, .GRAPHICS, pipeline)
-        
-        write_descriptor_sets := [2] vk.WriteDescriptorSet {
+        write_descriptor_sets := [?] vk.WriteDescriptorSet {
             {
                 sType = .WRITE_DESCRIPTOR_SET,
                 dstSet = 0,
@@ -844,25 +843,13 @@ main :: proc () {
                     range  = auto_cast len(vertex_buffer.data),
                 },
             },
-            {
-                sType = .WRITE_DESCRIPTOR_SET,
-                dstSet = 0,
-                dstBinding = 1,
-                descriptorType = .STORAGE_BUFFER,
-                descriptorCount = 1,
-                pBufferInfo     = &vk.DescriptorBufferInfo {
-                    buffer = index_buffer.buffer,
-                    offset = 0,
-                    range  = auto_cast len(index_buffer.data),
-                },
-            },
         }
         vk.CmdPushDescriptorSet(cb, .GRAPHICS, pipeline_layout, 0, len(write_descriptor_sets), &write_descriptor_sets[0])
         vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline_layout, 1, 1, &textures_descriptor_set, 0, nil)
         
         vk.CmdPushConstants(cb, pipeline_layout, { .VERTEX }, 0, size_of(vk.DeviceAddress), &frame.shader_data_buffer.deviceAddress)
-        
-        vk.CmdDraw(cb, index_count, 3, 0, 0)
+        vk.CmdBindIndexBuffer(cb, index_buffer.buffer, 0, .UINT16)
+        vk.CmdDrawIndexed(cb, index_count, 300, 0, 0, 0)
         
         vk.CmdEndRendering(cb)
         

@@ -7,8 +7,6 @@ struct Vertex {
 
 [[vk::binding(0, 0)]]
 StructuredBuffer<Vertex> vertices;
-[[vk::binding(1, 0)]]
-StructuredBuffer<uint16_t> indices;
 
 [[vk::binding(0, 1)]]
 Sampler2D textures[];
@@ -33,23 +31,23 @@ struct VSOutput {
 
 [shader("vertex")]
 VSOutput main(uniform ShaderData *shader_data, uint instance_index : SV_VulkanInstanceID, uint vertex_index : SV_VertexID) {
-    uint16_t index = indices[vertex_index];
-    Vertex input = vertices[index];
+    Vertex input = vertices[vertex_index];
     
     float3 p = float3(input.px, input.py, input.pz);
     float3 n = float3(input.nx, input.ny, input.nz);
     float2 t = float2(input.tu, input.tv);
     
     VSOutput output;
-    float4x4 modelMat = shader_data->model[instance_index];
-    
+    float4x4 modelMat = shader_data->model[instance_index%3];
+    float offset = floor(float(instance_index)/3);
+    p.z -= offset;
     float4 p_in_view = mul(mul(shader_data->view, modelMat), float4(p, 1));
     
     output.normal = mul((float3x3)mul(shader_data->view, modelMat), n);
     output.uv = t;
     output.pos = mul(shader_data->projection, p_in_view);
     output.factor = (shader_data->selected == instance_index ? 30.0f : 1.0f);
-    output.instance_index = instance_index;
+    output.instance_index = instance_index%3;
     
     // Calculate view vectors required for lighting
     float4 fragPos = p_in_view;
