@@ -3,7 +3,6 @@ package main
 
 import "base:runtime"
 import "core:fmt"
-import "core:os"
 
 import vk "vendor:vulkan"
 import sdl "vendor:sdl3"
@@ -27,6 +26,12 @@ Swapchain :: struct {
 Pipeline :: struct {
     pipeline: vk.Pipeline,
     layout:   vk.PipelineLayout,
+    shader:   Shader,
+}
+
+Shader :: struct {
+    stages: vk.ShaderStageFlags,
+    bytes: [] u8,
 }
 
 ////////////////////////////////////////////////
@@ -302,27 +307,26 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_for
         return old
     }
     
-    if !recompile_shader(shader_source, shader_output) {
+    shader, ok := recompile_shader(shader_source, shader_output, context.temp_allocator)
+    if !ok {
         if old.pipeline == 0 || old.layout == 0 {
             assert(false, "Failed to create graphics pipeline")
         }
         return old
     }
     
-    // @study(viktor): is a pipeline cache still a good optimization?
-    result: Pipeline
-    
-    shader_bytes, err := os.read_entire_file(shader_output, context.temp_allocator)
-    assert(err == nil)
-    
     shader_module_create_info := vk.ShaderModuleCreateInfo {
         sType = .SHADER_MODULE_CREATE_INFO,
-        codeSize = len(shader_bytes),
-        pCode = cast(^u32) &shader_bytes[0],
+        codeSize = len(shader.bytes),
+        pCode = cast(^u32) &shader.bytes[0],
     }
     
     ////////////////////////////////////////////////
     
+    // @study(viktor): is a pipeline cache still a good optimization?
+    result: Pipeline
+    result.shader = shader
+        
     set_layouts := [?] vk.DescriptorSetLayout {
         vertices_descriptor_set_layout,
         textures_descriptor_set_layout,
@@ -334,16 +338,21 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_for
         pSetLayouts    = &set_layouts[0],
         pushConstantRangeCount = 1,
         pPushConstantRanges    = &vk.PushConstantRange {
-            stageFlags = { .MESH_EXT },
+            stageFlags = shader.stages,
             size = size_of(vk.DeviceAddress),
         },
     }
     
     check(vk.CreatePipelineLayout(device, &pipeline_layout_create_info, nil, &result.layout))
     
-    shader_stages := [] vk.PipelineShaderStageCreateInfo {
-        { sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, stage = { .MESH_EXT }, pName = "main", pNext = &shader_module_create_info },
-        { sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, stage = { .FRAGMENT }, pName = "main", pNext = &shader_module_create_info },
+    shader_stages: [dynamic; 16] vk.PipelineShaderStageCreateInfo
+    for stage in shader.stages {
+        append(&shader_stages, vk.PipelineShaderStageCreateInfo{ 
+            sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
+            stage = { stage }, 
+            pName = "main", 
+            pNext = &shader_module_create_info
+        })
     }
     
     dynamic_states := [] vk.DynamicState { .VIEWPORT, .SCISSOR }
@@ -359,7 +368,7 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_for
             depthAttachmentFormat = depth_format,
         },
         stageCount = auto_cast len(shader_stages),
-        pStages    = raw_data(shader_stages),
+        pStages    = &shader_stages[0],
         pVertexInputState = &vk.PipelineVertexInputStateCreateInfo { // @cleanup
             sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         },

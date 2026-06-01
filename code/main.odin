@@ -307,7 +307,6 @@ main :: proc () {
         }
         
         depth_image, depth_image_view, depth_image_allocation = vk_create_depth_image(device, depth_format, swapchain.size, allocator)
-        mark_handle(vk.DestroyImageView, depth_image_view)
     }
     
     ////////////////////////////////////////////////
@@ -602,6 +601,9 @@ main :: proc () {
     vertex_descriptor_update_template: vk.DescriptorUpdateTemplate
     
     {
+        // @todo(viktor): The information of which shader stage needs which storage buffer could be parsed from the compiled spirv file.
+        // But currently the single shader file contains multiple shader stages, so it would be non trivial to figure out which stage 
+        // makes use of a binding. Otherwise we could just maximally bind buffers, so that we atleast never miss a required buffer.
         update_template_entries := [?] vk.DescriptorUpdateTemplateEntry {
             {
                 dstBinding      = 0,
@@ -623,7 +625,6 @@ main :: proc () {
             sType = .DESCRIPTOR_UPDATE_TEMPLATE_CREATE_INFO,
             pipelineBindPoint   = .GRAPHICS,
             pipelineLayout      = pipeline.layout,
-            descriptorSetLayout = vertex_descriptor_set_layout,
             templateType        = .PUSH_DESCRIPTORS,
             descriptorUpdateEntryCount = len(update_template_entries),
             pDescriptorUpdateEntries   = &update_template_entries[0],
@@ -863,7 +864,7 @@ main :: proc () {
         
         vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline.layout, 1, 1, &textures_descriptor_set, 0, nil)
         
-        vk.CmdPushConstants(cb, pipeline.layout, { .MESH_EXT }, 0, size_of(vk.DeviceAddress), &frame.deviceAddress)
+        vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader.stages, 0, size_of(vk.DeviceAddress), &frame.deviceAddress)
         
         vk.CmdDrawMeshTasksEXT(cb, cast(u32) len(mesh.meshlets), 1, 1)
         
@@ -945,6 +946,9 @@ main :: proc () {
     gpu_delete_buffer(meshlet_buffer)
     
     destroy_swapchain(device, &swapchain)
+
+    vk.DestroyImageView(device, depth_image_view, nil) // @note(viktor): as we need to recreate the depth buffer sometime, we currently cant just mark_handle it. maybe we could unmark it in the array, but that already seems overkill
+
     destroy_pipeline(device, pipeline)
     
 	vma.destroy_image(allocator, depth_image, depth_image_allocation)
