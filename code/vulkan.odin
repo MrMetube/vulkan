@@ -125,8 +125,8 @@ vk_create_swapchain :: proc (ips: IPS, device: vk.Device, window_size: uv2, form
         preTransform     = { .IDENTITY },
         compositeAlpha   = { .OPAQUE },
         // @note(viktor): use FIFO for vsync, and .IMMEDIATE for most fps
-        // presentMode      = .FIFO,
-        presentMode      = .IMMEDIATE,
+        presentMode      = .FIFO,
+        // presentMode      = .IMMEDIATE,
         
         oldSwapchain = old_swapchain,
     }
@@ -313,7 +313,7 @@ vk_create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_
             pSetLayouts    = &set_layouts[0],
             pushConstantRangeCount = 1,
             pPushConstantRanges    = &vk.PushConstantRange {
-                stageFlags = { .VERTEX },
+                stageFlags = { .MESH_EXT },
                 size = size_of(vk.DeviceAddress),
             },
         }
@@ -321,7 +321,7 @@ vk_create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_
         check(vk.CreatePipelineLayout(device, &pipeline_layout_create_info, nil, &pipeline_layout))
         
         shader_stages := [] vk.PipelineShaderStageCreateInfo {
-            { sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, stage = { .VERTEX },   pName = "main", pNext = &shader_module_create_info },
+            { sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, stage = { .MESH_EXT }, pName = "main", pNext = &shader_module_create_info },
             { sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, stage = { .FRAGMENT }, pName = "main", pNext = &shader_module_create_info },
         }
         
@@ -437,7 +437,7 @@ init_gpu_allocator :: proc (ips: IPS, device: vk.Device) {
     }
 }
 
-vk_create_buffer :: proc (#any_int size: vk.DeviceSize, usage: vk.BufferUsageFlags) -> Buffer {
+gpu_make_buffer :: proc (usage: vk.BufferUsageFlags, #any_int size: vk.DeviceSize) -> Buffer {
     assert(gpu_allocator_state.initialized)
     
     device := gpu_allocator_state.device
@@ -487,7 +487,7 @@ vk_create_buffer :: proc (#any_int size: vk.DeviceSize, usage: vk.BufferUsageFla
     return result
 }
 
-vk_destroy_buffer :: proc (buffer: Buffer) {
+gpu_delete_buffer :: proc (buffer: Buffer) {
     assert(gpu_allocator_state.initialized)
     device := gpu_allocator_state.device
     

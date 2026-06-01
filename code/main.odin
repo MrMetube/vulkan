@@ -21,14 +21,15 @@ Frame_Data :: struct {
     image_aquired:      vk.Semaphore,
 }
 
+// @volatile shader.slang needs to match this layout
 Shader_Data :: struct {
     projection: m4,
     view:       m4,
-    model:      [3] m4,
+    model:      m4,
     light_pos:  [4] v4,
-    selected:   u32,
 }
 
+// @todo(viktor): move this to my allocator
 Shader_Data_Buffer :: struct {
     allocation:      vma.Allocation,
     allocation_info: vma.Allocation_Info,
@@ -59,6 +60,30 @@ IPS :: struct {
     instance:        vk.Instance,
     physical_device: vk.PhysicalDevice,
     surface:         vk.SurfaceKHR,
+}
+
+////////////////////////////////////////////////
+
+Mesh :: struct {
+    vertices: [] Vertex,
+    indices:  [] u16,
+    
+    meshlets: [dynamic] Meshlet,
+}
+
+// @volatile shader.slang needs to match this layout
+Vertex :: struct {
+    p:  v3,
+    n:  [3] u8, _pad: u8,
+    uv: v2,
+}
+
+// @todo(viktor): check the constraints of my actual hardware for this
+Meshlet :: struct {
+    vertices: [64] u32,
+    indices:  [128-1-1] u8, // @note(viktor): this is done based on the niagra video series, which states that there can be atmost [128] u8 in total for indices and indices_count, we then drop 1 index to get a number divisible by 3
+    index_count:  u8,
+    vertex_count: u8,
 }
 
 ////////////////////////////////////////////////
@@ -168,6 +193,7 @@ main :: proc () {
         device_extensions := [] cstring { 
             vk.KHR_SWAPCHAIN_EXTENSION_NAME,
             vk.KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, // @todo(viktor): isn't this in 1.4?
+            vk.EXT_MESH_SHADER_EXTENSION_NAME,
         }
         
         device_create_info := vk.DeviceCreateInfo {
@@ -181,52 +207,58 @@ main :: proc () {
                     shaderInt16 = true,
                 },
                 
-                pNext = &vk.PhysicalDeviceVulkan14Features {
-                    sType = .PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
-                    
-                    maintenance5   = true, // @note(viktor): deprecates ShaderModule
-                    pushDescriptor = true, // @note(viktor): remove the need for CmdBindVertexBuffers
-                    
-                    // @todo(viktor): check if this would help the texture upload hostImageCopy
-                    // hostImageCopy = true,
-                    // @note(viktor): scalarBlockLayout - struct members are padded like c/c++ would, I assume it make simple memcopy possible
-                    
-                    pNext = &vk.PhysicalDeviceVulkan13Features {
-                        sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-                        
-                        synchronization2 = true,
-                        dynamicRendering = true,
-                        
-                        pNext = &vk.PhysicalDeviceVulkan12Features {
-                            sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-                            descriptorIndexing                        = true,
-                            shaderSampledImageArrayNonUniformIndexing = true,
-                            descriptorBindingVariableDescriptorCount  = true,
-                            runtimeDescriptorArray                    = true,
-                            bufferDeviceAddress                       = true,
-                            timelineSemaphore                         = true,
-                            
-                            shaderInt8 = true,
-                            uniformAndStorageBuffer8BitAccess = true,
-                            storageBuffer8BitAccess = true,
-                            
-                            pNext = &vk.PhysicalDeviceVulkan11Features {
-                                sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-                                
-                                storageBuffer16BitAccess = true,
-                                uniformAndStorageBuffer16BitAccess = true,
-                                shaderDrawParameters = true,
-                            },
-                        },
-                    },
-                },
+            pNext = &vk.PhysicalDeviceVulkan14Features {
+                sType = .PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
+                
+                maintenance5   = true, // @note(viktor): deprecates ShaderModule
+                pushDescriptor = true, // @note(viktor): remove the need for CmdBindVertexBuffers
+                
+                // @todo(viktor): check if this would help the texture upload hostImageCopy
+                // hostImageCopy = true,
+                // @note(viktor): scalarBlockLayout - struct members are padded like c/c++ would, I assume it make simple memcopy possible
+                
+            pNext = &vk.PhysicalDeviceVulkan13Features {
+                sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+                
+                synchronization2 = true,
+                dynamicRendering = true,
+                
+            pNext = &vk.PhysicalDeviceVulkan12Features {
+                sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+                descriptorIndexing                        = true,
+                shaderSampledImageArrayNonUniformIndexing = true,
+                descriptorBindingVariableDescriptorCount  = true,
+                runtimeDescriptorArray                    = true,
+                bufferDeviceAddress                       = true,
+                timelineSemaphore                         = true,
+                
+                shaderInt8 = true,
+                uniformAndStorageBuffer8BitAccess = true,
+                storageBuffer8BitAccess = true,
+                
+            pNext = &vk.PhysicalDeviceVulkan11Features {
+                sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+                
+                storageBuffer16BitAccess = true,
+                uniformAndStorageBuffer16BitAccess = true,
+                shaderDrawParameters = true,
+                
+            pNext = &vk.PhysicalDeviceMeshShaderFeaturesEXT {
+                sType = .PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
+                
+                meshShader = true,
+            },
+            },
+            },
+            },
+            },
             },
             
             queueCreateInfoCount = 1,
             pQueueCreateInfos    = &vk.DeviceQueueCreateInfo {
                 sType = .DEVICE_QUEUE_CREATE_INFO,
                 queueFamilyIndex = queue_family_index,
-                queueCount = auto_cast len(queue_family_priority),
+                queueCount       = auto_cast len(queue_family_priority),
                 pQueuePriorities = raw_data(queue_family_priority),
             },
             
@@ -290,37 +322,35 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
+    init_gpu_allocator(ips, device)
+    
+    ////////////////////////////////////////////////
+    
+    vertex_buffer  := gpu_make_buffer({ .STORAGE_BUFFER }, 128 * Megabyte)
+    meshlet_buffer := gpu_make_buffer({ .STORAGE_BUFFER}, 128 * Megabyte)
+    
     // @todo(viktor): currently we allocate twice, we could probably also allocate once and bind both buffers to the same memory, but I am unsure if that would help with anything.
-    vertex_buffer: Buffer
-    index_buffer:  Buffer
-    index_count: u32
+    mesh: Mesh
     {
-        model := load_obj_model("tutorial/suzanne.obj", context.temp_allocator)
+        mesh = load_obj_mesh("tutorial/suzanne.obj", context.temp_allocator)
         
-        index_count   = model.index_count
-        vertex_buffer_size := model.v_buffer_size
-        i_buffer_size := model.i_buffer_size
-        vertices := model.vertices
-        indices := model.indices
+        build_meshlets(&mesh)
         
-        // @api the function could store a lookup of the allocation so that we only need to return the actual data: [] u8, making this even more similar to new/make.
-        init_gpu_allocator(ips, device)
-        
-        // @todo(viktor): just make one really big(128mb?) buffer for vertices and indices, then pack all meshes into them
-        // @todo(viktor): vma had flags like { .Host_Access_Sequential_Write, .Host_Access_Allow_Transfer_Instead, .Mapped }
-        // is something like this needed here, or is { .HOST_VISIBLE, .HOST_COHERENT } enough? 
-        vertex_buffer = vk_create_buffer(vertex_buffer_size, { .VERTEX_BUFFER, .STORAGE_BUFFER })
-        index_buffer  = vk_create_buffer(i_buffer_size,      { .INDEX_BUFFER, .STORAGE_BUFFER  })
-        
-        copy(vertex_buffer.data, slice_to_bytes(vertices))
-        copy(index_buffer.data,  slice_to_bytes(indices))
+        // @todo(viktor): store that we uploaded the mesh, once we have multiple and or different meshes per frame
+        copy(vertex_buffer.data,  slice_to_bytes(mesh.vertices))
+        copy(meshlet_buffer.data, slice_to_bytes(mesh.meshlets[:]))
     }
     
     ////////////////////////////////////////////////
     
-    shader_data := Shader_Data {
-        light_pos = { 0, -10, 10, 0 },
-        selected  = 1,
+    ////////////////////////////////////////////////
+    
+    shader_data: Shader_Data
+    
+    for &pos, index in shader_data.light_pos {
+        t := clamp_01_to_range(cast(f32) 0, cast(f32) len(shader_data.light_pos), cast(f32) index)
+        pos.xyz = v3{0, -10, 10}
+        pos.xz += arm(t * Tau)
     }
 
     MaxFramesInFlight :: 2
@@ -498,13 +528,13 @@ main :: proc () {
                 binding = 0,
                 descriptorType = .STORAGE_BUFFER,
                 descriptorCount = 1,
-                stageFlags = { .VERTEX },
+                stageFlags = { .MESH_EXT },
             },
             {
                 binding = 1,
                 descriptorType = .STORAGE_BUFFER,
                 descriptorCount = 1,
-                stageFlags = { .VERTEX },
+                stageFlags = { .MESH_EXT },
             },
         }
         vertices_descriptor_layout_create_info := vk.DescriptorSetLayoutCreateInfo{
@@ -591,7 +621,7 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     cam_pos := v3{ 0, 0, -6 }
-    object_rotations: [3] v3
+    object_rotation: v3
     quit: bool
     last_time := time.tick_now()
     
@@ -642,20 +672,12 @@ main :: proc () {
             
             case .MOUSE_MOTION:
                 if event.button.button == sdl.BUTTON_LEFT {
-                    object_rotations[shader_data.selected].x -= event.motion.yrel * delta_time
-                    object_rotations[shader_data.selected].y += event.motion.xrel * delta_time
+                    object_rotation.x -= event.motion.yrel * delta_time
+                    object_rotation.y += event.motion.xrel * delta_time
                 }
                 
             case .MOUSE_WHEEL:
                 cam_pos.z += event.wheel.y * 10 * delta_time
-                
-            case .KEY_DOWN:
-                if event.key.key == sdl.K_PLUS || event.key.key == sdl.K_KP_PLUS {
-                    shader_data.selected = (shader_data.selected + 1) % len(shader_data.model)
-                }
-                if event.key.key == sdl.K_MINUS || event.key.key == sdl.K_KP_MINUS {
-                    shader_data.selected = (shader_data.selected + len(shader_data.model) - 1) % len(shader_data.model)
-                }
                 
             case .WINDOW_RESIZED:
                 recreate_swapchain = true
@@ -714,10 +736,8 @@ main :: proc () {
         
         shader_data.projection = la.matrix4_perspective(45 * RadPerDeg, cast(f32) window_size.x / cast(f32) window_size.y, 0.1, 128)
         shader_data.view = la.matrix4_translate(cam_pos)
-        for &model, i in shader_data.model {
-            instance_pos := v3{cast(f32) (i - 1) * 3, 0, 0}
-            model = la.matrix4_translate(instance_pos) * la.matrix4_from_quaternion(la.quaternion_from_euler_angles_f32(expand_values(object_rotations[i]), .XYX))
-        }
+        instance_pos := v3{}
+        shader_data.model = la.matrix4_translate(instance_pos) * la.matrix4_from_quaternion(la.quaternion_from_euler_angles_f32(expand_values(object_rotation), .XYX))
         
         mem.copy_non_overlapping(frame.shader_data_buffer.allocation_info.mapped_data, &shader_data, size_of(shader_data))
         
@@ -778,6 +798,7 @@ main :: proc () {
         vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D { extent = vk_to_extent(window_size) })
         
         vk.CmdBindPipeline(cb, .GRAPHICS, pipeline)
+        
         write_descriptor_sets := [?] vk.WriteDescriptorSet {
             {
                 sType = .WRITE_DESCRIPTOR_SET,
@@ -791,13 +812,25 @@ main :: proc () {
                     range  = auto_cast len(vertex_buffer.data),
                 },
             },
+            {
+                sType = .WRITE_DESCRIPTOR_SET,
+                dstSet = 0,
+                dstBinding = 1,
+                descriptorType = .STORAGE_BUFFER,
+                descriptorCount = 1,
+                pBufferInfo     = &vk.DescriptorBufferInfo {
+                    buffer = meshlet_buffer.buffer,
+                    offset = 0,
+                    range  = auto_cast len(meshlet_buffer.data),
+                },
+            },
         }
-        vk.CmdPushDescriptorSet(cb, .GRAPHICS, pipeline_layout, 0, len(write_descriptor_sets), &write_descriptor_sets[0])
+        vk.CmdPushDescriptorSet(cb,  .GRAPHICS, pipeline_layout, 0, len(write_descriptor_sets), &write_descriptor_sets[0])
         vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline_layout, 1, 1, &textures_descriptor_set, 0, nil)
         
-        vk.CmdPushConstants(cb, pipeline_layout, { .VERTEX }, 0, size_of(vk.DeviceAddress), &frame.shader_data_buffer.deviceAddress)
-        vk.CmdBindIndexBuffer(cb, index_buffer.buffer, 0, .UINT16)
-        vk.CmdDrawIndexed(cb, index_count, 300, 0, 0, 0)
+        vk.CmdPushConstants(cb, pipeline_layout, { .MESH_EXT }, 0, size_of(vk.DeviceAddress), &frame.shader_data_buffer.deviceAddress)
+        
+        vk.CmdDrawMeshTasksEXT(cb, cast(u32) len(mesh.meshlets), 1, 1)
         
         vk.CmdEndRendering(cb)
         
@@ -878,8 +911,8 @@ main :: proc () {
     
 	vma.destroy_image(allocator, depth_image, depth_image_allocation)
 	vk.DestroyImageView(device, depth_image_view, nil)
-    vk_destroy_buffer(vertex_buffer)
-    vk_destroy_buffer(index_buffer)
+    gpu_delete_buffer(vertex_buffer)
+    gpu_delete_buffer(meshlet_buffer)
     
     for texture in textures {
         vk.DestroyImageView(device, texture.view, nil)
@@ -890,6 +923,8 @@ main :: proc () {
     vk.DestroyDescriptorSetLayout(device, vertices_descriptor_set_layout, nil)
 	vk.DestroyDescriptorSetLayout(device, textures_descriptor_set_layout, nil)
 	
+    vk.DestroyDescriptorPool(device, textures_descriptor_pool, nil)
+    
     // @compression with create_graphics_pipeline
 	vk.DestroyPipelineLayout(device, pipeline_layout, nil)
 	vk.DestroyPipeline(device, pipeline, nil)

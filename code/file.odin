@@ -10,36 +10,21 @@ import vk "vendor:vulkan"
 import "../libs/tobj"
 import "../libs/ktx"
 
-Model :: struct {
-    vertices: [] Vertex,
-    indices:  [] i16,
-    
-    index_count: u32,
-    v_buffer_size: vk.DeviceSize,
-    i_buffer_size: vk.DeviceSize,
-}
-
-Vertex :: struct {
-    p:  v3,
-    n:  [4] u8, // @note(viktor): xyz = direction, w = padding
-    uv: v2,
-}
-
-load_obj_model :: proc (filepath: string, allocator: Allocator) -> Model {
+load_obj_mesh :: proc (filepath: string, allocator: Allocator) -> Mesh {
     models, _, error := tobj.load_obj_filename(filepath, allocator = allocator)
     assert(error == nil)
     model := models[0].mesh
     
     index_count := cast(u32) len(model.indices)
     vertices := make([] Vertex, index_count, allocator)
-    indices  := make([] i16,  len(vertices), allocator)
+    indices  := make([] u16,  len(vertices), allocator)
     
     for index, it_index in model.indices {
         n := model.normals[index] * { 1, -1, 1 }
         
         v := Vertex {
             p  = model.vertices[index]       * { 1, -1, 1 },
-            n  = cast([4] u8) (v4{expand_values(normalize_or_zero(n) + 1), 0} * 127),
+            n  = cast([3] u8) ((normalize_or_zero(n) + 1) * 127),
             uv = model.texture_coords[index] * { 1, -1 },
         }
         
@@ -47,16 +32,9 @@ load_obj_model :: proc (filepath: string, allocator: Allocator) -> Model {
         indices[it_index]  = auto_cast it_index
     }
     
-    v_buffer_size := cast(vk.DeviceSize) len(vertices) * size_of(vertices[0])
-    i_buffer_size := cast(vk.DeviceSize) len(indices)  * size_of(indices[0])
-    
-    result: Model
+    result: Mesh
     result.vertices = vertices
     result.indices = indices
-    
-    result.v_buffer_size = v_buffer_size
-    result.i_buffer_size = i_buffer_size
-    result.index_count = index_count
     
     return result
 }
