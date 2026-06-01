@@ -21,7 +21,7 @@ Model :: struct {
 
 Vertex :: struct {
     p:  v3,
-    n:  v3,
+    n:  [4] u8, // @note(viktor): xyz = direction, w = padding
     uv: v2,
 }
 
@@ -35,9 +35,11 @@ load_obj_model :: proc (filepath: string, allocator: Allocator) -> Model {
     indices  := make([] i16,  len(vertices), allocator)
     
     for index, it_index in model.indices {
+        n := model.normals[index] * { 1, -1, 1 }
+        
         v := Vertex {
             p  = model.vertices[index]       * { 1, -1, 1 },
-            n  = model.normals[index]        * { 1, -1, 1 },
+            n  = cast([4] u8) (v4{expand_values(normalize_or_zero(n) + 1), 0} * 127),
             uv = model.texture_coords[index] * { 1, -1 },
         }
         

@@ -215,6 +215,7 @@ main :: proc () {
                 !f12.shaderSampledImageArrayNonUniformIndexing || 
                 !f12.descriptorBindingVariableDescriptorCount || 
                 !f12.runtimeDescriptorArray || !f12.bufferDeviceAddress ||
+                !f12.shaderInt8 || !f12.uniformAndStorageBuffer8BitAccess || 
                 !f11.shaderDrawParameters || !f11.storageBuffer16BitAccess || !f11.uniformAndStorageBuffer16BitAccess {
                 fmt.printfln("Physical device doesn't meet the feauture requirements")
                 check(false)
@@ -261,6 +262,10 @@ main :: proc () {
                             runtimeDescriptorArray                    = true,
                             bufferDeviceAddress                       = true,
                             timelineSemaphore                         = true,
+                            
+                            shaderInt8 = true,
+                            uniformAndStorageBuffer8BitAccess = true,
+                            storageBuffer8BitAccess = true,
                             
                             pNext = &vk.PhysicalDeviceVulkan11Features {
                                 sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,

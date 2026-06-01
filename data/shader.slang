@@ -1,8 +1,18 @@
+typealias u8  = uint8_t;
+typealias f32 = float;
+typealias v2 = float2;
+typealias v3 = float3;
+typealias v4 = float4;
+typealias m3 = float3x3;
+typealias m4 = float4x4;
+
+
+
 // @todo(viktor): packed/remove padding
 struct Vertex {
-    float px; float py; float pz;
-    float nx; float ny; float nz;
-	float tu; float tv;
+    f32 px, py, pz;
+    u8 nx, ny, nz, n_pad;
+	f32 tu, tv;
 }
 
 [[vk::binding(0, 0)]]
@@ -12,15 +22,15 @@ StructuredBuffer<Vertex> vertices;
 Sampler2D textures[];
 
 struct ShaderData {
-    float4x4 projection;
-    float4x4 view;
-    float4x4 model[3];
-    float4 light_pos;
+    m4 projection;
+    m4 view;
+    m4 model[3];
+    v4 light_pos;
     uint32_t selected;
 }
 
 struct VSOutput {
-    float4 pos : SV_POSITION;
+    v4 pos : SV_POSITION;
     float3 normal;
     float2 uv;
     float3 factor;
@@ -34,30 +44,31 @@ VSOutput main(uniform ShaderData *shader_data, uint instance_index : SV_VulkanIn
     Vertex input = vertices[vertex_index];
     
     float3 p = float3(input.px, input.py, input.pz);
-    float3 n = float3(input.nx, input.ny, input.nz);
+    // 0..255 -> 0..2 -> -1..1
+    float3 n = float3(input.nx, input.ny, input.nz) / 127.0 - 1.0;
     float2 t = float2(input.tu, input.tv);
     
     VSOutput output;
-    float4x4 modelMat = shader_data->model[instance_index%3];
-    float offset = floor(float(instance_index)/3);
+    m4 modelMat = shader_data->model[instance_index%3];
+    f32 offset = floor(f32(instance_index)/3);
     p.z -= offset;
-    float4 p_in_view = mul(mul(shader_data->view, modelMat), float4(p, 1));
+    v4 p_in_view = mul(mul(shader_data->view, modelMat), v4(p, 1));
     
-    output.normal = mul((float3x3)mul(shader_data->view, modelMat), n);
+    output.normal = mul((m3) mul(shader_data->view, modelMat), n);
     output.uv = t;
     output.pos = mul(shader_data->projection, p_in_view);
     output.factor = (shader_data->selected == instance_index ? 30.0f : 1.0f);
     output.instance_index = instance_index%3;
     
     // Calculate view vectors required for lighting
-    float4 fragPos = p_in_view;
+    v4 fragPos = p_in_view;
     output.light_vec = shader_data->light_pos.xyz - fragPos.xyz;
     output.view_vec = -fragPos.xyz;
     return output;
 }
 
 [shader("fragment")]
-float4 main(VSOutput input) {
+v4 main(VSOutput input) {
     // Phong lighting
     float3 n = normalize(input.normal);
     float3 l = normalize(input.light_vec);
@@ -71,5 +82,5 @@ float4 main(VSOutput input) {
     float3 albedo = texture.Sample(input.uv).rgb * input.factor;
     float3 color = diffuse * albedo + specular;
     
-    return float4(color, 1.0);
+    return v4(color, 1);
 }
