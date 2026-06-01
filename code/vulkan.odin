@@ -23,6 +23,26 @@ Pipeline :: struct {
 
 ////////////////////////////////////////////////
 
+to_be_destroyed_handles: [dynamic] DestroyInfo
+
+DestroyInfo :: struct { 
+    handle: vk.NonDispatchableHandle, 
+    fn: proc (device: vk.Device, handle: vk.NonDispatchableHandle, pAllocator: ^vk.AllocationCallbacks)
+}
+
+mark_handle :: proc (fn: $F, handle: $T/ vk.NonDispatchableHandle, loc := #caller_location) {
+    assert(handle != 0, loc = loc)
+    append(&to_be_destroyed_handles, DestroyInfo { handle = auto_cast handle, fn = auto_cast fn })
+}
+
+destroy_all_handles :: proc (device: vk.Device) {
+    #reverse for item in to_be_destroyed_handles {
+        item.fn(device, item.handle, nil)
+    }
+}
+
+////////////////////////////////////////////////
+
 vk_choose_physical_device :: proc (ips: IPS) -> vk.PhysicalDevice {
     physical_devices: [] vk.PhysicalDevice
     {

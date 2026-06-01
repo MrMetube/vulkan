@@ -316,6 +316,7 @@ main :: proc () {
         }
         
         depth_image, depth_image_view, depth_image_allocation = vk_create_depth_image(device, depth_format, window_size, allocator)
+        mark_handle(vk.DestroyImageView, depth_image_view)
     }
     
     ////////////////////////////////////////////////
@@ -357,6 +358,7 @@ main :: proc () {
     frames := #soa [MaxFramesInFlight] Frame_Data {}
     
     for &frame in frames {
+        // @todo(viktor): use my own allocator
         u_buffer_create_info := vk.BufferCreateInfo {
             sType = .BUFFER_CREATE_INFO,
             size  = size_of(shader_data),
@@ -375,12 +377,9 @@ main :: proc () {
             buffer = frame.shader_data_buffer.buffer,
         }
         frame.shader_data_buffer.deviceAddress = vk.GetBufferDeviceAddress(device, &u_buffer_device_address_info)
-    }
-    
-    ////////////////////////////////////////////////
-    
-    for &frame in frames {
+        
         frame.image_aquired = vk_create_semaphore(device)
+        mark_handle(vk.DestroySemaphore, frame.image_aquired)
     }
     
     ////////////////////////////////////////////////
@@ -401,6 +400,7 @@ main :: proc () {
             commandBufferCount = len(frames.command_buffer),
         }
         check(vk.AllocateCommandBuffers(device, &command_buffer_allocate_info, &frames.command_buffer[0]))
+        mark_handle(vk.DestroyCommandPool, command_pool)
     }
      
     textures: [3] Texture
@@ -430,6 +430,7 @@ main :: proc () {
             check(vma.create_image(allocator, image_create_info, image_allocation_create_info, &texture.image, &texture.allocation, nil))
             
             texture.view = vk_create_2d_image_view(device, texture.image, image_create_info.format, { .COLOR }, loaded_texture.mip_levels)
+            mark_handle(vk.DestroyImageView, texture.view)
             
             image_src_buffer: vk.Buffer
             image_src_allocation: vma.Allocation
@@ -514,6 +515,7 @@ main :: proc () {
             }
             
             check(vk.CreateSampler(device, &sampler_create_info, nil, &texture.sampler))
+            mark_handle(vk.DestroySampler, texture.sampler)
             
             texture_descriptors[index] = vk.DescriptorImageInfo{ sampler = texture.sampler, imageView = texture.view, imageLayout = .READ_ONLY_OPTIMAL }
         }
@@ -545,6 +547,7 @@ main :: proc () {
         }
         
         check(vk.CreateDescriptorSetLayout(device, &vertices_descriptor_layout_create_info, nil, &vertex_descriptor_set_layout))
+        mark_handle(vk.DestroyDescriptorSetLayout, vertex_descriptor_set_layout)
     }
     
     ////////////////////////////////////////////////
@@ -570,6 +573,7 @@ main :: proc () {
         }
         
         check(vk.CreateDescriptorSetLayout(device, &desc_layout_textures_create_info, nil, &textures_descriptor_set_layout))
+        mark_handle(vk.DestroyDescriptorSetLayout, textures_descriptor_set_layout)
         
         desc_pool_create_info := vk.DescriptorPoolCreateInfo {
             sType = .DESCRIPTOR_POOL_CREATE_INFO,
@@ -582,6 +586,7 @@ main :: proc () {
         }
         
         check(vk.CreateDescriptorPool(device, &desc_pool_create_info, nil, &textures_descriptor_pool))
+        mark_handle(vk.DestroyDescriptorPool, textures_descriptor_pool)
         
         variable_desc_count := cast(u32) len(textures)
         
@@ -647,11 +652,13 @@ main :: proc () {
         }
         
         check(vk.CreateDescriptorUpdateTemplate(device, &create_info, nil, &vertex_descriptor_update_template))
+        mark_handle(vk.DestroyDescriptorUpdateTemplate, vertex_descriptor_update_template)
     }
     
     ////////////////////////////////////////////////
     
     timeline_semaphore := vk_create_semaphore(device, timeline_initial_value = MaxFramesInFlight)
+    mark_handle(vk.DestroySemaphore, timeline_semaphore)
     
     ////////////////////////////////////////////////
     
@@ -664,6 +671,7 @@ main :: proc () {
             queryCount = QueryPoolSize,
         }
         check(vk.CreateQueryPool(device, &create_info, nil, &query_pool))
+        mark_handle(vk.DestroyQueryPool, query_pool)
     }
     
     ////////////////////////////////////////////////
@@ -950,39 +958,27 @@ main :: proc () {
     
 	check(vk.DeviceWaitIdle(device))
     
-    vk.DestroySemaphore(device, timeline_semaphore, nil)
-    
     for frame in frames {
-		vk.DestroySemaphore(device, frame.image_aquired, nil)
 		vma.destroy_buffer(allocator, frame.shader_data_buffer.buffer, frame.shader_data_buffer.allocation)
     }
     
     vk_destroy_swapchain(device, swapchain, &swapchain_infos)
     
 	vma.destroy_image(allocator, depth_image, depth_image_allocation)
-	vk.DestroyImageView(device, depth_image_view, nil)
+    
     gpu_delete_buffer(vertex_buffer)
     gpu_delete_buffer(meshlet_buffer)
     
     for texture in textures {
-        vk.DestroyImageView(device, texture.view, nil)
-        vk.DestroySampler(device, texture.sampler, nil)
         vma.destroy_image(allocator, texture.image, texture.allocation)
     }
     
-    vk.DestroyQueryPool(device, query_pool, nil)    
-    
-    vk.DestroyDescriptorUpdateTemplate(device, vertex_descriptor_update_template, nil)
-    
-    vk.DestroyDescriptorSetLayout(device, vertex_descriptor_set_layout, nil)
-	vk.DestroyDescriptorSetLayout(device, textures_descriptor_set_layout, nil)
-	
-    vk.DestroyDescriptorPool(device, textures_descriptor_pool, nil)
-    
     destroy_pipeline(device, pipeline)
     
-	vk.DestroyCommandPool(device, command_pool, nil)
 	vma.destroy_allocator(allocator)
+    
+    destroy_all_handles(device)
+    
 	vk.DestroyDevice(device, nil)
     
 	vk.DestroySurfaceKHR(ips.instance, ips.surface, nil)
