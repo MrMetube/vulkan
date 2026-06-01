@@ -57,13 +57,9 @@ Texture :: struct {
 	sampler:    vk.Sampler,
 }
 
-recreate_swapchain: bool
-
-// @naming
-IPS :: struct {
-    instance:        vk.Instance,
-    physical_device: vk.PhysicalDevice,
-    surface:         vk.SurfaceKHR,
+DescriptorUpdateData :: struct #raw_union {
+    buffer: vk.DescriptorBufferInfo,
+    image:  vk.DescriptorImageInfo,
 }
 
 ////////////////////////////////////////////////
@@ -525,7 +521,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    vertices_descriptor_set_layout: vk.DescriptorSetLayout
+    vertex_descriptor_set_layout: vk.DescriptorSetLayout
     {
         bindings := [?] vk.DescriptorSetLayoutBinding {
             {
@@ -548,7 +544,7 @@ main :: proc () {
             pBindings = &bindings[0],
         }
         
-        check(vk.CreateDescriptorSetLayout(device, &vertices_descriptor_layout_create_info, nil, &vertices_descriptor_set_layout))
+        check(vk.CreateDescriptorSetLayout(device, &vertices_descriptor_layout_create_info, nil, &vertex_descriptor_set_layout))
     }
     
     ////////////////////////////////////////////////
@@ -615,8 +611,43 @@ main :: proc () {
     }
     
     ////////////////////////////////////////////////
+
+    pipeline := create_graphics_pipeline(device, swapchain_format, depth_format, vertex_descriptor_set_layout, textures_descriptor_set_layout)
     
-    pipeline, pipeline_layout := vk_create_graphics_pipeline(device, swapchain_format, depth_format, vertices_descriptor_set_layout, textures_descriptor_set_layout)
+    ////////////////////////////////////////////////
+        
+    vertex_descriptor_update_template: vk.DescriptorUpdateTemplate
+    
+    {
+        update_template_entries := [?] vk.DescriptorUpdateTemplateEntry {
+            {
+                dstBinding      = 0,
+                descriptorType  = .STORAGE_BUFFER,
+                descriptorCount = 1,
+                offset          = 0 * size_of(DescriptorUpdateData),
+                stride          = size_of(DescriptorUpdateData),
+            },
+            {
+                dstBinding      = 1,
+                descriptorType  = .STORAGE_BUFFER,
+                descriptorCount = 1,
+                offset          = 1 * size_of(DescriptorUpdateData),
+                stride          = size_of(DescriptorUpdateData),
+            },
+        }
+            
+        create_info := vk.DescriptorUpdateTemplateCreateInfo {
+            sType = .DESCRIPTOR_UPDATE_TEMPLATE_CREATE_INFO,
+            pipelineBindPoint   = .GRAPHICS,
+            pipelineLayout      = pipeline.layout,
+            descriptorSetLayout = vertex_descriptor_set_layout,
+            templateType        = .PUSH_DESCRIPTORS,
+            descriptorUpdateEntryCount = len(update_template_entries),
+            pDescriptorUpdateEntries   = &update_template_entries[0],
+        }
+        
+        check(vk.CreateDescriptorUpdateTemplate(device, &create_info, nil, &vertex_descriptor_update_template))
+    }
     
     ////////////////////////////////////////////////
     
@@ -647,6 +678,7 @@ main :: proc () {
     absolute_frame_index: u64
     image_index: u32
     next_signal_value: u64 = MaxFramesInFlight + 1
+    recreate_swapchain: bool
     
     Smooth :: struct {
         value:      f64,
@@ -712,7 +744,7 @@ main :: proc () {
             depth_image, depth_image_view, depth_image_allocation = vk_create_depth_image(device, depth_format, window_size, allocator)
         }
         
-        pipeline, pipeline_layout = vk_create_graphics_pipeline(device, swapchain_format, depth_format, vertices_descriptor_set_layout, textures_descriptor_set_layout, pipeline, pipeline_layout)
+        pipeline = create_graphics_pipeline(device, swapchain_format, depth_format, vertex_descriptor_set_layout, textures_descriptor_set_layout, pipeline)
         
         ////////////////////////////////////////////////
         
@@ -760,10 +792,10 @@ main :: proc () {
         
         smooth_update(cast(f64) delta_time, &cpu_time, cast(f64) delta_time)
         
-        xx :: proc (seconds: f64) -> time.Duration {
+        view :: proc (seconds: f64) -> time.Duration {
             return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
         }
-        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, triangles: %v, meshlets: %v", xx(cpu_time.value), xx(gpu_time.value), view_magnitude(len(mesh.indices) / 3) , view_magnitude(len(mesh.meshlets))))
+        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, triangles: %v, meshlets: %v", view(cpu_time.value), view(gpu_time.value), view_magnitude(len(mesh.indices) / 3) , view_magnitude(len(mesh.meshlets))))
             
         ////////////////////////////////////////////////
         
@@ -834,38 +866,17 @@ main :: proc () {
         
         vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D { extent = vk_to_extent(window_size) })
         
-        vk.CmdBindPipeline(cb, .GRAPHICS, pipeline)
+        vk.CmdBindPipeline(cb, .GRAPHICS, pipeline.pipeline)
         
-        write_descriptor_sets := [?] vk.WriteDescriptorSet {
-            {
-                sType = .WRITE_DESCRIPTOR_SET,
-                dstSet = 0,
-                dstBinding = 0,
-                descriptorType = .STORAGE_BUFFER,
-                descriptorCount = 1,
-                pBufferInfo     = &vk.DescriptorBufferInfo {
-                    buffer = vertex_buffer.buffer,
-                    offset = 0,
-                    range  = auto_cast len(vertex_buffer.data),
-                },
-            },
-            {
-                sType = .WRITE_DESCRIPTOR_SET,
-                dstSet = 0,
-                dstBinding = 1,
-                descriptorType = .STORAGE_BUFFER,
-                descriptorCount = 1,
-                pBufferInfo     = &vk.DescriptorBufferInfo {
-                    buffer = meshlet_buffer.buffer,
-                    offset = 0,
-                    range  = auto_cast len(meshlet_buffer.data),
-                },
-            },
+        descriptor_update_data := [?] DescriptorUpdateData {
+            { buffer = { vertex_buffer.buffer,  0, auto_cast vk.WHOLE_SIZE }},
+            { buffer = { meshlet_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
         }
-        vk.CmdPushDescriptorSet(cb,  .GRAPHICS, pipeline_layout, 0, len(write_descriptor_sets), &write_descriptor_sets[0])
-        vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline_layout, 1, 1, &textures_descriptor_set, 0, nil)
+        vk.CmdPushDescriptorSetWithTemplate(cb,  vertex_descriptor_update_template, pipeline.layout, 0, &descriptor_update_data[0])
         
-        vk.CmdPushConstants(cb, pipeline_layout, { .MESH_EXT }, 0, size_of(vk.DeviceAddress), &frame.shader_data_buffer.deviceAddress)
+        vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline.layout, 1, 1, &textures_descriptor_set, 0, nil)
+        
+        vk.CmdPushConstants(cb, pipeline.layout, { .MESH_EXT }, 0, size_of(vk.DeviceAddress), &frame.shader_data_buffer.deviceAddress)
         
         vk.CmdDrawMeshTasksEXT(cb, cast(u32) len(mesh.meshlets), 1, 1)
         
@@ -961,12 +972,14 @@ main :: proc () {
     
     vk.DestroyQueryPool(device, query_pool, nil)    
     
-    vk.DestroyDescriptorSetLayout(device, vertices_descriptor_set_layout, nil)
+    vk.DestroyDescriptorUpdateTemplate(device, vertex_descriptor_update_template, nil)
+    
+    vk.DestroyDescriptorSetLayout(device, vertex_descriptor_set_layout, nil)
 	vk.DestroyDescriptorSetLayout(device, textures_descriptor_set_layout, nil)
 	
     vk.DestroyDescriptorPool(device, textures_descriptor_pool, nil)
     
-    destroy_pipeline(device, pipeline, pipeline_layout)
+    destroy_pipeline(device, pipeline)
     
 	vk.DestroyCommandPool(device, command_pool, nil)
 	vma.destroy_allocator(allocator)

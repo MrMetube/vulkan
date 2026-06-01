@@ -9,6 +9,18 @@ import vk "vendor:vulkan"
 import sdl "vendor:sdl3"
 import "../libs/vma"
 
+// @naming
+IPS :: struct {
+    instance:        vk.Instance,
+    physical_device: vk.PhysicalDevice,
+    surface:         vk.SurfaceKHR,
+}
+
+Pipeline :: struct {
+    pipeline: vk.Pipeline,
+    layout:   vk.PipelineLayout,
+}
+
 ////////////////////////////////////////////////
 
 vk_choose_physical_device :: proc (ips: IPS) -> vk.PhysicalDevice {
@@ -248,25 +260,24 @@ vk_end_transition_images :: proc (command_buffer: vk.CommandBuffer) {
 
 ////////////////////////////////////////////////
 
-vk_create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_format: vk.Format, vertices_descriptor_set_layout, textures_descriptor_set_layout: vk.DescriptorSetLayout, old_pipeline: vk.Pipeline = 0, old_pipeline_layout: vk.PipelineLayout = 0) ->  (vk.Pipeline, vk.PipelineLayout) {
+create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_format: vk.Format, vertices_descriptor_set_layout, textures_descriptor_set_layout: vk.DescriptorSetLayout, old: Pipeline = {}) -> Pipeline {
     // @todo(viktor): cant we just check if output is older than source? then we don't need the map
     shader_source := "shader.slang"
     shader_output := "shader.spirv"
     
-    if old_pipeline != 0 && !is_newer(shader_source, shader_output) {
-        return old_pipeline, old_pipeline_layout
+    if old.pipeline != 0 && !is_newer(shader_source, shader_output) {
+        return old
     }
     
     if !recompile_shader(shader_source, shader_output) {
-        if old_pipeline == 0 || old_pipeline_layout == 0 {
+        if old.pipeline == 0 || old.layout == 0 {
             assert(false, "Failed to create graphics pipeline")
         }
-        return old_pipeline, old_pipeline_layout
+        return old
     }
     
     // @study(viktor): is a pipeline cache still a good optimization?
-    pipeline: vk.Pipeline
-    pipeline_layout: vk.PipelineLayout
+    result: Pipeline
     
     shader_bytes, err := os.read_entire_file(shader_output, context.temp_allocator)
     assert(err == nil)
@@ -295,7 +306,7 @@ vk_create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_
         },
     }
     
-    check(vk.CreatePipelineLayout(device, &pipeline_layout_create_info, nil, &pipeline_layout))
+    check(vk.CreatePipelineLayout(device, &pipeline_layout_create_info, nil, &result.layout))
     
     shader_stages := [] vk.PipelineShaderStageCreateInfo {
         { sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, stage = { .MESH_EXT }, pName = "main", pNext = &shader_module_create_info },
@@ -355,25 +366,25 @@ vk_create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_
             dynamicStateCount = auto_cast len(dynamic_states),
             pDynamicStates    = raw_data(dynamic_states),
         },
-        layout = pipeline_layout,
+        layout = result.layout,
     }
     
-    check(vk.CreateGraphicsPipelines(device, 0, 1,&pipeline_create_info, nil, &pipeline))
+    check(vk.CreateGraphicsPipelines(device, 0, 1,&pipeline_create_info, nil, &result.pipeline))
     
     check(vk.DeviceWaitIdle(device))
     
-    destroy_pipeline(device, old_pipeline, old_pipeline_layout)
+    destroy_pipeline(device, old)
     
-    return pipeline, pipeline_layout
+    return result
 }
 
-destroy_pipeline :: proc (device: vk.Device, pipeline: vk.Pipeline, layout: vk.PipelineLayout) {
-    if layout != 0 {
-        vk.DestroyPipelineLayout(device, layout, nil)
+destroy_pipeline :: proc (device: vk.Device, pipeline: Pipeline) {
+    if pipeline.layout != 0 {
+        vk.DestroyPipelineLayout(device, pipeline.layout, nil)
     }
     
-    if pipeline != 0 {
-        vk.DestroyPipeline(device, pipeline, nil)
+    if pipeline.pipeline != 0 {
+        vk.DestroyPipeline(device, pipeline.pipeline, nil)
     }
 }
 
