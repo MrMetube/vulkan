@@ -124,9 +124,7 @@ vk_create_swapchain :: proc (ips: IPS, device: vk.Device, window_size: uv2, form
         imageUsage       = { .COLOR_ATTACHMENT },
         preTransform     = { .IDENTITY },
         compositeAlpha   = { .OPAQUE },
-        // @note(viktor): use FIFO for vsync, and .IMMEDIATE for most fps
-        presentMode      = .FIFO,
-        // presentMode      = .IMMEDIATE,
+        presentMode      = VSync ? .FIFO : .IMMEDIATE,
         
         oldSwapchain = old_swapchain,
     }
@@ -364,15 +362,19 @@ vk_create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_
     
     check(vk.DeviceWaitIdle(device))
     
-    if old_pipeline_layout != 0 {
-        vk.DestroyPipelineLayout(device, old_pipeline_layout, nil)
-    }
-    
-    if old_pipeline != 0 {
-        vk.DestroyPipeline(device, old_pipeline, nil)
-    }
+    destroy_pipeline(device, old_pipeline, old_pipeline_layout)
     
     return pipeline, pipeline_layout
+}
+
+destroy_pipeline :: proc (device: vk.Device, pipeline: vk.Pipeline, layout: vk.PipelineLayout) {
+    if layout != 0 {
+        vk.DestroyPipelineLayout(device, layout, nil)
+    }
+    
+    if pipeline != 0 {
+        vk.DestroyPipeline(device, pipeline, nil)
+    }
 }
 
 ////////////////////////////////////////////////
@@ -451,6 +453,47 @@ gpu_make_buffer :: proc (usage: vk.BufferUsageFlags, #any_int size: vk.DeviceSiz
     
     return result
 }
+
+/* :ScratchBuffer:
+from  Optimizing mesh rendering https://youtu.be/ayKoqK3kQ9c?list=PL0JVLUVCkk-l7CWCn3-cdftR0oajugYvd&t=2359
+void uploadBuffer(VkDevice device, VkCommandPool commandPool, VkCommandBuffer commandBuffer, VkQueue queue, const Buffer& buffer, const Buffer& scratch, const void* data, size_t size)
+
+    assert(scratch.data);
+    assert(scratch.size >= size);
+    memcpy(scratch.data, data, size);
+
+    VK_CHECK(vkResetCommandPool(device, commandPool, 0));
+
+    VkCommandBufferBeginInfo beginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
+
+    VkBufferCopy region = { 0, 0, VkDeviceSize(size) };
+    vkCmdCopyBuffer(commandBuffer, scratch.buffer, buffer.buffer, 1, &region);
+
+    VkBufferMemoryBarrier copyBarrier = { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+    copyBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    copyBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    copyBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    copyBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    copyBarrier.buffer = buffer.buffer;
+    copyBarrier.offset = 0;
+    copyBarrier.size = size;
+
+    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0,0,1, &copyBarrier, 0,0);
+
+    VK_CHECK(vkEndCommandBuffer(commandBuffer));
+
+    VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+
+    VK_CHECK(vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE));
+
+    VK_CHECK(vkDeviceWaitIdle(device));
+}
+*/
 
 gpu_delete_buffer :: proc (buffer: Buffer) {
     assert(gpu_allocator_state.initialized)

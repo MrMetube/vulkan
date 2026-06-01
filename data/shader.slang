@@ -12,17 +12,21 @@ typealias m4 = float4x4;
 
 // @volatile cpi needs to match this layout
 struct Vertex {
-    f32 px, py, pz;
+    f32 px, py, pz, p_pad;
     u8 nx, ny, nz, n_pad;
 	f32 tu, tv;
 }
 
+static const uint MaxVertexCount = 64;
+static const uint MaxIndexCount  = 84;
+static const uint ThreadCount    = 32;
+
 
 // @volatile cpi needs to match this layout
 struct Meshlet {
-    u32 vertices[64];
-    u8  indices[128-1-1];
-    u8  index_count;
+    u32 vertices[MaxVertexCount];
+    u8  indices[MaxIndexCount*3];
+    u8  triangle_count;
     u8  vertex_count;
 }
 
@@ -43,35 +47,29 @@ struct Shader_Data {
 
 struct Mesh_Result {
     v4 pos : SV_POSITION;
-    float3 normal : NORMAL;
-    float2 uv : TEXCOORD0;
-    float3 light_vec[4];
-    float3 view_vec;
+    v3 normal : NORMAL;
+    v2 uv : TEXCOORD0;
+    v3 light_vec[4];
+    v3 view_vec;
 }
-
-static const uint thread_count = 32;
 
 [shader("mesh")]
 [outputtopology("triangle")]
-[numthreads(thread_count, 1, 1)]
+[numthreads(ThreadCount, 1, 1)]
 [outputtopology("triangle")]
-void main(out OutputVertices<Mesh_Result, 64> out_vertices, out OutputIndices<uint3, 126 / 3> out_indices, uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID, uniform Shader_Data *shader_data) {
+void main (out OutputVertices<Mesh_Result, MaxVertexCount> out_vertices, out OutputIndices<uint3, MaxIndexCount> out_indices, uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID, uniform Shader_Data *shader_data) {
     uint mi = group_id.x;
     Meshlet meshet = meshlets[mi];
     
-    uint primitive_count = meshet.index_count / 3;
-    
-    SetMeshOutputCounts(meshet.vertex_count, primitive_count);
-    
-    for (int i = thread_id.x; i < meshet.vertex_count; i += thread_count) {
+    for (int i = thread_id.x; i < meshet.vertex_count; i += ThreadCount) {
         uint vi = meshet.vertices[i];
         
         Vertex input = vertices[vi];
         
-        float3 p = float3(input.px, input.py, input.pz);
+        v3 p = v3(input.px, input.py, input.pz);
         // 0..255 -> 0..2 -> -1..1
-        float3 n = float3(input.nx, input.ny, input.nz) / 127.0 - 1.0;
-        float2 t = float2(input.tu, input.tv);
+        v3 n = v3(input.nx, input.ny, input.nz) / 127.0 - 1.0;
+        v2 t = v2(input.tu, input.tv);
         
         Mesh_Result result;
         //@cleanup single model transform
@@ -92,38 +90,36 @@ void main(out OutputVertices<Mesh_Result, 64> out_vertices, out OutputIndices<ui
         out_vertices[i] = result;
     }
     
-    GroupMemoryBarrierWithGroupSync();
+    // @speed as the indices are really [3] u8, we could write them packed into a u32 and get 4x throughput
+    for (int i = thread_id.x; i < meshet.triangle_count; i += ThreadCount) {
+        out_indices[i].x = meshet.indices[i*3+0];
+        out_indices[i].y = meshet.indices[i*3+1];
+        out_indices[i].z = meshet.indices[i*3+2];
+    }
     
-    for (int i = thread_id.x; i < primitive_count; i += thread_count) {
-        uint base = i * 3;
-        // @speed as the indices are really [3] u8, we could write them packed into a u32 and get 4x throughput
-        // see: glsl writePackedPrimitiveIndices4x8NV
-        out_indices[i] = uint3(
-            meshet.indices[base+0],
-            meshet.indices[base+1],
-            meshet.indices[base+2]
-        );
+    if (thread_id.x == 0) {
+        SetMeshOutputCounts(meshet.vertex_count, meshet.triangle_count);
     }
 }
 
 [shader("fragment")]
-v4 main(Mesh_Result input) {
+v4 main (Mesh_Result input) {
     v3 diffuse  = v3(0);
     v3 specular = v3(0);
     
     // Phong lighting
-    float3 n = normalize(input.normal);
-    float3 v = normalize(input.view_vec);
+    v3 n = normalize(input.normal);
+    v3 v = normalize(input.view_vec);
     for (int li = 0; li < 4; li++) {
-        float3 l = normalize(input.light_vec[li]);
-        float3 r = reflect(-l, n);
+        v3 l = normalize(input.light_vec[li]);
+        v3 r = reflect(-l, n);
         diffuse  += max(dot(n, l), 0.0025);
         specular += pow(max(dot(r, v), 0.0), 16.0) * 0.75;
     }
     
     Sampler2D texture = textures[NonUniformResourceIndex(0)];
-    float3 albedo = texture.Sample(input.uv).rgb;
-    float3 color = diffuse * albedo + specular;
+    v3 albedo = texture.Sample(input.uv).rgb;
+    v3 color = diffuse * albedo + specular;
     
     return v4(color, 1);
 }

@@ -1,5 +1,7 @@
 package main
 
+// @study look into mesh_optimizer and optimizeVertexCache, optimizeVertexFetch as well as remapVertex/IndexBuffer
+
 // @speed for cache reasons we should, if possible, do this either whilst loading or combined with other processing, or just offline
 build_meshlets :: proc (mesh: ^Mesh) {
     Missing :: ~cast(u8) 0
@@ -29,7 +31,7 @@ build_meshlets :: proc (mesh: ^Mesh) {
             flush = true
         }
         
-        if meshlet.index_count + 1 > len(meshlet.indices) {
+        if meshlet.triangle_count >= len(meshlet.indices) {
             flush = true
         }
         
@@ -51,8 +53,8 @@ build_meshlets :: proc (mesh: ^Mesh) {
         }
         
         for v, index in vs {
-            meshlet.indices[meshlet.index_count + cast(u8) index] = v^
+            meshlet.indices[meshlet.triangle_count][index] = v^
         }
-        meshlet.index_count += 3
+        meshlet.triangle_count += 1
     }
 }

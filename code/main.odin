@@ -15,6 +15,10 @@ import vk "vendor:vulkan"
 
 ////////////////////////////////////////////////
 
+VSync :: true
+
+////////////////////////////////////////////////
+
 Frame_Data :: struct {
     shader_data_buffer: Shader_Data_Buffer,
     command_buffer:     vk.CommandBuffer,
@@ -72,18 +76,18 @@ Mesh :: struct {
 }
 
 // @volatile shader.slang needs to match this layout
+// @speed we could go down to f16s for p and uv
 Vertex :: struct {
-    p:  v3,
-    n:  [3] u8, _pad: u8,
+    p:  v3, p_pad: f32,
+    n:  [3] u8, n_pad: u8,
     uv: v2,
 }
 
-// @todo(viktor): check the constraints of my actual hardware for this
 Meshlet :: struct {
     vertices: [64] u32,
-    indices:  [128-1-1] u8, // @note(viktor): this is done based on the niagra video series, which states that there can be atmost [128] u8 in total for indices and indices_count, we then drop 1 index to get a number divisible by 3
-    index_count:  u8,
-    vertex_count: u8,
+    indices:  [84] [3] u8,
+    triangle_count: u8,
+    vertex_count:   u8,
 }
 
 ////////////////////////////////////////////////
@@ -191,7 +195,6 @@ main :: proc () {
         
         device_extensions := [] cstring { 
             vk.KHR_SWAPCHAIN_EXTENSION_NAME,
-            vk.KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, // @todo(viktor): isn't this in 1.4?
             vk.EXT_MESH_SHADER_EXTENSION_NAME,
         }
         
@@ -325,15 +328,16 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
+    // @speed :ScratchBuffer: use a scratch buffer and have some api like copy(vkstuff, dest_buffer_in_device_local_memory, scratch_buffer, data), The main reason for this, is that we want all of the data for the shader to be in device_local memory.
     vertex_buffer  := gpu_make_buffer({ .STORAGE_BUFFER }, 128 * Megabyte)
-    meshlet_buffer := gpu_make_buffer({ .STORAGE_BUFFER},  128 * Megabyte)
+    meshlet_buffer := gpu_make_buffer({ .STORAGE_BUFFER }, 128 * Megabyte)
     
     // @todo(viktor): currently we allocate twice, we could probably also allocate once and bind both buffers to the same memory, but I am unsure if that would help with anything.
     mesh: Mesh
     {
-        mesh = load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
+        // mesh = load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
         // mesh = load_mesh_from_obj("models/bunny.obj", context.temp_allocator)
-        // mesh = load_mesh_from_obj("models/lucy_280k.obj", context.temp_allocator)
+        mesh = load_mesh_from_obj("models/lucy_280k.obj", context.temp_allocator)
         
         build_meshlets(&mesh)
         
@@ -341,8 +345,6 @@ main :: proc () {
         copy(vertex_buffer.data,  slice_to_bytes(mesh.vertices))
         copy(meshlet_buffer.data, slice_to_bytes(mesh.meshlets[:]))
     }
-    
-    ////////////////////////////////////////////////
     
     ////////////////////////////////////////////////
     
@@ -963,9 +965,8 @@ main :: proc () {
 	vk.DestroyDescriptorSetLayout(device, textures_descriptor_set_layout, nil)
 	
     vk.DestroyDescriptorPool(device, textures_descriptor_pool, nil)
-    // @compression with create_graphics_pipeline
-	vk.DestroyPipelineLayout(device, pipeline_layout, nil)
-	vk.DestroyPipeline(device, pipeline, nil)
+    
+    destroy_pipeline(device, pipeline, pipeline_layout)
     
 	vk.DestroyCommandPool(device, command_pool, nil)
 	vma.destroy_allocator(allocator)
