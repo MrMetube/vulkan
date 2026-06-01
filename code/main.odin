@@ -215,7 +215,7 @@ main :: proc () {
                 !f12.shaderSampledImageArrayNonUniformIndexing || 
                 !f12.descriptorBindingVariableDescriptorCount || 
                 !f12.runtimeDescriptorArray || !f12.bufferDeviceAddress ||
-                !f11.shaderDrawParameters {
+                !f11.shaderDrawParameters || !f11.storageBuffer16BitAccess || !f11.uniformAndStorageBuffer16BitAccess {
                 fmt.printfln("Physical device doesn't meet the feauture requirements")
                 check(false)
             }
@@ -229,38 +229,46 @@ main :: proc () {
         device_create_info := vk.DeviceCreateInfo {
             sType = .DEVICE_CREATE_INFO,
             
-            pEnabledFeatures = &vk.PhysicalDeviceFeatures {
-                samplerAnisotropy = true, // @note(viktor): since 1.4 this is required
-            },
-            pNext = &vk.PhysicalDeviceVulkan14Features {
-                sType = .PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
+            pNext = &vk.PhysicalDeviceFeatures2 {
+                sType = .PHYSICAL_DEVICE_FEATURES_2,
                 
-                maintenance5   = true, // @note(viktor): deprecates ShaderModule
-                pushDescriptor = true, // @note(viktor): remove the need for CmdBindVertexBuffers
+                features = {
+                    samplerAnisotropy = true, // @note(viktor): since 1.4 this is required
+                    shaderInt16 = true,
+                },
                 
-                // @todo(viktor): check if this would help the texture upload hostImageCopy
-                // hostImageCopy = true,
-                // @note(viktor): scalarBlockLayout - struct members are padded like c/c++ would, I assume it make simple memcopy possible
-                
-                pNext = &vk.PhysicalDeviceVulkan13Features {
-                    sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+                pNext = &vk.PhysicalDeviceVulkan14Features {
+                    sType = .PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
                     
-                    synchronization2 = true,
-                    dynamicRendering = true,
+                    maintenance5   = true, // @note(viktor): deprecates ShaderModule
+                    pushDescriptor = true, // @note(viktor): remove the need for CmdBindVertexBuffers
                     
-                    pNext = &vk.PhysicalDeviceVulkan12Features {
-                        sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-                        descriptorIndexing                        = true,
-                        shaderSampledImageArrayNonUniformIndexing = true,
-                        descriptorBindingVariableDescriptorCount  = true,
-                        runtimeDescriptorArray                    = true,
-                        bufferDeviceAddress                       = true,
-                        timelineSemaphore                         = true,
+                    // @todo(viktor): check if this would help the texture upload hostImageCopy
+                    // hostImageCopy = true,
+                    // @note(viktor): scalarBlockLayout - struct members are padded like c/c++ would, I assume it make simple memcopy possible
+                    
+                    pNext = &vk.PhysicalDeviceVulkan13Features {
+                        sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
                         
-                        pNext = &vk.PhysicalDeviceVulkan11Features {
-                            sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+                        synchronization2 = true,
+                        dynamicRendering = true,
+                        
+                        pNext = &vk.PhysicalDeviceVulkan12Features {
+                            sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+                            descriptorIndexing                        = true,
+                            shaderSampledImageArrayNonUniformIndexing = true,
+                            descriptorBindingVariableDescriptorCount  = true,
+                            runtimeDescriptorArray                    = true,
+                            bufferDeviceAddress                       = true,
+                            timelineSemaphore                         = true,
                             
-                            shaderDrawParameters = true,
+                            pNext = &vk.PhysicalDeviceVulkan11Features {
+                                sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+                                
+                                storageBuffer16BitAccess = true,
+                                uniformAndStorageBuffer16BitAccess = true,
+                                shaderDrawParameters = true,
+                            },
                         },
                     },
                 },
@@ -354,7 +362,7 @@ main :: proc () {
         // @todo(viktor): vma had flags like { .Host_Access_Sequential_Write, .Host_Access_Allow_Transfer_Instead, .Mapped }
         // is something like this needed here, or is { .HOST_VISIBLE, .HOST_COHERENT } enough? 
         vertex_buffer = vk_create_buffer(vertex_buffer_size, { .VERTEX_BUFFER, .STORAGE_BUFFER })
-        index_buffer  = vk_create_buffer(i_buffer_size,      { .INDEX_BUFFER  })
+        index_buffer  = vk_create_buffer(i_buffer_size,      { .INDEX_BUFFER, .STORAGE_BUFFER  })
         
         copy(vertex_buffer.data, slice_to_bytes(vertices))
         copy(index_buffer.data,  slice_to_bytes(indices))
@@ -537,16 +545,25 @@ main :: proc () {
     
     vertices_descriptor_set_layout: vk.DescriptorSetLayout
     {
-        vertices_descriptor_layout_create_info := vk.DescriptorSetLayoutCreateInfo{
-            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            flags = { .PUSH_DESCRIPTOR },
-            bindingCount = 1,
-            pBindings = &vk.DescriptorSetLayoutBinding {
+        bindings := [?] vk.DescriptorSetLayoutBinding {
+            {
                 binding = 0,
                 descriptorType = .STORAGE_BUFFER,
                 descriptorCount = 1,
                 stageFlags = { .VERTEX },
             },
+            {
+                binding = 1,
+                descriptorType = .STORAGE_BUFFER,
+                descriptorCount = 1,
+                stageFlags = { .VERTEX },
+            },
+        }
+        vertices_descriptor_layout_create_info := vk.DescriptorSetLayoutCreateInfo{
+            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            flags = { .PUSH_DESCRIPTOR },
+            bindingCount = len(bindings),
+            pBindings = &bindings[0],
         }
         
         check(vk.CreateDescriptorSetLayout(device, &vertices_descriptor_layout_create_info, nil, &vertices_descriptor_set_layout))
@@ -661,8 +678,6 @@ main :: proc () {
         delta_time := cast(f32) time.duration_seconds(delta_tick)
         last_time = current_time
         
-        smooth_update(delta_time, &smooth_frame_time, delta_time)
-        
         ////////////////////////////////////////////////
         
         xx :: proc (seconds: f32) -> time.Duration {
@@ -698,6 +713,9 @@ main :: proc () {
                 recreate_swapchain = true
             }
         }
+        
+        // @todo(viktor): if the window is moved, we are blocked from executing by windows. the next frame time will then distort this smooth, messing with readability
+        smooth_update(delta_time, &smooth_frame_time, delta_time)
         
         ////////////////////////////////////////////////
         
@@ -813,20 +831,34 @@ main :: proc () {
         
         vk.CmdBindPipeline(cb, .GRAPHICS, pipeline)
         
-        write_descriptor_set := vk.WriteDescriptorSet {
-            sType = .WRITE_DESCRIPTOR_SET,
-            dstBinding = 0,
-            descriptorCount = 1,
-            descriptorType = .STORAGE_BUFFER,
-            pBufferInfo = &vk.DescriptorBufferInfo {
-                buffer = vertex_buffer.buffer,
-                offset = 0,
-                range  = auto_cast len(vertex_buffer.data),
+        write_descriptor_sets := [2] vk.WriteDescriptorSet {
+            {
+                sType = .WRITE_DESCRIPTOR_SET,
+                dstSet = 0,
+                dstBinding = 0,
+                descriptorType = .STORAGE_BUFFER,
+                descriptorCount = 1,
+                pBufferInfo     = &vk.DescriptorBufferInfo {
+                    buffer = vertex_buffer.buffer,
+                    offset = 0,
+                    range  = auto_cast len(vertex_buffer.data),
+                },
+            },
+            {
+                sType = .WRITE_DESCRIPTOR_SET,
+                dstSet = 0,
+                dstBinding = 1,
+                descriptorType = .STORAGE_BUFFER,
+                descriptorCount = 1,
+                pBufferInfo     = &vk.DescriptorBufferInfo {
+                    buffer = index_buffer.buffer,
+                    offset = 0,
+                    range  = auto_cast len(index_buffer.data),
+                },
             },
         }
-        vk.CmdPushDescriptorSet(cb, .GRAPHICS, pipeline_layout, 0, 1, &write_descriptor_set)
+        vk.CmdPushDescriptorSet(cb, .GRAPHICS, pipeline_layout, 0, len(write_descriptor_sets), &write_descriptor_sets[0])
         vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline_layout, 1, 1, &textures_descriptor_set, 0, nil)
-        vk.CmdBindIndexBuffer(cb, index_buffer.buffer, 0, .UINT16)
         
         vk.CmdPushConstants(cb, pipeline_layout, { .VERTEX }, 0, size_of(vk.DeviceAddress), &frame.shader_data_buffer.deviceAddress)
         

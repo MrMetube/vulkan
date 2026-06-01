@@ -56,7 +56,9 @@ vk_create_swapchain :: proc (ips: IPS, device: vk.Device, window_size: uv2, form
         imageUsage       = { .COLOR_ATTACHMENT },
         preTransform     = { .IDENTITY },
         compositeAlpha   = { .OPAQUE },
-        presentMode      = .FIFO,
+        // @note(viktor): use FIFO for vsync, and .IMMEDIATE for most fps
+        // presentMode      = .FIFO,
+        presentMode      = .IMMEDIATE,
         
         oldSwapchain = old_swapchain,
     }
@@ -187,8 +189,9 @@ vk_create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_
     
     successful: bool
     
-    shader_source := "tutorial/shader.slang"
-    shader_output := "tutorial/shader.spirv"
+    // @todo(viktor): cant we just check if output is older than source? then we don't need the map
+    shader_source := "shader.slang"
+    shader_output := "shader.spirv"
     
     shader: if hotreload(shader_source) {
         cmd: Cmd
@@ -267,13 +270,9 @@ vk_create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_
                 depthAttachmentFormat = depth_format,
             },
             stageCount = auto_cast len(shader_stages),
-            pStages = raw_data(shader_stages),
+            pStages    = raw_data(shader_stages),
             pVertexInputState = &vk.PipelineVertexInputStateCreateInfo { // @cleanup
                 sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-                vertexBindingDescriptionCount = 0,
-                pVertexBindingDescriptions = nil,
-                vertexAttributeDescriptionCount = 0,
-                pVertexAttributeDescriptions = nil,
             },
             pInputAssemblyState = &vk.PipelineInputAssemblyStateCreateInfo {
                 sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
@@ -315,6 +314,8 @@ vk_create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_
         }
         
         check(vk.CreateGraphicsPipelines(device, 0, 1,&pipeline_create_info, nil, &pipeline))
+        
+        check(vk.DeviceWaitIdle(device))
         
         if old_pipeline_layout != 0 {
             vk.DestroyPipelineLayout(device, old_pipeline_layout, nil)
