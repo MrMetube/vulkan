@@ -336,8 +336,8 @@ main :: proc () {
     mesh: Mesh
     {
         // mesh = load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
-        // mesh = load_mesh_from_obj("models/bunny.obj", context.temp_allocator)
-        mesh = load_mesh_from_obj("models/lucy_280k.obj", context.temp_allocator)
+        mesh = load_mesh_from_obj("models/bunny.obj", context.temp_allocator)
+        // mesh = load_mesh_from_obj("models/lucy_280k.obj", context.temp_allocator)
         
         build_meshlets(&mesh)
         

@@ -9,6 +9,7 @@ typealias m3 = float3x3;
 typealias m4 = float4x4;
 
 
+static const bool Debug = false;
 
 // @volatile cpi needs to match this layout
 struct Vertex {
@@ -51,20 +52,23 @@ struct Mesh_Result {
     v2 uv : TEXCOORD0;
     v3 light_vec[4];
     v3 view_vec;
+    
+    v3 debug_color;
 }
 
 [shader("mesh")]
 [outputtopology("triangle")]
 [numthreads(ThreadCount, 1, 1)]
 [outputtopology("triangle")]
-void main (out OutputVertices<Mesh_Result, MaxVertexCount> out_vertices, out OutputIndices<uint3, MaxIndexCount> out_indices, uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID, uniform Shader_Data *shader_data) {
-    uint mi = group_id.x;
-    Meshlet meshet = meshlets[mi];
+void main(out OutputVertices<Mesh_Result, MaxVertexCount> out_vertices, out OutputIndices<uint3, MaxIndexCount> out_indices, uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID, uniform Shader_Data *shader_data) {
+    uint mesh_index = group_id.x;
+    Meshlet meshlet = meshlets[mesh_index];
     
-    for (int i = thread_id.x; i < meshet.vertex_count; i += ThreadCount) {
-        uint vi = meshet.vertices[i];
+    
+    for (int i = thread_id.x; i < meshlet.vertex_count; i += ThreadCount) {
+        uint vertex_index = meshlet.vertices[i];
         
-        Vertex input = vertices[vi];
+        Vertex input = vertices[vertex_index];
         
         v3 p = v3(input.px, input.py, input.pz);
         // 0..255 -> 0..2 -> -1..1
@@ -88,22 +92,37 @@ void main (out OutputVertices<Mesh_Result, MaxVertexCount> out_vertices, out Out
         result.view_vec = -fragPos.xyz;
         
         out_vertices[i] = result;
+        
+        if (Debug) {
+            uint mhash = hash(mesh_index);
+            result.debug_color = v3(f32(mhash & 255), f32((mhash >> 8) & 255), f32((mhash >> 16) & 255)) / 255;
+        }
     }
     
     // @speed as the indices are really [3] u8, we could write them packed into a u32 and get 4x throughput
-    for (int i = thread_id.x; i < meshet.triangle_count; i += ThreadCount) {
-        out_indices[i].x = meshet.indices[i*3+0];
-        out_indices[i].y = meshet.indices[i*3+1];
-        out_indices[i].z = meshet.indices[i*3+2];
+    for (int i = thread_id.x; i < meshlet.triangle_count; i += ThreadCount) {
+        out_indices[i].x = meshlet.indices[i*3+0];
+        out_indices[i].y = meshlet.indices[i*3+1];
+        out_indices[i].z = meshlet.indices[i*3+2];
     }
     
     if (thread_id.x == 0) {
-        SetMeshOutputCounts(meshet.vertex_count, meshet.triangle_count);
+        SetMeshOutputCounts(meshlet.vertex_count, meshlet.triangle_count);
     }
 }
 
+uint hash(uint a) {
+    a = (a+0x7ed55d16) + (a << 12);
+    a = (a^0xc761c23c) ^ (a >> 19);
+    a = (a+0x165667b1) + (a <<  5);
+    a = (a+0xd3a2646c) ^ (a <<  9);
+    a = (a+0xfd7046c5) + (a <<  3);
+    a = (a^0xb55a4f09) ^ (a >> 16);
+    return a;
+}
+
 [shader("fragment")]
-v4 main (Mesh_Result input) {
+v4 main(Mesh_Result input) {
     v3 diffuse  = v3(0);
     v3 specular = v3(0);
     
@@ -120,6 +139,10 @@ v4 main (Mesh_Result input) {
     Sampler2D texture = textures[NonUniformResourceIndex(0)];
     v3 albedo = texture.Sample(input.uv).rgb;
     v3 color = diffuse * albedo + specular;
+    
+    if (Debug) {
+        color = input.debug_color;
+    }
     
     return v4(color, 1);
 }
