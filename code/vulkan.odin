@@ -165,7 +165,7 @@ vk_create_swapchain :: proc (ips: IPS, device: vk.Device, window_size: uv2, form
     check(vk.CreateSwapchainKHR(device, &swapchain_create_info, nil, &result))
     
     if old_swapchain != 0 {
-        vk_destroy_swapchain(device, old_swapchain, infos)
+        destroy_swapchain(device, old_swapchain, infos)
     }
     
     image_count: u32
@@ -181,7 +181,7 @@ vk_create_swapchain :: proc (ips: IPS, device: vk.Device, window_size: uv2, form
     return result
 }
 
-vk_destroy_swapchain :: proc (device: vk.Device, swapchain: vk.SwapchainKHR, infos: ^#soa [dynamic] Swapchain_Info) {
+destroy_swapchain :: proc (device: vk.Device, swapchain: vk.SwapchainKHR, infos: ^#soa [dynamic] Swapchain_Info) {
     for &info in infos {
         vk.DestroyImageView(device, info.view, nil)
         vk.DestroySemaphore(device, info.render_completed, nil)
@@ -474,6 +474,15 @@ gpu_make_buffer :: proc (usage: vk.BufferUsageFlags, #any_int size: vk.DeviceSiz
         allocationSize = requirements.size,
         memoryTypeIndex = selected_memory_type_index,
     }
+    
+    info_for_device_address := vk.MemoryAllocateFlagsInfo {
+        sType = .MEMORY_ALLOCATE_FLAGS_INFO,
+        flags = { .DEVICE_ADDRESS },
+    }
+    if .SHADER_DEVICE_ADDRESS in usage {
+        allocate_info.pNext = &info_for_device_address
+    }
+    
     check(vk.AllocateMemory(device, &allocate_info, nil, &result.memory))
     
     check(vk.BindBufferMemory(device, result.buffer, result.memory, 0))

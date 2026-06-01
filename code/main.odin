@@ -20,7 +20,9 @@ VSync :: true
 ////////////////////////////////////////////////
 
 Frame_Data :: struct {
-    shader_data_buffer: Shader_Data_Buffer,
+    buffer:        Buffer,
+    deviceAddress: vk.DeviceAddress,
+    
     command_buffer:     vk.CommandBuffer,
     image_aquired:      vk.Semaphore,
 }
@@ -31,15 +33,6 @@ Shader_Data :: struct {
     view:       m4,
     model:      m4,
     light_pos:  [4] v4,
-}
-
-// @todo(viktor): move this to my allocator
-Shader_Data_Buffer :: struct {
-    allocation:      vma.Allocation,
-    allocation_info: vma.Allocation_Info,
-    
-    buffer:        vk.Buffer,
-    deviceAddress: vk.DeviceAddress,
 }
 
 Swapchain_Info :: struct {
@@ -358,25 +351,13 @@ main :: proc () {
     frames := #soa [MaxFramesInFlight] Frame_Data {}
     
     for &frame in frames {
-        // @todo(viktor): use my own allocator
-        u_buffer_create_info := vk.BufferCreateInfo {
-            sType = .BUFFER_CREATE_INFO,
-            size  = size_of(shader_data),
-            usage = { .SHADER_DEVICE_ADDRESS },
-        } 
+        frame.buffer = gpu_make_buffer({ .SHADER_DEVICE_ADDRESS }, size_of(Shader_Data))
         
-        u_buffer_alloc_create_info := vma.Allocation_Create_Info {
-            flags = { .Host_Access_Sequential_Write, .Host_Access_Allow_Transfer_Instead, .Mapped },
-            usage = .Auto,
-        }
-        
-        check(vma.create_buffer(allocator, u_buffer_create_info, u_buffer_alloc_create_info, &frame.shader_data_buffer.buffer, &frame.shader_data_buffer.allocation, &frame.shader_data_buffer.allocation_info))
-        
-        u_buffer_device_address_info := vk.BufferDeviceAddressInfo {
+        device_address_info := vk.BufferDeviceAddressInfo {
             sType  = .BUFFER_DEVICE_ADDRESS_INFO,
-            buffer = frame.shader_data_buffer.buffer,
+            buffer = frame.buffer.buffer,
         }
-        frame.shader_data_buffer.deviceAddress = vk.GetBufferDeviceAddress(device, &u_buffer_device_address_info)
+        frame.deviceAddress = vk.GetBufferDeviceAddress(device, &device_address_info)
         
         frame.image_aquired = vk_create_semaphore(device)
         mark_handle(vk.DestroySemaphore, frame.image_aquired)
@@ -812,7 +793,7 @@ main :: proc () {
         instance_pos := v3{}
         shader_data.model = la.matrix4_translate(instance_pos) * la.matrix4_from_quaternion(la.quaternion_from_euler_angles_f32(expand_values(object_rotation), .XYX))
         
-        mem.copy_non_overlapping(frame.shader_data_buffer.allocation_info.mapped_data, &shader_data, size_of(shader_data))
+        copy(frame.buffer.data, to_bytes(&shader_data))
         
         ////////////////////////////////////////////////
         
@@ -884,7 +865,7 @@ main :: proc () {
         
         vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline.layout, 1, 1, &textures_descriptor_set, 0, nil)
         
-        vk.CmdPushConstants(cb, pipeline.layout, { .MESH_EXT }, 0, size_of(vk.DeviceAddress), &frame.shader_data_buffer.deviceAddress)
+        vk.CmdPushConstants(cb, pipeline.layout, { .MESH_EXT }, 0, size_of(vk.DeviceAddress), &frame.deviceAddress)
         
         vk.CmdDrawMeshTasksEXT(cb, cast(u32) len(mesh.meshlets), 1, 1)
         
@@ -959,22 +940,19 @@ main :: proc () {
 	check(vk.DeviceWaitIdle(device))
     
     for frame in frames {
-		vma.destroy_buffer(allocator, frame.shader_data_buffer.buffer, frame.shader_data_buffer.allocation)
+        gpu_delete_buffer(frame.buffer)
     }
-    
-    vk_destroy_swapchain(device, swapchain, &swapchain_infos)
-    
-	vma.destroy_image(allocator, depth_image, depth_image_allocation)
     
     gpu_delete_buffer(vertex_buffer)
     gpu_delete_buffer(meshlet_buffer)
     
+    destroy_swapchain(device, swapchain, &swapchain_infos)
+    destroy_pipeline(device, pipeline)
+    
+	vma.destroy_image(allocator, depth_image, depth_image_allocation)
     for texture in textures {
         vma.destroy_image(allocator, texture.image, texture.allocation)
     }
-    
-    destroy_pipeline(device, pipeline)
-    
 	vma.destroy_allocator(allocator)
     
     destroy_all_handles(device)
