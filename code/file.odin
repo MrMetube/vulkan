@@ -15,26 +15,25 @@ load_mesh_from_obj :: proc (filepath: string, allocator: Allocator) -> Mesh {
     assert(error == nil)
     model := models[0].mesh
     
-    index_count := cast(u32) len(model.indices)
-    vertices := make([] Vertex, index_count, allocator)
-    indices  := make([] u16,  len(vertices), allocator)
+    vertices := make([] Vertex, len(model.vertices), allocator)
     
-    for index, it_index in model.indices {
-        n := model.normals[index] * { 1, -1, 1 }
+    has_uvs := len(model.texture_coords) != 0
+    
+    for &v, index in vertices {
+        n := model.normals[index]  * { 1, -1, 1 }
+        p := model.vertices[index] * { 1, -1, 1 }
         
-        v := Vertex {
-            p  = model.vertices[index]       * { 1, -1, 1 },
-            n  = cast([3] u8) ((normalize_or_zero(n) + 1) * 127),
-            uv = len(model.texture_coords) != 0 ? model.texture_coords[index] * { 1, -1 } : 0,
+        v = Vertex {
+            p  = p,
+            n  = cast([3] u8) ((n + 1) * 127),
+            uv = has_uvs ? model.texture_coords[index] * { 1, -1 } : 0,
         }
-        
-        vertices[it_index] = v
-        indices[it_index]  = auto_cast it_index
     }
+    
     
     result: Mesh
     result.vertices = vertices
-    result.indices = indices
+    result.indices  = make_shallow_copy(model.indices[:], allocator)
     
     return result
 }

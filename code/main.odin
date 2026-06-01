@@ -66,7 +66,7 @@ IPS :: struct {
 
 Mesh :: struct {
     vertices: [] Vertex,
-    indices:  [] u16,
+    indices:  [] u32,
     
     meshlets: [dynamic] Meshlet,
 }
@@ -326,13 +326,14 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     vertex_buffer  := gpu_make_buffer({ .STORAGE_BUFFER }, 128 * Megabyte)
-    meshlet_buffer := gpu_make_buffer({ .STORAGE_BUFFER}, 128 * Megabyte)
+    meshlet_buffer := gpu_make_buffer({ .STORAGE_BUFFER},  128 * Megabyte)
     
     // @todo(viktor): currently we allocate twice, we could probably also allocate once and bind both buffers to the same memory, but I am unsure if that would help with anything.
     mesh: Mesh
     {
         mesh = load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
-        // mesh = load_obj_mesh("models/bunny.obj", context.temp_allocator)
+        // mesh = load_mesh_from_obj("models/bunny.obj", context.temp_allocator)
+        // mesh = load_mesh_from_obj("models/lucy_280k.obj", context.temp_allocator)
         
         build_meshlets(&mesh)
         
@@ -631,7 +632,6 @@ main :: proc () {
         }
         check(vk.CreateQueryPool(device, &create_info, nil, &query_pool))
     }
-    defer vk.DestroyQueryPool(device, query_pool, nil)
     
     ////////////////////////////////////////////////
     
@@ -761,7 +761,7 @@ main :: proc () {
         xx :: proc (seconds: f64) -> time.Duration {
             return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
         }
-        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, triangles: %v, meshlets: %v", xx(cpu_time.value), xx(gpu_time.value), view_magnitude(len(mesh.indices)), view_magnitude(len(mesh.meshlets))))
+        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, triangles: %v, meshlets: %v", xx(cpu_time.value), xx(gpu_time.value), view_magnitude(len(mesh.indices) / 3) , view_magnitude(len(mesh.meshlets))))
             
         ////////////////////////////////////////////////
         
@@ -957,11 +957,12 @@ main :: proc () {
         vma.destroy_image(allocator, texture.image, texture.allocation)
     }
     
+    vk.DestroyQueryPool(device, query_pool, nil)    
+    
     vk.DestroyDescriptorSetLayout(device, vertices_descriptor_set_layout, nil)
 	vk.DestroyDescriptorSetLayout(device, textures_descriptor_set_layout, nil)
 	
     vk.DestroyDescriptorPool(device, textures_descriptor_pool, nil)
-    
     // @compression with create_graphics_pipeline
 	vk.DestroyPipelineLayout(device, pipeline_layout, nil)
 	vk.DestroyPipeline(device, pipeline, nil)

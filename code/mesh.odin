@@ -10,8 +10,8 @@ build_meshlets :: proc (mesh: ^Mesh) {
     append_nothing(&mesh.meshlets)
     meshlet = &mesh.meshlets[len(mesh.meshlets)-1]
     
-    for it: int; it < len(mesh.indices); it += 3 {
-        is: [3] u16
+    for it: int; it+2 < len(mesh.indices); it += 3 {
+        is: [3] u32
         for &i, offset in is { i = mesh.indices[it+offset] }
         
         new_vertices: u8
@@ -45,7 +45,7 @@ build_meshlets :: proc (mesh: ^Mesh) {
         for v, index in vs {
             if v^ == Missing {
                 v^ = meshlet.vertex_count
-                meshlet.vertices[meshlet.vertex_count] = cast(u32) is[index]
+                meshlet.vertices[meshlet.vertex_count] = is[index]
                 meshlet.vertex_count += 1 
             }
         }
