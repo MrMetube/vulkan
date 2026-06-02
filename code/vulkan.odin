@@ -6,7 +6,7 @@ import "core:fmt"
 
 import vk "vendor:vulkan"
 import sdl "vendor:sdl3"
-import "../libs/vma"
+import "lib:vma"
 
 // @naming
 IPS :: struct {
@@ -131,7 +131,7 @@ vk_debug_utils_callback :: proc "system" (messageSeverity: vk.DebugUtilsMessageS
 
 vk_get_swapchain_format :: proc (ips: IPS) -> vk.Format {
     format_count: u32
-    // @study(viktor): GetPhysicalDeviceSurfaceFormats2KHR: would this help?
+    // @study: GetPhysicalDeviceSurfaceFormats2KHR: would this help?
     check(vk.GetPhysicalDeviceSurfaceFormatsKHR(ips.physical_device, ips.surface, &format_count, nil))
     formats := make([] vk.SurfaceFormatKHR, format_count, context.temp_allocator)
     check(vk.GetPhysicalDeviceSurfaceFormatsKHR(ips.physical_device, ips.surface, &format_count, raw_data(formats)))
@@ -298,15 +298,22 @@ vk_end_transition_images :: proc (command_buffer: vk.CommandBuffer) {
 
 ////////////////////////////////////////////////
 
-create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_format: vk.Format, vertices_descriptor_set_layout, textures_descriptor_set_layout: vk.DescriptorSetLayout, old: Pipeline = {}) -> Pipeline {
-    // @todo(viktor): cant we just check if output is older than source? then we don't need the map
-    shader_source := "shader.slang"
-    shader_output := "shader.spirv"
-    
-    if old.pipeline != 0 && !is_newer(shader_source, shader_output) {
-        return old
+shader_source := "shader.slang"
+shader_output := "shader.spirv"
+
+should_recreate_pipeline :: proc (pipeline: Pipeline) -> bool {
+    if pipeline.pipeline == 0 {
+        return true
     }
     
+    if is_newer(shader_source, shader_output) {
+        return true
+    }
+    
+    return false
+}
+
+create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_format: vk.Format, vertices_descriptor_set_layout, textures_descriptor_set_layout: vk.DescriptorSetLayout, old: Pipeline = {}) -> Pipeline {
     shader, ok := recompile_shader(shader_source, shader_output, context.temp_allocator)
     if !ok {
         if old.pipeline == 0 || old.layout == 0 {
@@ -323,7 +330,7 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_for
     
     ////////////////////////////////////////////////
     
-    // @study(viktor): is a pipeline cache still a good optimization?
+    // @study: is a pipeline cache still a good optimization?
     result: Pipeline
     result.shader = shader
         
@@ -428,6 +435,43 @@ destroy_pipeline :: proc (device: vk.Device, pipeline: Pipeline) {
     if pipeline.pipeline != 0 {
         vk.DestroyPipeline(device, pipeline.pipeline, nil)
     }
+}
+
+create_vertex_update_template :: proc (device: vk.Device, pipeline: Pipeline, old: vk.DescriptorUpdateTemplate = 0) -> vk.DescriptorUpdateTemplate {
+    vk.DestroyDescriptorUpdateTemplate(device, old, nil)
+    
+    // @todo(viktor): The information of which shader stage needs which storage buffer could be parsed from the compiled spirv file.
+    // But currently the single shader file contains multiple shader stages, so it would be non trivial to figure out which stage 
+    // makes use of a binding. Otherwise we could just maximally bind buffers, so that we atleast never miss a required buffer.
+    update_template_entries := [?] vk.DescriptorUpdateTemplateEntry {
+        {
+            dstBinding      = 0,
+            descriptorType  = .STORAGE_BUFFER,
+            descriptorCount = 1,
+            offset          = 0 * size_of(DescriptorUpdateData),
+            stride          = size_of(DescriptorUpdateData),
+        },
+        {
+            dstBinding      = 1,
+            descriptorType  = .STORAGE_BUFFER,
+            descriptorCount = 1,
+            offset          = 1 * size_of(DescriptorUpdateData),
+            stride          = size_of(DescriptorUpdateData),
+        },
+    }
+        
+    create_info := vk.DescriptorUpdateTemplateCreateInfo {
+        sType = .DESCRIPTOR_UPDATE_TEMPLATE_CREATE_INFO,
+        pipelineBindPoint   = .GRAPHICS,
+        pipelineLayout      = pipeline.layout,
+        templateType        = .PUSH_DESCRIPTORS,
+        descriptorUpdateEntryCount = len(update_template_entries),
+        pDescriptorUpdateEntries   = &update_template_entries[0],
+    }
+    
+    result: vk.DescriptorUpdateTemplate
+    check(vk.CreateDescriptorUpdateTemplate(device, &create_info, nil, &result))
+    return result
 }
 
 ////////////////////////////////////////////////

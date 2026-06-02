@@ -1,6 +1,25 @@
 package main
 
+import "lib:meshoptimizer"
+
 // @study look into mesh_optimizer and optimizeVertexCache, optimizeVertexFetch as well as remapVertex/IndexBuffer
+optimize_mesh :: proc (mesh: ^Mesh, allocator: Allocator) {
+    result: Mesh
+    
+    remap := make([] u32, len(mesh.indices), allocator)
+    vertex_count := meshoptimizer.generateVertexRemap(&remap[0], &mesh.indices[0], len(mesh.indices), &mesh.vertices[0], len(mesh.vertices), size_of(Vertex))
+    
+    result.vertices = make([] Vertex, vertex_count, allocator)
+    result.indices  = make([] u32,    len(mesh.indices), allocator)
+    
+    meshoptimizer.remapVertexBuffer(&result.vertices[0], &mesh.vertices[0], len(mesh.vertices), size_of(Vertex), &remap[0])
+    meshoptimizer.remapIndexBuffer(&result.indices[0], &mesh.indices[0], len(mesh.indices), &remap[0])
+    
+    meshoptimizer.optimizeVertexCache(&result.indices[0], &result.indices[0], len(result.indices), len(result.vertices))
+    meshoptimizer.optimizeVertexFetch(&result.vertices[0], &result.indices[0], len(result.indices), &result.vertices[0], len(result.vertices), size_of(Vertex)) 
+    
+    mesh ^= result
+}
 
 // @speed for cache reasons we should, if possible, do this either whilst loading or combined with other processing, or just offline
 build_meshlets :: proc (mesh: ^Mesh) {

@@ -14,6 +14,7 @@ main :: proc () {
         build_optimizations(optimize)
         build_native()
         build_pedantic(pedantic)
+        append(cmd, "-collection:lib=libs")
         if false {
             append(cmd, "-vet-packages:main", "-vet-unused-procedures")
         }

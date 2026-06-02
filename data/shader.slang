@@ -1,6 +1,7 @@
 typealias u8  = uint8_t;
 typealias u32  = uint32_t;
 
+typealias f16 = half;
 typealias f32 = float;
 typealias v2 = float2;
 typealias v3 = float3;
@@ -9,13 +10,13 @@ typealias m3 = float3x3;
 typealias m4 = float4x4;
 
 
-static const bool Debug = false;
+static const bool Debug = !false;
 
-// @volatile cpi needs to match this layout
+// @volatile cpu needs to match this layout
 struct Vertex {
-    f32 px, py, pz, p_pad;
+    f16 px, py, pz, p_pad;
     u8 nx, ny, nz, n_pad;
-	f32 tu, tv;
+	f16 tu, tv;
 }
 
 static const uint MaxVertexCount = 64;
@@ -23,7 +24,7 @@ static const uint MaxIndexCount  = 84;
 static const uint ThreadCount    = 32;
 
 
-// @volatile cpi needs to match this layout
+// @volatile cpu needs to match this layout
 struct Meshlet {
     u32 vertices[MaxVertexCount];
     u8  indices[MaxIndexCount*3];

@@ -8,7 +8,7 @@ import "core:time"
 import "core:mem"
 import la "core:math/linalg"
 
-import "../libs/vma"
+import "lib:vma"
 
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
@@ -67,9 +67,9 @@ Mesh :: struct {
 // @volatile shader.slang needs to match this layout
 // @speed we could go down to f16s for p and uv
 Vertex :: struct {
-    p:  v3, p_pad: f32,
-    n:  [3] u8, n_pad: u8,
-    uv: v2,
+    p:  [3] f16, p_pad: f16,
+    n:  [3] u8,  n_pad: u8,
+    uv: [2] f16,
 }
 
 Meshlet :: struct {
@@ -176,6 +176,7 @@ main :: proc () {
                 !f12.descriptorBindingVariableDescriptorCount || 
                 !f12.runtimeDescriptorArray || !f12.bufferDeviceAddress ||
                 !f12.shaderInt8 || !f12.uniformAndStorageBuffer8BitAccess || 
+                !f12.shaderFloat16 ||
                 !f11.shaderDrawParameters || !f11.storageBuffer16BitAccess || !f11.uniformAndStorageBuffer16BitAccess {
                 fmt.printfln("Physical device doesn't meet the feauture requirements")
                 check(false)
@@ -223,6 +224,7 @@ main :: proc () {
                 bufferDeviceAddress                       = true,
                 timelineSemaphore                         = true,
                 
+                shaderFloat16 = true,
                 shaderInt8 = true,
                 uniformAndStorageBuffer8BitAccess = true,
                 storageBuffer8BitAccess = true,
@@ -321,13 +323,14 @@ main :: proc () {
     
     mesh: Mesh
     {
-        // mesh = load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
-        mesh = load_mesh_from_obj("models/bunny.obj", context.temp_allocator)
+        mesh = load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
+        // mesh = load_mesh_from_obj("models/bunny.obj", context.temp_allocator)
         // mesh = load_mesh_from_obj("models/lucy_280k.obj", context.temp_allocator)
+        
+        optimize_mesh(&mesh, context.temp_allocator)
         
         build_meshlets(&mesh)
         
-        // @todo(viktor): store that we uploaded the mesh, once we have multiple and or different meshes per frame
         copy(vertex_buffer.data,  slice_to_bytes(mesh.vertices))
         copy(meshlet_buffer.data, slice_to_bytes(mesh.meshlets[:]))
     }
@@ -596,43 +599,7 @@ main :: proc () {
 
     pipeline := create_graphics_pipeline(device, swapchain.format, depth_format, vertex_descriptor_set_layout, textures_descriptor_set_layout)
     
-    ////////////////////////////////////////////////
-        
-    vertex_descriptor_update_template: vk.DescriptorUpdateTemplate
-    
-    {
-        // @todo(viktor): The information of which shader stage needs which storage buffer could be parsed from the compiled spirv file.
-        // But currently the single shader file contains multiple shader stages, so it would be non trivial to figure out which stage 
-        // makes use of a binding. Otherwise we could just maximally bind buffers, so that we atleast never miss a required buffer.
-        update_template_entries := [?] vk.DescriptorUpdateTemplateEntry {
-            {
-                dstBinding      = 0,
-                descriptorType  = .STORAGE_BUFFER,
-                descriptorCount = 1,
-                offset          = 0 * size_of(DescriptorUpdateData),
-                stride          = size_of(DescriptorUpdateData),
-            },
-            {
-                dstBinding      = 1,
-                descriptorType  = .STORAGE_BUFFER,
-                descriptorCount = 1,
-                offset          = 1 * size_of(DescriptorUpdateData),
-                stride          = size_of(DescriptorUpdateData),
-            },
-        }
-            
-        create_info := vk.DescriptorUpdateTemplateCreateInfo {
-            sType = .DESCRIPTOR_UPDATE_TEMPLATE_CREATE_INFO,
-            pipelineBindPoint   = .GRAPHICS,
-            pipelineLayout      = pipeline.layout,
-            templateType        = .PUSH_DESCRIPTORS,
-            descriptorUpdateEntryCount = len(update_template_entries),
-            pDescriptorUpdateEntries   = &update_template_entries[0],
-        }
-        
-        check(vk.CreateDescriptorUpdateTemplate(device, &create_info, nil, &vertex_descriptor_update_template))
-        mark_handle(vk.DestroyDescriptorUpdateTemplate, vertex_descriptor_update_template)
-    }
+    vertex_descriptor_update_template := create_vertex_update_template(device, pipeline)
     
     ////////////////////////////////////////////////
     
@@ -729,7 +696,10 @@ main :: proc () {
             depth_image, depth_image_view, depth_image_allocation = vk_create_depth_image(device, depth_format, swapchain.size, allocator)
         }
         
-        pipeline = create_graphics_pipeline(device, swapchain.format, depth_format, vertex_descriptor_set_layout, textures_descriptor_set_layout, pipeline)
+        if should_recreate_pipeline(pipeline) {
+            pipeline = create_graphics_pipeline(device, swapchain.format, depth_format, vertex_descriptor_set_layout, textures_descriptor_set_layout, pipeline)
+            vertex_descriptor_update_template = create_vertex_update_template(device, pipeline, vertex_descriptor_update_template)
+        }
         
         ////////////////////////////////////////////////
         
@@ -947,7 +917,10 @@ main :: proc () {
     
     destroy_swapchain(device, &swapchain)
 
-    vk.DestroyImageView(device, depth_image_view, nil) // @note(viktor): as we need to recreate the depth buffer sometime, we currently cant just mark_handle it. maybe we could unmark it in the array, but that already seems overkill
+    
+    // @note(viktor): as we sometimes need to recreate the depth buffer, we currently cant just mark_handle it. maybe we could unmark it in the array, but that already seems overkill
+    vk.DestroyImageView(device, depth_image_view, nil) 
+    vk.DestroyDescriptorUpdateTemplate(device, vertex_descriptor_update_template, nil)
 
     destroy_pipeline(device, pipeline)
     

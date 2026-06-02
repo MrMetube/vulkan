@@ -24,7 +24,7 @@ recompile_shader :: proc (input, output: string, allocator: Allocator) -> (Shade
     cmd.allocator = context.temp_allocator
     
     append(&cmd, "slangc")
-    /* @study(viktor):
+    /* @study:
         -O optimization level
         -fvk-invert-y
     */

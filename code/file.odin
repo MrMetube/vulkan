@@ -7,8 +7,8 @@ import "core:fmt"
 
 import vk "vendor:vulkan"
 
-import "../libs/tobj"
-import "../libs/ktx"
+import "lib:tobj"
+import "lib:ktx"
 
 load_mesh_from_obj :: proc (filepath: string, allocator: Allocator) -> Mesh {
     models, _, error := tobj.load_obj_filename(filepath, allocator = allocator)
@@ -24,9 +24,9 @@ load_mesh_from_obj :: proc (filepath: string, allocator: Allocator) -> Mesh {
         p := model.vertices[index] * { 1, -1, 1 }
         
         v = Vertex {
-            p  = p,
+            p  = cast([3] f16) p,
             n  = cast([3] u8) ((n + 1) * 127),
-            uv = has_uvs ? model.texture_coords[index] * { 1, -1 } : 0,
+            uv = has_uvs ? cast([2] f16) model.texture_coords[index] * { 1, -1 } : 0,
         }
     }
     
