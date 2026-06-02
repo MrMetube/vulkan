@@ -72,7 +72,9 @@ Vertex :: struct {
     uv: [2] f16,
 }
 
+// @volatile shader.slang needs to match this layout
 Meshlet :: struct {
+    cone: v4,
     vertices: [64] u32,
     indices:  [84] [3] u8,
     triangle_count: u8,
@@ -323,13 +325,14 @@ main :: proc () {
     
     mesh: Mesh
     {
-        mesh = load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
+        // mesh = load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
         // mesh = load_mesh_from_obj("models/bunny.obj", context.temp_allocator)
-        // mesh = load_mesh_from_obj("models/lucy_280k.obj", context.temp_allocator)
+        mesh = load_mesh_from_obj("models/lucy_280k.obj", context.temp_allocator)
         
         optimize_mesh(&mesh, context.temp_allocator)
         
         build_meshlets(&mesh)
+        build_meshlet_cones(&mesh)
         
         copy(vertex_buffer.data,  slice_to_bytes(mesh.vertices))
         copy(meshlet_buffer.data, slice_to_bytes(mesh.meshlets[:]))
@@ -836,7 +839,10 @@ main :: proc () {
         
         vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader.stages, 0, size_of(vk.DeviceAddress), &frame.deviceAddress)
         
-        vk.CmdDrawMeshTasksEXT(cb, cast(u32) len(mesh.meshlets), 1, 1)
+        // @todo(viktor): test performance increase of meshlet culling
+        for _ in 0..<1 {
+            vk.CmdDrawMeshTasksEXT(cb, cast(u32) len(mesh.meshlets), 1, 1)
+        }
         
         vk.CmdEndRendering(cb)
         

@@ -10,7 +10,7 @@ typealias m3 = float3x3;
 typealias m4 = float4x4;
 
 
-static const bool Debug = !false;
+static const bool Debug = false;
 
 // @volatile cpu needs to match this layout
 struct Vertex {
@@ -26,6 +26,7 @@ static const uint ThreadCount    = 32;
 
 // @volatile cpu needs to match this layout
 struct Meshlet {
+    v4  cone;
     u32 vertices[MaxVertexCount];
     u8  indices[MaxIndexCount*3];
     u8  triangle_count;
@@ -65,6 +66,14 @@ void main(out OutputVertices<Mesh_Result, MaxVertexCount> out_vertices, out Outp
     uint mesh_index = group_id.x;
     Meshlet meshlet = meshlets[mesh_index];
     
+    v3 view_direction = v3(0, 0, 1);
+    // @todo(viktor): the cone needs to be transformed into the view space
+    if (cone_cull(meshlet.cone, view_direction)) {
+        if (thread_id.x == 0) {
+            SetMeshOutputCounts(0, 0);
+        }
+        return;
+    }
     
     for (int i = thread_id.x; i < meshlet.vertex_count; i += ThreadCount) {
         uint vertex_index = meshlet.vertices[i];
@@ -110,6 +119,10 @@ void main(out OutputVertices<Mesh_Result, MaxVertexCount> out_vertices, out Outp
     if (thread_id.x == 0) {
         SetMeshOutputCounts(meshlet.vertex_count, meshlet.triangle_count);
     }
+}
+
+bool cone_cull(v4 cone, v3 view) {
+    return dot(cone.xyz, view) > cone.w;
 }
 
 uint hash(uint a) {

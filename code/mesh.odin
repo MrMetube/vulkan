@@ -32,15 +32,12 @@ build_meshlets :: proc (mesh: ^Mesh) {
     meshlet = &mesh.meshlets[len(mesh.meshlets)-1]
     
     for it: int; it+2 < len(mesh.indices); it += 3 {
-        is: [3] u32
-        for &i, offset in is { i = mesh.indices[it+offset] }
+        is := xx_take(mesh.indices[it:], 3)
         
         new_vertices: u8
-        vs: [3] ^u8
-        for &v, offset in vs {
-            i := is[offset]
-            v = &meshlet_vertices[i]
-            if v^ == Missing { 
+        vs := xx_index_ref(meshlet_vertices[:], is)
+        for v in vs {
+            if v^ == Missing {
                 new_vertices += 1
             }
         }
@@ -76,4 +73,78 @@ build_meshlets :: proc (mesh: ^Mesh) {
         }
         meshlet.triangle_count += 1
     }
+}
+
+build_meshlet_cones :: proc (mesh: ^Mesh) {
+    for &meshlet in mesh.meshlets {
+        hv3 :: [3] f16
+        normals: [len(meshlet.indices) * len(meshlet.indices[0])] hv3
+        
+        for indexes, i in meshlet.indices[:meshlet.triangle_count] {
+            v := xx_index(mesh.vertices[:], indexes)
+            
+            edge_01 := v[1].p - v[0].p
+            edge_02 := v[2].p - v[0].p
+            
+            normal := cross(edge_01, edge_02)
+            
+            normals[i] = normalize_or_zero(normal)
+        }
+        
+        average: hv3
+        for normal in normals {
+            average += normal
+        }
+        
+        average = normalize_or_else(average) or_else {1, 0, 0}
+        
+        min_cos_angle: f16 = 1
+        for normal, i in normals[:meshlet.triangle_count] {
+            cos_angle := dot(normal, average)
+            min_cos_angle = min(min_cos_angle, cos_angle)
+        }
+        
+        // @note(viktor): For a cone to be frontfacing, the angle between view vector and cone should be < 90° 
+        // cone.w = min_dot = dot(avg, x) = cos(a)
+        // if view = x + 90 => cos(b) 
+        //   = cos(a+90)
+        //   = -sin(a)
+        // a = acos(cos(a))
+        // a = acos(dot(avg,x))
+        // => -sin(a) = -sin(acos(dot(avg,x)))
+        //            = -sqrt(1-min_dot²)
+        
+        cone_w: f16 = -1
+        if min_cos_angle > 0 {
+            cone_w = -square_root(1 - square(min_cos_angle))
+        }
+        // We then invert this value to not have to do the negation in the shader
+        cone_w = -cone_w
+        
+        meshlet.cone.xyz = cast(v3)  average
+        meshlet.cone.w   = cast(f32) cone_w
+    }
+}
+
+xx_index :: proc (data: [] $T, indices: [$N] $I) -> [N] T {
+    result: [N] T
+    for index, i in indices {
+        result[i] = data[index]
+    }
+    return result
+}
+xx_index_ref :: proc (data: [] $T, indices: [$N] $I) -> [N] ^T {
+    result: [N] ^T
+    for index, i in indices {
+        result[i] = &data[index]
+    }
+    return result
+}
+
+xx_take :: proc (data: [] $T, $N: int) -> [N] T {
+    result: [N] T
+    for &r, index in result {
+        r = data[index]
+    }
+    return result
 }

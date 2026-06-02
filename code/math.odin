@@ -370,14 +370,22 @@ normalize :: proc(vec: $V) -> (result: V) {
     return result
 }
 
-normalize_or_zero :: proc(vec: $V/[$N]$T) -> (result: V) {
+normalize_or_else :: proc(vec: $V/ [$N] $T) -> (V, bool) {
+    result: V
+    ok: bool
     len_sq := length_squared(vec)
+    if len_sq > 0.0000001 {
+        ok = true
+        result = vec / square_root(len_sq)
+    }
+    return result, ok
+}
+normalize_or_zero :: proc(vec: $V/ [$N] $T) -> (result: V) {
     when intrinsics.type_is_simd_vector(T) {
+        len_sq := length_squared(vec)
         conditional_assign(greater_than(len_sq, 0.0000001), &result, vec / square_root(len_sq))
     } else {
-        if len_sq > 0.0000001 {
-            result = vec / square_root(len_sq)
-        }
+        result = normalize_or_else(vec) or_else 0
     }
     return result
 }
