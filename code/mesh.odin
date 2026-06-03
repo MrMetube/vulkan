@@ -1,8 +1,9 @@
+#+vet explicit-allocators
 package main
 
 import "lib:meshoptimizer"
+import "core:mem"
 
-// @study look into mesh_optimizer and optimizeVertexCache, optimizeVertexFetch as well as remapVertex/IndexBuffer
 optimize_mesh :: proc (mesh: ^Mesh, allocator: Allocator) {
     result: Mesh
     
@@ -21,108 +22,56 @@ optimize_mesh :: proc (mesh: ^Mesh, allocator: Allocator) {
     mesh ^= result
 }
 
-// @speed for cache reasons we should, if possible, do this either whilst loading or combined with other processing, or just offline
-build_meshlets :: proc (mesh: ^Mesh) {
-    Missing :: ~cast(u8) 0
-    meshlet_vertices := make([] u8, len(mesh.vertices), context.temp_allocator)
-    for &it in meshlet_vertices do it = Missing
+build_meshlets :: proc (mesh: ^Mesh, allocator: Allocator) -> u32 {
+    max_vertices  :: len(Meshlet{}.vertices)
+    max_triangles :: len(Meshlet{}.indices)
+    cone_weight :: 0 // 0 when not culling, otherwise 0..1 
     
-    meshlet: ^Meshlet
-    append_nothing(&mesh.meshlets)
-    meshlet = &mesh.meshlets[len(mesh.meshlets)-1]
+    max_count := meshoptimizer.buildMeshletsBound(auto_cast len(mesh.indices), max_vertices, max_triangles)
     
-    for it: int; it+2 < len(mesh.indices); it += 3 {
-        is := xx_take(mesh.indices[it:], 3)
+    meshlets := make([] meshoptimizer.Meshlet, max_count, context.temp_allocator)
+    vertices := make([] u32, len(mesh.indices), context.temp_allocator)
+    indices  := make([] u8,  len(mesh.indices), context.temp_allocator)
+    
+    actual_count := meshoptimizer.buildMeshlets(&meshlets[0], &vertices[0], &indices[0], &mesh.indices[0], len(mesh.indices), cast(^f32) &mesh.vertices[0], len(mesh.vertices), size_of(mesh.vertices[0]), max_vertices, max_triangles, cone_weight)
+    
+    // :TaskShader: either round of the size, or in shader check the bounds
+    aligned_count := align(32, actual_count)
+    mesh.meshlets = make([] Meshlet, aligned_count, allocator)
+    
+    for &dest, index in mesh.meshlets[:actual_count] {
+        source := &meshlets[index]
         
-        new_vertices: u8
-        vs := xx_index_ref(meshlet_vertices[:], is)
-        for v in vs {
-            if v^ == Missing {
-                new_vertices += 1
-            }
-        }
+        source_vertices := &vertices[source.vertex_offset]
+        source_indices  := &indices[source.triangle_offset]
         
-        flush: bool
-        if meshlet.vertex_count + new_vertices > len(meshlet.vertices) {
-            flush = true
-        }
+        mem.copy(&dest.vertices[0], source_vertices, cast(int) source.vertex_count * size_of(u32))
+        mem.copy(&dest.indices[0],  source_indices,  cast(int) source.triangle_count * size_of(u8) * 3)
         
-        if meshlet.triangle_count >= len(meshlet.indices) {
-            flush = true
-        }
+        dest.triangle_count = safe_truncate(u8, source.triangle_count)
+        dest.vertex_count   = safe_truncate(u8, source.vertex_count)
         
-        if flush {
-            for vi in meshlet.vertices {
-                meshlet_vertices[vi] = Missing
-            }
-            
-            append_nothing(&mesh.meshlets)
-            meshlet = &mesh.meshlets[len(mesh.meshlets)-1]
-        }
+        bounds := meshoptimizer.computeMeshletBounds(source_vertices, source_indices, cast(uint) source.triangle_count, cast(^f32) &mesh.vertices[0], len(mesh.vertices), size_of(mesh.vertices[0]))
         
-        for v, index in vs {
-            if v^ == Missing {
-                v^ = meshlet.vertex_count
-                meshlet.vertices[meshlet.vertex_count] = is[index]
-                meshlet.vertex_count += 1 
-            }
-        }
-        
-        for v, index in vs {
-            meshlet.indices[meshlet.triangle_count][index] = v^
-        }
-        meshlet.triangle_count += 1
+        dest.cone.xyz = bounds.cone_axis
+        dest.cone.w   = bounds.cone_cutoff
     }
-}
-
-build_meshlet_cones :: proc (mesh: ^Mesh) {
-    for &meshlet in mesh.meshlets {
-        normals: [len(meshlet.indices) * len(meshlet.indices[0])] v3
-        
-        for indexes, i in meshlet.indices[:meshlet.triangle_count] {
-            v := xx_index(mesh.vertices[:], indexes)
-            
-            edge_01 := v[1].p - v[0].p
-            edge_02 := v[2].p - v[0].p
-            
-            normal := cross(edge_01, edge_02)
-            
-            normals[i] = normalize_or_zero(normal)
-        }
-        
-        average: v3
-        for normal in normals {
-            average += normal
-        }
-        
-        average = normalize_or_else(average) or_else {1, 0, 0}
-        
-        min_cos_angle: f32 = 1
-        for normal, i in normals[:meshlet.triangle_count] {
-            cos_angle := dot(normal, average)
-            min_cos_angle = min(min_cos_angle, cos_angle)
-        }
-        
-        // @note(viktor): For a cone to be frontfacing, the angle between view vector and cone should be < 90° 
-        // cone.w = min_dot = dot(avg, x) = cos(a)
-        // if view = x + 90 => cos(b) 
-        //   = cos(a+90)
-        //   = -sin(a)
-        // a = acos(cos(a))
-        // a = acos(dot(avg,x))
-        // => -sin(a) = -sin(acos(dot(avg,x)))
-        //            = -sqrt(1-min_dot²)
-        
-        cone_w: f32 = -1
-        if min_cos_angle > 0 {
-            cone_w = -square_root(1 - square(min_cos_angle))
-        }
-        // We then invert this value to not have to do the negation in the shader
-        cone_w = -cone_w
-        
-        meshlet.cone.xyz = average
-        meshlet.cone.w   = cone_w
+    
+    
+    /* 
+    // Trim the meshlet data to minimize waste for meshletVertices/meshletTriangles
+    {
+    const meshopt_Meshlet& last = meshlets.back();
+    meshletVertices.resize(last.vertex_offset + last.vertex_count);
+    meshletTriangles.resize(last.triangle_offset + last.triangle_count * 3);
     }
+    */
+    
+    // for &meshlet in meshlets {
+    //     meshoptimizer.optimizeMeshlet(&vertices[meshlet.vertex_offset], &indices[meshlet.triangle_offset],  meshlet.triangle_count, auto_cast meshlet.vertex_count)
+    // }
+    
+    return cast(u32) actual_count
 }
 
 xx_index :: proc (data: [] $T, indices: [$N] $I) -> [N] T {

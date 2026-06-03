@@ -63,7 +63,16 @@ Mesh :: struct {
     vertices: [] Vertex,
     indices:  [] u32,
     
-    meshlets: [dynamic] Meshlet,
+    meshlets: [] Meshlet,
+}
+
+// @volatile shader.slang needs to match this layout
+Meshlet :: struct #align(16) {
+    cone: v4,
+    vertices: [64] u32,
+    indices:  [84] [3] u8,
+    triangle_count: u8,
+    vertex_count:   u8,
 }
 
 // @volatile shader.slang needs to match this layout
@@ -72,15 +81,6 @@ Vertex :: struct {
     p:  v3, p_pad: f32,
     n:  [3] u8,  n_pad: u8,
     uv: v2,
-}
-
-// @volatile shader.slang needs to match this layout
-Meshlet :: struct {
-    cone: v4,
-    vertices: [64] u32,
-    indices:  [84] [3] u8,
-    triangle_count: u8,
-    vertex_count:   u8,
 }
 
 ////////////////////////////////////////////////
@@ -153,8 +153,6 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     check(sdl.Vulkan_CreateSurface(window, ips.instance, nil, &ips.surface))
-    
-    
     
     ////////////////////////////////////////////////
     
@@ -323,24 +321,29 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     // @speed :ScratchBuffer: use a scratch buffer and have some api like copy(vkstuff, dest_buffer_in_device_local_memory, scratch_buffer, data), The main reason for this, is that we want all of the data for the shader to be in device_local memory.
-    vertex_buffer  := gpu_make_buffer({ .STORAGE_BUFFER }, 128 * Megabyte)
-    meshlet_buffer := gpu_make_buffer({ .STORAGE_BUFFER }, 128 * Megabyte)
+    vertex_buffer  := gpu_make_buffer({ .STORAGE_BUFFER }, 256 * Megabyte)
+    meshlet_buffer := gpu_make_buffer({ .STORAGE_BUFFER }, 256 * Megabyte)
     
-    mesh: Mesh
+    Mesh_Info :: struct {
+        triangle_count: u32,
+        meshlet_count:  u32,
+    }
+    // @todo(viktor): we only read indices len for debug info and meshlets len for the dispatch
+    mesh_info: Mesh_Info
     {
-        // mesh = load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
-        // mesh = load_mesh_from_obj("models/bunny.obj", context.temp_allocator)
-        mesh = load_mesh_from_obj("models/lucy_280k.obj", context.temp_allocator)
+        mesh := load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
+        // mesh := load_mesh_from_obj("models/bunny.obj", context.temp_allocator)
+        // mesh := load_mesh_from_obj("models/lucy_280k.obj", context.temp_allocator)
         
         optimize_mesh(&mesh, context.temp_allocator)
         
-        build_meshlets(&mesh)
-        // :TaskShader: either round of the size, or in shader check the bounds
-        // for len(mesh.meshlets) % 32 != 0 { append_nothing(&mesh.meshlets) }
-        build_meshlet_cones(&mesh)
+        meshlet_count := build_meshlets(&mesh, context.temp_allocator)
+        
+        mesh_info.triangle_count = cast(u32) len(mesh.indices)
+        mesh_info.meshlet_count  = meshlet_count
         
         copy(vertex_buffer.data,  slice_to_bytes(mesh.vertices))
-        copy(meshlet_buffer.data, slice_to_bytes(mesh.meshlets[:]))
+        copy(meshlet_buffer.data, slice_to_bytes(mesh.meshlets))
     }
     
     ////////////////////////////////////////////////
@@ -722,7 +725,12 @@ main :: proc () {
             pSemaphores = &timeline_semaphore,
             pValues = &wait_value,
         }
-        vk.WaitSemaphores(device, &wait_info, Timeout)
+        wait_result := vk.WaitSemaphores(device, &wait_info, Timeout)
+        if wait_result == .TIMEOUT {
+            should_recreate_swapchain = true
+            continue
+        }
+        check(wait_result)
         
         frame : Frame_Data = frames[absolute_frame_index % MaxFramesInFlight]
         absolute_frame_index += 1
@@ -762,7 +770,7 @@ main :: proc () {
         view :: proc (seconds: f64) -> time.Duration {
             return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
         }
-        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, triangles: %v, meshlets: %v", view(cpu_time.value), view(gpu_time.value), view_magnitude(len(mesh.indices) / 3) , view_magnitude(len(mesh.meshlets))))
+        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, triangles: %v, meshlets: %v", view(cpu_time.value), view(gpu_time.value), view_magnitude(mesh_info.triangle_count) , view_magnitude(mesh_info.meshlet_count)))
             
         ////////////////////////////////////////////////
         
@@ -770,7 +778,7 @@ main :: proc () {
         shader_data.view = la.matrix4_translate(cam_pos)
         instance_pos := v3{}
         shader_data.model = la.matrix4_translate(instance_pos) * la.matrix4_from_quaternion(la.quaternion_from_euler_angles_f32(expand_values(object_rotation), .XYX))
-        shader_data.meshlet_count = cast(u32) len(mesh.meshlets)
+        shader_data.meshlet_count = mesh_info.meshlet_count
         
         copy(frame.buffer.data, to_bytes(&shader_data))
         
@@ -814,8 +822,9 @@ main :: proc () {
         
         // @todo(viktor): test performance increase of meshlet culling
         for _ in 0..<1 {
-            count := cast(u32) len(mesh.meshlets)
-            // count  = align(32, count) / 32 :TaskShader: each task shader should later spawn 32 meshshaders
+            count := mesh_info.meshlet_count
+            // :TaskShader: each task shader should later spawn 32 meshshaders
+            // count  = (count + 31) / 32
             vk.CmdDrawMeshTasksEXT(cb, count, 1, 1)
         }
         
