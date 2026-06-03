@@ -69,9 +69,9 @@ Mesh :: struct {
 // @volatile shader.slang needs to match this layout
 // @speed we could go down to f16s for p and uv
 Vertex :: struct {
-    p:  [3] f16, p_pad: f16,
+    p:  v3, p_pad: f32,
     n:  [3] u8,  n_pad: u8,
-    uv: [2] f16,
+    uv: v2,
 }
 
 // @volatile shader.slang needs to match this layout

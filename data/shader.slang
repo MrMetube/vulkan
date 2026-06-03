@@ -28,9 +28,9 @@ struct Data {
 
 // @volatile cpu needs to match this layout
 struct Vertex {
-    f16 px, py, pz, p_pad;
+    f32 px, py, pz, p_pad;
     u8  nx, ny, nz, n_pad;
-	f16 tu, tv;
+	f32 tu, tv;
 }
 
 // @volatile cpu needs to match this layout

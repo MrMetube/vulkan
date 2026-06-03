@@ -77,8 +77,7 @@ build_meshlets :: proc (mesh: ^Mesh) {
 
 build_meshlet_cones :: proc (mesh: ^Mesh) {
     for &meshlet in mesh.meshlets {
-        hv3 :: [3] f16
-        normals: [len(meshlet.indices) * len(meshlet.indices[0])] hv3
+        normals: [len(meshlet.indices) * len(meshlet.indices[0])] v3
         
         for indexes, i in meshlet.indices[:meshlet.triangle_count] {
             v := xx_index(mesh.vertices[:], indexes)
@@ -91,14 +90,14 @@ build_meshlet_cones :: proc (mesh: ^Mesh) {
             normals[i] = normalize_or_zero(normal)
         }
         
-        average: hv3
+        average: v3
         for normal in normals {
             average += normal
         }
         
         average = normalize_or_else(average) or_else {1, 0, 0}
         
-        min_cos_angle: f16 = 1
+        min_cos_angle: f32 = 1
         for normal, i in normals[:meshlet.triangle_count] {
             cos_angle := dot(normal, average)
             min_cos_angle = min(min_cos_angle, cos_angle)
@@ -114,15 +113,15 @@ build_meshlet_cones :: proc (mesh: ^Mesh) {
         // => -sin(a) = -sin(acos(dot(avg,x)))
         //            = -sqrt(1-min_dot²)
         
-        cone_w: f16 = -1
+        cone_w: f32 = -1
         if min_cos_angle > 0 {
             cone_w = -square_root(1 - square(min_cos_angle))
         }
         // We then invert this value to not have to do the negation in the shader
         cone_w = -cone_w
         
-        meshlet.cone.xyz = cast(v3)  average
-        meshlet.cone.w   = cast(f32) cone_w
+        meshlet.cone.xyz = average
+        meshlet.cone.w   = cone_w
     }
 }
 
