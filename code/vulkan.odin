@@ -154,8 +154,16 @@ recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, old_swap
     check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(ips.physical_device, ips.surface, &surface_capabilities))
     
     swapchain_extent := surface_capabilities.currentExtent
+    // @note(viktor): this is like for wayland or something, dont know if i want to maintain that any further
     if surface_capabilities.currentExtent.width == 0xFFFFFFFF {
         swapchain_extent = vk_to_extent(new_size)
+    }
+    
+    if swapchain_extent.width == 0 && swapchain_extent.height == 0 {
+        if old_swapchain == nil {
+            assert(false, "Welp :(")
+        }
+        return
     }
     
     swapchain_create_info := vk.SwapchainCreateInfoKHR {
@@ -607,6 +615,91 @@ gpu_delete_buffer :: proc (buffer: Buffer) {
     
     vk.FreeMemory(device,    buffer.memory, nil)
     vk.DestroyBuffer(device, buffer.buffer, nil)
+}
+
+////////////////////////////////////////////////
+
+begin_rendering :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, image_index: u32, depth_image: vk.Image, depth_image_view: vk.ImageView, clear_color: v4) {
+    swapchain_info := &swapchain.infos[image_index]
+    
+    vk_begin_transition_images()
+        vk_append_image_memory_barrier_2(swapchain_info.image, { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT }, { .COLOR_ATTACHMENT_READ, . COLOR_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL)
+        vk_append_image_memory_barrier_2(depth_image, { .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .UNDEFINED, { .EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, aspect_mask = { .DEPTH, .STENCIL })
+    vk_end_transition_images(cb)
+    
+    
+    rendering_info := vk.RenderingInfo {
+        sType = .RENDERING_INFO, 
+        renderArea = { extent = vk_to_extent(swapchain.size) },
+        layerCount = 1,
+        colorAttachmentCount = 1,
+        pColorAttachments = &vk.RenderingAttachmentInfo {
+            sType = .RENDERING_ATTACHMENT_INFO,
+            imageView = swapchain_info.view,
+            imageLayout = .ATTACHMENT_OPTIMAL,
+            loadOp = .CLEAR,
+            storeOp = .STORE,
+            clearValue = { color = { float32 = clear_color } },
+        },
+        pDepthAttachment  = &vk.RenderingAttachmentInfo {
+            sType = .RENDERING_ATTACHMENT_INFO,
+            imageView = depth_image_view,
+            imageLayout = .ATTACHMENT_OPTIMAL,
+            loadOp = .CLEAR,
+            storeOp = .DONT_CARE,
+            clearValue = { depthStencil = { 1, 0 } },
+        },
+    }
+    
+    vk.CmdBeginRendering(cb, &rendering_info)
+}
+
+end_rendering :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, image_index: u32) {
+    swapchain_info := &swapchain.infos[image_index]
+    
+    vk.CmdEndRendering(cb)
+    
+    ////////////////////////////////////////////////
+    
+    vk_begin_transition_images()
+        vk_append_image_memory_barrier_2(swapchain_info.image, { .COLOR_ATTACHMENT_OUTPUT }, { .COLOR_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, {}, {}, .PRESENT_SRC_KHR)
+    vk_end_transition_images(cb)
+}
+
+queue_submit :: proc (queue: vk.Queue, swapchain: Swapchain, frame: Frame_Data, image_index: u32, signal_value: u64, timeline_semaphore: vk.Semaphore) {
+    swapchain_info := &swapchain.infos[image_index]
+    
+    render_complete_and_timeline_submit_info := [] vk.SemaphoreSubmitInfo {
+        {
+            sType = .SEMAPHORE_SUBMIT_INFO,
+            semaphore = swapchain_info.render_completed,
+            stageMask = { .ALL_GRAPHICS },
+        },
+        {
+            sType = .SEMAPHORE_SUBMIT_INFO,
+            semaphore = timeline_semaphore,
+            value = signal_value,
+            stageMask = { .ALL_COMMANDS },
+        },
+    }
+    
+    submit_info := vk.SubmitInfo2 {
+        sType = .SUBMIT_INFO_2,
+        waitSemaphoreInfoCount = 1,
+        pWaitSemaphoreInfos = &vk.SemaphoreSubmitInfo {
+            sType = .SEMAPHORE_SUBMIT_INFO,
+            semaphore = frame.image_aquired,
+            stageMask = { .COLOR_ATTACHMENT_OUTPUT },
+        },
+        commandBufferInfoCount = 1,
+        pCommandBufferInfos = &vk.CommandBufferSubmitInfo {
+            sType = .COMMAND_BUFFER_SUBMIT_INFO,
+            commandBuffer = frame.command_buffer,
+        },
+        signalSemaphoreInfoCount = auto_cast len(render_complete_and_timeline_submit_info),
+        pSignalSemaphoreInfos = raw_data(render_complete_and_timeline_submit_info),
+    }
+    vk.QueueSubmit2(queue, 1, &submit_info, 0)
 }
 
 ////////////////////////////////////////////////

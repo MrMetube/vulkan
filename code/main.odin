@@ -33,6 +33,8 @@ Shader_Data :: struct {
     view:       m4,
     model:      m4,
     light_pos:  [4] v4,
+    
+    meshlet_count: u32,
 }
 
 Swapchain_Info :: struct {
@@ -242,6 +244,7 @@ main :: proc () {
                 sType = .PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
                 
                 meshShader = true,
+                taskShader = true,
             },
             },
             },
@@ -332,6 +335,8 @@ main :: proc () {
         optimize_mesh(&mesh, context.temp_allocator)
         
         build_meshlets(&mesh)
+        // :TaskShader: either round of the size, or in shader check the bounds
+        // for len(mesh.meshlets) % 32 != 0 { append_nothing(&mesh.meshlets) }
         build_meshlet_cones(&mesh)
         
         copy(vertex_buffer.data,  slice_to_bytes(mesh.vertices))
@@ -519,7 +524,7 @@ main :: proc () {
                 binding = 1,
                 descriptorType = .STORAGE_BUFFER,
                 descriptorCount = 1,
-                stageFlags = { .MESH_EXT },
+                stageFlags = { .MESH_EXT }, // :TaskShader: + { .TASK_EXT }
             },
         }
         vertices_descriptor_layout_create_info := vk.DescriptorSetLayoutCreateInfo{
@@ -687,6 +692,7 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
+        // @todo(viktor): if the window is minimized we can never get it back up and visible
         if should_recreate_swapchain {
             should_recreate_swapchain = false
             
@@ -718,7 +724,7 @@ main :: proc () {
         }
         vk.WaitSemaphores(device, &wait_info, Timeout)
         
-        frame := &frames[absolute_frame_index % MaxFramesInFlight]
+        frame : Frame_Data = frames[absolute_frame_index % MaxFramesInFlight]
         absolute_frame_index += 1
         
         acquire_result := vk.AcquireNextImageKHR(device, swapchain.swapchain, Timeout, frame.image_aquired, {}, &image_index)
@@ -737,7 +743,7 @@ main :: proc () {
             query_results: [2] u64
             query_result := vk.GetQueryPoolResults(device, query_pool, 0, len(&query_results), cast(int) size_of_slice(query_results[:]), &query_results[0], size_of(query_results[0]), { ._64 } )
             
-            if query_result != .NOT_READY {
+            if query_result != .NOT_READY && query_result != .ERROR_DEVICE_LOST {
                 check(query_result)
                 
                 
@@ -764,6 +770,7 @@ main :: proc () {
         shader_data.view = la.matrix4_translate(cam_pos)
         instance_pos := v3{}
         shader_data.model = la.matrix4_translate(instance_pos) * la.matrix4_from_quaternion(la.quaternion_from_euler_angles_f32(expand_values(object_rotation), .XYX))
+        shader_data.meshlet_count = cast(u32) len(mesh.meshlets)
         
         copy(frame.buffer.data, to_bytes(&shader_data))
         
@@ -772,49 +779,15 @@ main :: proc () {
         cb := frame.command_buffer
         check(vk.ResetCommandBuffer(cb, {}))
         
-        cb_begin_info := vk.CommandBufferBeginInfo {
-            sType = .COMMAND_BUFFER_BEGIN_INFO,
-            flags = { .ONE_TIME_SUBMIT },
-        }
-        check(vk.BeginCommandBuffer(cb, &cb_begin_info))
+        check(vk.BeginCommandBuffer(cb, &vk.CommandBufferBeginInfo { sType = .COMMAND_BUFFER_BEGIN_INFO, flags = { .ONE_TIME_SUBMIT } }))
         
         vk.CmdResetQueryPool(cb, query_pool, 0, QueryPoolSize)
         // @todo(viktor): make a basic region based profiler out of this the labels and shit
         vk.CmdWriteTimestamp(cb, { .BOTTOM_OF_PIPE }, query_pool, 0)
         
-        vk_begin_transition_images()
-            vk_append_image_memory_barrier_2(swapchain_info.image, { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT }, { .COLOR_ATTACHMENT_READ, . COLOR_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL)
-            vk_append_image_memory_barrier_2(depth_image, { .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .UNDEFINED, { .EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, aspect_mask = { .DEPTH, .STENCIL })
-        vk_end_transition_images(cb)
-        
         ////////////////////////////////////////////////
         
-        rendering_info := vk.RenderingInfo {
-            sType = .RENDERING_INFO, 
-            renderArea = { extent = vk_to_extent(swapchain.size) },
-            layerCount = 1,
-            colorAttachmentCount = 1,
-            pColorAttachments = &vk.RenderingAttachmentInfo {
-                sType = .RENDERING_ATTACHMENT_INFO,
-                imageView = swapchain_info.view,
-                imageLayout = .ATTACHMENT_OPTIMAL,
-                loadOp = .CLEAR,
-                storeOp = .STORE,
-                clearValue = { color = { float32 = v4{0, 0, .2, 1 } } },
-            },
-            pDepthAttachment  = &vk.RenderingAttachmentInfo {
-                sType = .RENDERING_ATTACHMENT_INFO,
-                imageView = depth_image_view,
-                imageLayout = .ATTACHMENT_OPTIMAL,
-                loadOp = .CLEAR,
-                storeOp = .DONT_CARE,
-                clearValue = { depthStencil = { 1, 0 } },
-            },
-        }
-        
-        ////////////////////////////////////////////////
-        
-        vk.CmdBeginRendering(cb, &rendering_info)
+        begin_rendering(cb, swapchain, image_index, depth_image, depth_image_view, {0.07, 0.07, 0.07, 1})
         
         vk.CmdSetViewport(cb, 0, 1, &vk.Viewport {
             x      = 0,
@@ -841,54 +814,20 @@ main :: proc () {
         
         // @todo(viktor): test performance increase of meshlet culling
         for _ in 0..<1 {
-            vk.CmdDrawMeshTasksEXT(cb, cast(u32) len(mesh.meshlets), 1, 1)
+            count := cast(u32) len(mesh.meshlets)
+            // count  = align(32, count) / 32 :TaskShader: each task shader should later spawn 32 meshshaders
+            vk.CmdDrawMeshTasksEXT(cb, count, 1, 1)
         }
         
-        vk.CmdEndRendering(cb)
+        end_rendering(cb, swapchain, image_index)
         
         ////////////////////////////////////////////////
-        
-        vk_begin_transition_images()
-            vk_append_image_memory_barrier_2(swapchain_info.image, { .COLOR_ATTACHMENT_OUTPUT }, { .COLOR_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, {}, {}, .PRESENT_SRC_KHR)
-        vk_end_transition_images(cb)
         
         vk.CmdWriteTimestamp(cb, { .BOTTOM_OF_PIPE }, query_pool, 1)
         
         vk.EndCommandBuffer(cb)
         
-        ////////////////////////////////////////////////
-        
-        render_complete_and_timeline_submit_info := [] vk.SemaphoreSubmitInfo {
-            {
-                sType = .SEMAPHORE_SUBMIT_INFO,
-                semaphore = swapchain_info.render_completed,
-                stageMask = { .ALL_GRAPHICS },
-            },
-            {
-                sType = .SEMAPHORE_SUBMIT_INFO,
-                semaphore = timeline_semaphore,
-                value = signal_value,
-                stageMask = { .ALL_COMMANDS },
-            },
-        }
-        
-        submit_info := vk.SubmitInfo2 {
-            sType = .SUBMIT_INFO_2,
-            waitSemaphoreInfoCount = 1,
-            pWaitSemaphoreInfos = &vk.SemaphoreSubmitInfo {
-                sType = .SEMAPHORE_SUBMIT_INFO,
-                semaphore = frame.image_aquired,
-                stageMask = { .COLOR_ATTACHMENT_OUTPUT },
-            },
-            commandBufferInfoCount = 1,
-            pCommandBufferInfos = &vk.CommandBufferSubmitInfo {
-                sType = .COMMAND_BUFFER_SUBMIT_INFO,
-                commandBuffer = frame.command_buffer,
-            },
-            signalSemaphoreInfoCount = auto_cast len(render_complete_and_timeline_submit_info),
-            pSignalSemaphoreInfos = raw_data(render_complete_and_timeline_submit_info),
-        }
-        vk.QueueSubmit2(queue, 1, &submit_info, 0)
+        queue_submit(queue, swapchain, frame, image_index, signal_value, timeline_semaphore)
         
         ////////////////////////////////////////////////
         

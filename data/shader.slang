@@ -1,5 +1,6 @@
 typealias u8  = uint8_t;
-typealias u32  = uint32_t;
+typealias u16 = uint16_t;
+typealias u32 = uint32_t;
 
 typealias f16 = half;
 typealias f32 = float;
@@ -12,73 +13,145 @@ typealias m4 = float4x4;
 
 static const bool Debug = false;
 
-// @volatile cpu needs to match this layout
-struct Vertex {
-    f16 px, py, pz, p_pad;
-    u8 nx, ny, nz, n_pad;
-	f16 tu, tv;
-}
-
-static const uint MaxVertexCount = 64;
-static const uint MaxIndexCount  = 84;
-static const uint ThreadCount    = 32;
-
+static const uint VertexLimit   = 64;
+static const uint TriangleLimit = 84;
 
 // @volatile cpu needs to match this layout
-struct Meshlet {
-    v4  cone;
-    u32 vertices[MaxVertexCount];
-    u8  indices[MaxIndexCount*3];
-    u8  triangle_count;
-    u8  vertex_count;
-}
-
-[[vk::binding(0, 0)]]
-StructuredBuffer<Vertex> vertices;
-[[vk::binding(1, 0)]]
-StructuredBuffer<Meshlet> meshlets;
-
-[[vk::binding(0, 1)]]
-Sampler2D textures[];
-
-struct Shader_Data {
+struct Data {
     m4 projection;
     m4 view;
     m4 model;
     v4 light_pos[4];
+    
+    u32 meshlet_count;
+}
+
+// @volatile cpu needs to match this layout
+struct Vertex {
+    f16 px, py, pz, p_pad;
+    u8  nx, ny, nz, n_pad;
+	f16 tu, tv;
+}
+
+// @volatile cpu needs to match this layout
+struct Meshlet {
+    v4  cone;
+    u32 vertices[VertexLimit];
+    u8  indices[TriangleLimit][3];
+    u8  triangle_count;
+    u8  vertex_count;
+}
+
+[[vk::binding(0)]] StructuredBuffer<Vertex> vertex_buffer;
+[[vk::binding(1)]] StructuredBuffer<Meshlet> meshlet_buffer;
+
+[[vk::binding(0, 1)]] Sampler2D textures[];
+
+struct Task_Result {
+    u8 indices[TaskWidth];
+    uint meshlet_group;
 }
 
 struct Mesh_Result {
-    v4 pos : SV_POSITION;
+    v4 pos    : SV_POSITION;
     v3 normal : NORMAL;
-    v2 uv : TEXCOORD0;
+    v2 uv     : TEXCOORD0;
     v3 light_vec[4];
     v3 view_vec;
     
     v3 debug_color;
 }
 
+// @volatile, the renderer needs to divide the total meshlet count by this to get the number of shaders to dispatch
+static const uint TaskWidth = 1;
+static const uint MeshWidth = 32;
+
+// groupshared Task_Result result;
+// groupshared Atomic<uint> meshlet_count;
+
+// [shader("task")]
+// [numthreads(TaskWidth, 1, 1)]
+// void main(uint3 group_id : SV_GroupID /* 0..meshlet_count / TaskWidth */, uint3 thread_id: SV_GroupThreadID /* 0..TaskWidth */, uniform Data *data, ) {
+//     DispatchMesh(1, 1, 1, result);
+//     // uint meshlet_group_index = group_id.x;
+//     // uint thread_index = thread_id.x;
+    
+//     // uint meshlet_group_offset = meshlet_group_index * 32;
+//     // if (thread_index == 0) {
+//     //     result.meshlet_group = meshlet_group_offset;
+//     //     meshlet_count.store(0);
+//     // }
+    
+//     // GroupMemoryBarrierWithWaveSync();
+    
+//     // /* 
+//     // @study how can this be done in slang
+//     // bool accept = !coneCull(meshlets[mi].cone, vec3(0, 0, 1));
+//     // uvec4 ballot = subgroupBallot(accept);
+//     // uint index = subgroupBallotInclusiveBitCount(ballot);
+
+//     // if (accept)
+//     //     meshletIndices[index] = mi;
+
+//     // uint count = subgroupBallotBitCount(ballot);
+
+//     // if (ti == 0)
+//     //     gl_TaskCountNV = count;
+//     // */
+    
+//     // uint meshlet_index  = meshlet_group_offset + thread_index;
+//     // v4 cone  = meshlet_buffer[meshlet_index].cone;
+    
+//     // // cone.xyz = normalize(mul((m3) shader_data->model, cone.xyz));
+//     // // if (!cone_cull(cone.xyz, cone.w, v3(0, 0, 1))) {
+//     // //     uint index = meshlet_count.add(1);
+//     // //     result.indices[index] = (u8) thread_index;
+//     // // }
+    
+//     // uint index = meshlet_count.add(1);
+//     // result.indices[index] = (u8) thread_index;
+    
+    
+//     // GroupMemoryBarrierWithWaveSync();
+    
+//     // if (thread_index == 0) {
+//     //     uint count = meshlet_count.load();
+//     //     DispatchMesh(count, 1, 1, result);
+//     // }
+// }
+
 [shader("mesh")]
 [outputtopology("triangle")]
-[numthreads(ThreadCount, 1, 1)]
+[numthreads(MeshWidth, 1, 1)]
 [outputtopology("triangle")]
-void main(out OutputVertices<Mesh_Result, MaxVertexCount> out_vertices, out OutputIndices<uint3, MaxIndexCount> out_indices, uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID, uniform Shader_Data *shader_data) {
-    uint mesh_index = group_id.x;
-    Meshlet meshlet = meshlets[mesh_index];
+void main(in payload Task_Result input, uniform Data *shader_data,
+    out OutputVertices<Mesh_Result, VertexLimit> out_vertices, out OutputIndices<uint3, TriangleLimit> out_indices, 
+    uint3 group_id : SV_GroupID/* 0..TaskWidth */, uint3 thread_id : SV_GroupThreadID/* 0..MeshWidth */) {
+    uint group_index = group_id.x;
+    uint thread_index = thread_id.x;
+    // uint meshlet_index = input.meshlet_group + input.indices[group_index];
+    uint meshlet_index = group_index;
     
-    v3 view_direction = v3(0, 0, 1);
-    // @todo(viktor): the cone needs to be transformed into the view space
-    if (cone_cull(meshlet.cone, view_direction)) {
-        if (thread_id.x == 0) {
-            SetMeshOutputCounts(0, 0);
-        }
-        return;
-    }
     
-    for (int i = thread_id.x; i < meshlet.vertex_count; i += ThreadCount) {
+    Meshlet meshlet = meshlet_buffer[meshlet_index];
+    
+    //@cleanup make this a single model transform
+    m4 model_view = mul(shader_data->view, shader_data->model);
+    
+    // @todo(viktor): apparently i need more data for a perspective correct culling
+    // v4 cone  = meshlet.cone;
+    // cone.xyz = normalize(mul((m3) transpose(model_view.invertse)), cone.xyz));
+    // if (cone_cull(cone.xyz, cone.w, v3(0, 0, 1))) {
+    //     SetMeshOutputCounts(0, 0);
+    //     return;
+    // }
+    
+    SetMeshOutputCounts(meshlet.vertex_count, meshlet.triangle_count);
+    
+    for (int i = thread_index; i < meshlet.vertex_count; i += MeshWidth) {
         uint vertex_index = meshlet.vertices[i];
         
-        Vertex input = vertices[vertex_index];
+        Vertex input = vertex_buffer[vertex_index];
         
         v3 p = v3(input.px, input.py, input.pz);
         // 0..255 -> 0..2 -> -1..1
@@ -86,53 +159,32 @@ void main(out OutputVertices<Mesh_Result, MaxVertexCount> out_vertices, out Outp
         v2 t = v2(input.tu, input.tv);
         
         Mesh_Result result;
-        //@cleanup single model transform
-        m4 modelMat = shader_data->model;
-        v4 p_in_view = mul(mul(shader_data->view, modelMat), v4(p, 1));
+        v4 view_p = mul(model_view, v4(p, 1));
         
-        result.normal = mul((m3) mul(shader_data->view, modelMat), n);
+        result.normal = mul((m3) model_view, n);
         result.uv = t;
-        result.pos = mul(shader_data->projection, p_in_view);
+        result.pos = mul(shader_data->projection, view_p);
         
         // Calculate view vectors required for lighting
-        v4 fragPos = p_in_view;
         for (int li = 0; li < 4; li++) {
-            result.light_vec[li] = shader_data->light_pos[li].xyz - fragPos.xyz;
+            result.light_vec[li] = shader_data->light_pos[li].xyz - view_p.xyz;
         }
-        result.view_vec = -fragPos.xyz;
+        result.view_vec = -view_p.xyz;
         
         out_vertices[i] = result;
         
         if (Debug) {
-            uint mhash = hash(mesh_index);
+            uint mhash = hash(meshlet_index);
             result.debug_color = v3(f32(mhash & 255), f32((mhash >> 8) & 255), f32((mhash >> 16) & 255)) / 255;
         }
     }
     
     // @speed as the indices are really [3] u8, we could write them packed into a u32 and get 4x throughput
-    for (int i = thread_id.x; i < meshlet.triangle_count; i += ThreadCount) {
-        out_indices[i].x = meshlet.indices[i*3+0];
-        out_indices[i].y = meshlet.indices[i*3+1];
-        out_indices[i].z = meshlet.indices[i*3+2];
+    for (int i = thread_index; i < meshlet.triangle_count; i += MeshWidth) {
+        out_indices[i].x = meshlet.indices[i][0];
+        out_indices[i].y = meshlet.indices[i][1];
+        out_indices[i].z = meshlet.indices[i][2];
     }
-    
-    if (thread_id.x == 0) {
-        SetMeshOutputCounts(meshlet.vertex_count, meshlet.triangle_count);
-    }
-}
-
-bool cone_cull(v4 cone, v3 view) {
-    return dot(cone.xyz, view) > cone.w;
-}
-
-uint hash(uint a) {
-    a = (a+0x7ed55d16) + (a << 12);
-    a = (a^0xc761c23c) ^ (a >> 19);
-    a = (a+0x165667b1) + (a <<  5);
-    a = (a+0xd3a2646c) ^ (a <<  9);
-    a = (a+0xfd7046c5) + (a <<  3);
-    a = (a^0xb55a4f09) ^ (a >> 16);
-    return a;
 }
 
 [shader("fragment")]
@@ -159,4 +211,20 @@ v4 main(Mesh_Result input) {
     }
     
     return v4(color, 1);
+}
+
+////////////////////////////////////////////////
+
+bool cone_cull(v3 cone, f32 w, v3 view) {
+    return dot(cone, view) > w;
+}
+
+uint hash(uint a) {
+    a = (a + 0x7ed55d16) + (a << 12);
+    a = (a ^ 0xc761c23c) ^ (a >> 19);
+    a = (a + 0x165667b1) + (a << 5);
+    a = (a + 0xd3a2646c) ^ (a << 9);
+    a = (a + 0xfd7046c5) + (a << 3);
+    a = (a ^ 0xb55a4f09) ^ (a >> 16);
+    return a;
 }
