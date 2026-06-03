@@ -36,14 +36,14 @@ struct Vertex {
 // @volatile cpu needs to match this layout
 struct Meshlet {
     v4  cone;
-    u32 vertices[VertexLimit];
-    u8  indices[TriangleLimit][3];
-    u8 triangle_count;
-    u8 vertex_count;
+    u32 data_offset;
+    u8  vertex_count;
+    u8  triangle_count;
 }
 
-[[vk::binding(0)]] StructuredBuffer<Vertex> vertex_buffer;
+[[vk::binding(0)]] StructuredBuffer<Vertex>  vertex_buffer;
 [[vk::binding(1)]] StructuredBuffer<Meshlet> meshlet_buffer;
+[[vk::binding(2)]] StructuredBuffer<u32>     meshlet_data_buffer;
 
 [[vk::binding(0, 1)]] Sampler2D textures[];
 
@@ -153,8 +153,10 @@ void main(in payload Task_Result input, uniform Data *data, uint group_index : S
     
     SetMeshOutputCounts(meshlet.vertex_count, meshlet.triangle_count);
     
+    uint vertex_offset = meshlet.data_offset;
+    uint index_offset  = vertex_offset + meshlet.vertex_count;
     for (int i = thread_index; i < meshlet.vertex_count; i += MeshWidth) {
-        uint vertex_index = meshlet.vertices[i];
+        uint vertex_index = meshlet_data_buffer[vertex_offset + i];
         
         Vertex vertex = vertex_buffer[vertex_index];
         
@@ -185,10 +187,44 @@ void main(in payload Task_Result input, uniform Data *data, uint group_index : S
     }
     
     // @speed as the indices are really [3] u8, we could write them packed into a u32 and get 4x throughput
-    for (int i = thread_index; i < meshlet.triangle_count; i += MeshWidth) {
-        out_indices[i].x = meshlet.indices[i][0];
-        out_indices[i].y = meshlet.indices[i][1];
-        out_indices[i].z = meshlet.indices[i][2];
+    // [a  b  c  d][e  f  g  h][i  j  k  l]
+    // [a  b  c][d  e  f][g  h  i][j  k  l]
+    uint triangle_index = thread_index * 4;
+    int word_index      = thread_index * 3;
+    uint group_count    = (meshlet.triangle_count * 3 + 3) / 4;
+    while (word_index < group_count) {
+        uint xx = index_offset + word_index;
+        // @todo(viktor): measure if the other version has a perf degredation
+#if 0 
+        uint4 u = unpack_u8u32(meshlet_data_buffer[xx]);
+        
+        out_indices[triangle_index+0] = u.xyz;
+        out_indices[triangle_index+1].x = u.w;
+        
+        xx = index_offset + word_index + 1;
+        u = unpack_u8u32(meshlet_data_buffer[xx]);
+        out_indices[triangle_index+1].yz = u.xy;
+        out_indices[triangle_index+2].xy = u.zw;
+        
+        xx = index_offset + word_index + 2;
+        u = unpack_u8u32(meshlet_data_buffer[xx]);
+        out_indices[triangle_index+2].z = u.x;
+        out_indices[triangle_index+3] = u.yzw;
+#else 
+
+        uint4 u0 = unpack_u8u32(meshlet_data_buffer[word_index+0]);
+        uint4 u1 = unpack_u8u32(meshlet_data_buffer[word_index+1]);
+        uint4 u2 = unpack_u8u32(meshlet_data_buffer[word_index+2]);
+        
+        out_indices[triangle_index+0]    = u0.xyz;
+        out_indices[triangle_index+1].x  = u0.w;
+        out_indices[triangle_index+1].yz = u1.xy;
+        out_indices[triangle_index+2].xy = u1.zw;
+        out_indices[triangle_index+2].z  = u2.x;
+        out_indices[triangle_index+3]    = u2.yzw;
+#endif
+        triangle_index += 4 * MeshWidth;
+        word_index     += 3 * MeshWidth;
     }
 }
 

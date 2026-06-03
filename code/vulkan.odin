@@ -466,6 +466,13 @@ create_vertex_update_template :: proc (device: vk.Device, pipeline: Pipeline, ol
             offset          = 1 * size_of(DescriptorUpdateData),
             stride          = size_of(DescriptorUpdateData),
         },
+        {
+            dstBinding      = 2,
+            descriptorType  = .STORAGE_BUFFER,
+            descriptorCount = 1,
+            offset          = 2 * size_of(DescriptorUpdateData),
+            stride          = size_of(DescriptorUpdateData),
+        },
     }
         
     create_info := vk.DescriptorUpdateTemplateCreateInfo {

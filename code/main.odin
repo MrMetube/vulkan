@@ -15,7 +15,7 @@ import vk "vendor:vulkan"
 
 ////////////////////////////////////////////////
 
-VSync :: true
+VSync :: !true
 
 ////////////////////////////////////////////////
 
@@ -59,20 +59,23 @@ DescriptorUpdateData :: struct #raw_union {
 
 ////////////////////////////////////////////////
 
+MaxVertices  :: 64
+MaxTriangles :: 84
+
 Mesh :: struct {
     vertices: [] Vertex,
     indices:  [] u32,
     
     meshlets: [] Meshlet,
+    meshlet_data: [] u32,
 }
 
 // @volatile shader.slang needs to match this layout
 Meshlet :: struct #align(16) {
     cone: v4,
-    vertices: [64] u32,
-    indices:  [84] [3] u8,
-    triangle_count: u8,
+    data_offset:    u32, // data_offset:][:vertexcount stores vertex indices, we store indices packed in 4b units after that
     vertex_count:   u8,
+    triangle_count: u8,
 }
 
 // @volatile shader.slang needs to match this layout
@@ -321,8 +324,9 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     // @speed :ScratchBuffer: use a scratch buffer and have some api like copy(vkstuff, dest_buffer_in_device_local_memory, scratch_buffer, data), The main reason for this, is that we want all of the data for the shader to be in device_local memory.
-    vertex_buffer  := gpu_make_buffer({ .STORAGE_BUFFER }, 256 * Megabyte)
-    meshlet_buffer := gpu_make_buffer({ .STORAGE_BUFFER }, 256 * Megabyte)
+    vertex_buffer       := gpu_make_buffer({ .STORAGE_BUFFER }, 256 * Megabyte)
+    meshlet_buffer      := gpu_make_buffer({ .STORAGE_BUFFER }, 256 * Megabyte)
+    meshlet_data_buffer := gpu_make_buffer({ .STORAGE_BUFFER }, 256 * Megabyte)
     
     Mesh_Info :: struct {
         triangle_count: u32,
@@ -331,9 +335,9 @@ main :: proc () {
     // @todo(viktor): we only read indices len for debug info and meshlets len for the dispatch
     mesh_info: Mesh_Info
     {
-        mesh := load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
+        // mesh := load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
         // mesh := load_mesh_from_obj("models/bunny.obj", context.temp_allocator)
-        // mesh := load_mesh_from_obj("models/lucy_280k.obj", context.temp_allocator)
+        mesh := load_mesh_from_obj("models/lucy_280k.obj", context.temp_allocator)
         
         optimize_mesh(&mesh, context.temp_allocator)
         
@@ -344,6 +348,7 @@ main :: proc () {
         
         copy(vertex_buffer.data,  slice_to_bytes(mesh.vertices))
         copy(meshlet_buffer.data, slice_to_bytes(mesh.meshlets))
+        copy(meshlet_data_buffer.data, slice_to_bytes(mesh.meshlet_data))
     }
     
     ////////////////////////////////////////////////
@@ -525,6 +530,12 @@ main :: proc () {
             },
             {
                 binding = 1,
+                descriptorType = .STORAGE_BUFFER,
+                descriptorCount = 1,
+                stageFlags = { .MESH_EXT }, // :TaskShader: + { .TASK_EXT }
+            },
+            {
+                binding = 2,
                 descriptorType = .STORAGE_BUFFER,
                 descriptorCount = 1,
                 stageFlags = { .MESH_EXT }, // :TaskShader: + { .TASK_EXT }
@@ -770,7 +781,7 @@ main :: proc () {
         view :: proc (seconds: f64) -> time.Duration {
             return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
         }
-        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, triangles: %v, meshlets: %v", view(cpu_time.value), view(gpu_time.value), view_magnitude(mesh_info.triangle_count) , view_magnitude(mesh_info.meshlet_count)))
+        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, triangles: %v, meshlets: %v, triangles/s %v", view(cpu_time.value), view(gpu_time.value), view_magnitude(mesh_info.triangle_count), view_magnitude(mesh_info.meshlet_count), view_magnitude(cast(f64) mesh_info.triangle_count / gpu_time.value)))
             
         ////////////////////////////////////////////////
         
@@ -811,8 +822,9 @@ main :: proc () {
         vk.CmdBindPipeline(cb, .GRAPHICS, pipeline.pipeline)
         
         descriptor_update_data := [?] DescriptorUpdateData {
-            { buffer = { vertex_buffer.buffer,  0, auto_cast vk.WHOLE_SIZE }},
-            { buffer = { meshlet_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
+            { buffer = { vertex_buffer.buffer,       0, auto_cast vk.WHOLE_SIZE }},
+            { buffer = { meshlet_buffer.buffer,      0, auto_cast vk.WHOLE_SIZE }},
+            { buffer = { meshlet_data_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
         }
         vk.CmdPushDescriptorSetWithTemplate(cb,  vertex_descriptor_update_template, pipeline.layout, 0, &descriptor_update_data[0])
         
@@ -868,6 +880,7 @@ main :: proc () {
     
     gpu_delete_buffer(vertex_buffer)
     gpu_delete_buffer(meshlet_buffer)
+    gpu_delete_buffer(meshlet_data_buffer)
     
     destroy_swapchain(device, &swapchain)
 
