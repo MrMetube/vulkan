@@ -13,6 +13,8 @@ typealias m4 = float4x4;
 
 static const bool Debug = false;
 
+////////////////////////////////////////////////
+
 static const uint VertexLimit   = 64;
 static const uint TriangleLimit = 84;
 
@@ -75,21 +77,6 @@ void main(uniform Data *data, uint group_id : SV_GroupID, uint thread_id : SV_Gr
         result.offset = meshlet_group_offset;
         meshlet_count.store(0);
     }
-    
-    /* 
-    @study how can this be done in slang
-    bool accept = !coneCull(meshlets[mi].cone, vec3(0, 0, 1));
-    uvec4 ballot = subgroupBallot(accept);
-    uint index = subgroupBallotInclusiveBitCount(ballot);
-
-    if (accept)
-        meshletIndices[index] = mi;
-
-    uint count = subgroupBallotBitCount(ballot);
-
-    if (ti == 0)
-        gl_TaskCountNV = count;
-    */
     
     uint meshlet_index  = meshlet_group_offset + thread_index;
     // v4 cone = meshlet_buffer[meshlet_index].cone;

@@ -241,7 +241,7 @@ destroy_swapchain :: proc (device: vk.Device, swapchain: ^Swapchain) {
 }
 
 // @cleanup this always happens after create_swapchain
-vk_create_depth_image :: proc (device: vk.Device, window_size: uv2, allocator: vma.Allocator, result: ^Image) {
+create_depth_buffer :: proc (device: vk.Device, window_size: uv2, allocator: vma.Allocator, result: ^Image) {
     depth_image_create_info := vk.ImageCreateInfo {
         sType = .IMAGE_CREATE_INFO,
         imageType = .D2,
@@ -365,15 +365,20 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_for
         textures_descriptor_set_layout,
     }
     
+    // @volatile needs to match the push constants in shader.slang
+    ranges := [?] vk.PushConstantRange {
+        {
+            stageFlags = shader.stages,
+            size       = size_of(vk.DeviceAddress),
+        },
+    }
+    
     pipeline_layout_create_info := vk.PipelineLayoutCreateInfo {
         sType = .PIPELINE_LAYOUT_CREATE_INFO,
         setLayoutCount = len(set_layouts),
         pSetLayouts    = &set_layouts[0],
-        pushConstantRangeCount = 1,
-        pPushConstantRanges    = &vk.PushConstantRange {
-            stageFlags = shader.stages,
-            size       = size_of(vk.DeviceAddress),
-        },
+        pushConstantRangeCount = len(ranges),
+        pPushConstantRanges    = &ranges[0],
     }
     
     check(vk.CreatePipelineLayout(device, &pipeline_layout_create_info, nil, &result.layout))
@@ -463,34 +468,21 @@ destroy_pipeline :: proc (device: vk.Device, pipeline: Pipeline) {
     }
 }
 
-create_vertex_update_template :: proc (device: vk.Device, pipeline: Pipeline, old: vk.DescriptorUpdateTemplate = 0) -> vk.DescriptorUpdateTemplate {
+create_vertex_update_template :: proc (device: vk.Device, pipeline: Pipeline, storage_buffer_count: u32, old: vk.DescriptorUpdateTemplate = 0) -> vk.DescriptorUpdateTemplate {
     vk.DestroyDescriptorUpdateTemplate(device, old, nil)
     
     // @todo(viktor): The information of which shader stage needs which storage buffer could be parsed from the compiled spirv file.
     // But currently the single shader file contains multiple shader stages, so it would be non trivial to figure out which stage 
     // makes use of a binding. Otherwise we could just maximally bind buffers, so that we atleast never miss a required buffer.
-    update_template_entries := [?] vk.DescriptorUpdateTemplateEntry {
-        {
-            dstBinding      = 0,
+    update_template_entries: [dynamic; 128] vk.DescriptorUpdateTemplateEntry
+    for index in 0..<storage_buffer_count {
+        append(&update_template_entries, vk.DescriptorUpdateTemplateEntry {
+            dstBinding      = index,
             descriptorType  = .STORAGE_BUFFER,
             descriptorCount = 1,
-            offset          = 0 * size_of(DescriptorUpdateData),
+            offset          = cast(int) index * size_of(DescriptorUpdateData),
             stride          = size_of(DescriptorUpdateData),
-        },
-        {
-            dstBinding      = 1,
-            descriptorType  = .STORAGE_BUFFER,
-            descriptorCount = 1,
-            offset          = 1 * size_of(DescriptorUpdateData),
-            stride          = size_of(DescriptorUpdateData),
-        },
-        {
-            dstBinding      = 2,
-            descriptorType  = .STORAGE_BUFFER,
-            descriptorCount = 1,
-            offset          = 2 * size_of(DescriptorUpdateData),
-            stride          = size_of(DescriptorUpdateData),
-        },
+        })
     }
         
     create_info := vk.DescriptorUpdateTemplateCreateInfo {
@@ -498,7 +490,7 @@ create_vertex_update_template :: proc (device: vk.Device, pipeline: Pipeline, ol
         pipelineBindPoint   = .GRAPHICS,
         pipelineLayout      = pipeline.layout,
         templateType        = .PUSH_DESCRIPTORS,
-        descriptorUpdateEntryCount = len(update_template_entries),
+        descriptorUpdateEntryCount = cast(u32) len(update_template_entries),
         pDescriptorUpdateEntries   = &update_template_entries[0],
     }
     
