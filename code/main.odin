@@ -83,75 +83,16 @@ main :: proc () {
     check_sdl(window != nil)
     defer sdl.DestroyWindow(window)
     
-    vk.GetInstanceProcAddr = auto_cast sdl.Vulkan_GetVkGetInstanceProcAddr()
-    vk.load_proc_addresses_global(auto_cast vk.GetInstanceProcAddr)
-    
     ////////////////////////////////////////////////
     
-    ips: IPS
-    {
-        instance_extension_count: u32
-        instance_extensions_raw := sdl.Vulkan_GetInstanceExtensions(&instance_extension_count)
-        
-        instance_extensions := make([dynamic] cstring, 0, instance_extension_count, context.temp_allocator)
-        for i in 0..<instance_extension_count {
-            append(&instance_extensions, instance_extensions_raw[i])
-        }
-        
-        when ODIN_DEBUG {
-            append(&instance_extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
-        }
-        
-        instance_create_info := vk.InstanceCreateInfo {
-            sType = .INSTANCE_CREATE_INFO,
-            pApplicationInfo = &vk.ApplicationInfo {
-                sType = .APPLICATION_INFO,
-                pApplicationName = "How to Vulkan",
-                apiVersion = vk.API_VERSION_1_4,
-            },
-            enabledExtensionCount   = auto_cast len(instance_extensions),
-            ppEnabledExtensionNames = raw_data(instance_extensions),
-        }
-        
-        when ODIN_DEBUG {
-            validation_layers := [] cstring { "VK_LAYER_KHRONOS_validation" }
-            instance_create_info.enabledLayerCount   = auto_cast len(validation_layers)
-            instance_create_info.ppEnabledLayerNames = raw_data(validation_layers)
-            
-            instance_create_info.pNext = &vk.DebugUtilsMessengerCreateInfoEXT {
-                sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-                messageSeverity = { .VERBOSE, .WARNING, .ERROR },
-                messageType = { .VALIDATION, .PERFORMANCE },
-                pfnUserCallback = vk_debug_utils_callback,
-            }
-        }
-        
-        check(vk.CreateInstance(&instance_create_info, nil, &ips.instance))
-        
-        vk.load_proc_addresses_instance(ips.instance)
-    }
+    ips := create_instance_physical_device_and_surface(window, cast(pmm) sdl.Vulkan_GetVkGetInstanceProcAddr())
     
-    ////////////////////////////////////////////////
-    
-    ips.physical_device = vk_choose_physical_device(ips)
-    
-    device_properties := vk.PhysicalDeviceProperties2 { sType = .PHYSICAL_DEVICE_PROPERTIES_2 }
-    vk.GetPhysicalDeviceProperties2(ips.physical_device, &device_properties)
-    fmt.printfln("Selected device: %v", cast(cstring) &device_properties.properties.deviceName[0])
-    assert(device_properties.properties.limits.timestampComputeAndGraphics)
-    
-    ////////////////////////////////////////////////
-    
-    check(sdl.Vulkan_CreateSurface(window, ips.instance, nil, &ips.surface))
-    
-    ////////////////////////////////////////////////
-    
-    device, queue, frames, command_pool := create_device(ips)
+    device, queue, frames, command_pool := create_device_queue_frames_and_command_pool_and_init_gpu_allocator(ips)
     
     ////////////////////////////////////////////////
     
     swapchain: Swapchain
-    swapchain.format = vk_get_swapchain_format(ips)
+    swapchain.format = get_swapchain_format(ips)
     
     recreate_swapchain(ips, device, sdl_get_window_size(window), &swapchain)
     
@@ -191,9 +132,6 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    ////////////////////////////////////////////////
-    
-    // @speed :ScratchBuffer: use a scratch buffer and have some api like copy(vkstuff, dest_buffer_in_device_local_memory, scratch_buffer, data), The main reason for this, is that we want all of the data for the shader to be in device_local memory.
     vertex_buffer,       vb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Vertex,  256 * Megabyte / size_of(Vertex))
     meshlet_buffer,      mb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Meshlet, 256 * Megabyte / size_of(Meshlet))
     meshlet_data_buffer, mdb_view := gpu_make_buffer({ .STORAGE_BUFFER }, [] u32,     256 * Megabyte / size_of(u32))
@@ -202,7 +140,7 @@ main :: proc () {
         triangle_count: u32,
         meshlet_count:  u32,
     }
-    // @todo(viktor): we only read indices len for debug info and meshlets len for the dispatch
+    
     mesh_info: Mesh_Info
     {
         mesh := load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
@@ -245,14 +183,14 @@ main :: proc () {
             // @cleanup use my allocator and then just copy by hand if possible
             image_create_info := vk.ImageCreateInfo {
                 sType = .IMAGE_CREATE_INFO,
-                imageType = .D2,
-                format = loaded_texture.format,
-                extent = { width = loaded_texture.width, height = loaded_texture.height, depth = 1 },
-                mipLevels = loaded_texture.mip_levels,
-                arrayLayers = 1,
-                samples = { ._1 },
-                tiling = .OPTIMAL,
-                usage = { .TRANSFER_DST, .SAMPLED },
+                imageType     = .D2,
+                format        = loaded_texture.format,
+                extent        = { width = loaded_texture.width, height = loaded_texture.height, depth = 1 },
+                mipLevels     = loaded_texture.mip_levels,
+                arrayLayers   = 1,
+                samples       = { ._1 },
+                tiling        = .OPTIMAL,
+                usage         = { .TRANSFER_DST, .SAMPLED },
                 initialLayout = .UNDEFINED,
             }
             
@@ -260,7 +198,7 @@ main :: proc () {
             check(vma.create_image(allocator, image_create_info, image_allocation_create_info, &texture.image, &texture.allocation, nil))
             
             texture.view = create_2d_image_view(device, texture.image, image_create_info.format, { .COLOR }, loaded_texture.mip_levels)
-            mark_handle(vk.DestroyImageView, texture.view)
+            defer_destroy(vk.DestroyImageView, texture.view)
             
             // @todo(viktor): use gpu_make_xxx here for the first copy
             image_src_buffer: vk.Buffer
@@ -301,10 +239,10 @@ main :: proc () {
             check(vk.BeginCommandBuffer(cb_once, &cb_once_begin_info))
             
             
-            vk_begin_transition_images()
+            begin_transition_images()
                 // @note(viktor): check if these src masks are correct
-                vk_append_image_memory_barrier_2(texture.image, {}, {}, .UNDEFINED, {.TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
-            vk_end_transition_images(cb_once)
+                append_image_memory_barrier_2(texture.image, {}, {}, .UNDEFINED, {.TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
+            end_transition_images(cb_once)
             
             copy_regions := make([dynamic] vk.BufferImageCopy, context.temp_allocator)
             for level in 0..<loaded_texture.mip_levels {
@@ -319,9 +257,9 @@ main :: proc () {
             
             vk.CmdCopyBufferToImage(cb_once, image_src_buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
             
-            vk_begin_transition_images()
-                vk_append_image_memory_barrier_2(texture.image, {.TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
-            vk_end_transition_images(cb_once)
+            begin_transition_images()
+                append_image_memory_barrier_2(texture.image, {.TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
+            end_transition_images(cb_once)
             
             check(vk.EndCommandBuffer(cb_once))
             
@@ -346,7 +284,7 @@ main :: proc () {
             }
             
             check(vk.CreateSampler(device, &sampler_create_info, nil, &texture.sampler))
-            mark_handle(vk.DestroySampler, texture.sampler)
+            defer_destroy(vk.DestroySampler, texture.sampler)
             
             texture_descriptors[index] = vk.DescriptorImageInfo{ sampler = texture.sampler, imageView = texture.view, imageLayout = .READ_ONLY_OPTIMAL }
         }
@@ -387,7 +325,7 @@ main :: proc () {
         }
         
         check(vk.CreateDescriptorSetLayout(device, &vertices_descriptor_layout_create_info, nil, &vertex_descriptor_set_layout))
-        mark_handle(vk.DestroyDescriptorSetLayout, vertex_descriptor_set_layout)
+        defer_destroy(vk.DestroyDescriptorSetLayout, vertex_descriptor_set_layout)
     }
     
     ////////////////////////////////////////////////
@@ -413,7 +351,7 @@ main :: proc () {
         }
         
         check(vk.CreateDescriptorSetLayout(device, &desc_layout_textures_create_info, nil, &textures_descriptor_set_layout))
-        mark_handle(vk.DestroyDescriptorSetLayout, textures_descriptor_set_layout)
+        defer_destroy(vk.DestroyDescriptorSetLayout, textures_descriptor_set_layout)
         
         desc_pool_create_info := vk.DescriptorPoolCreateInfo {
             sType = .DESCRIPTOR_POOL_CREATE_INFO,
@@ -426,7 +364,7 @@ main :: proc () {
         }
         
         check(vk.CreateDescriptorPool(device, &desc_pool_create_info, nil, &textures_descriptor_pool))
-        mark_handle(vk.DestroyDescriptorPool, textures_descriptor_pool)
+        defer_destroy(vk.DestroyDescriptorPool, textures_descriptor_pool)
         
         variable_desc_count := cast(u32) len(textures)
         
@@ -465,7 +403,7 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     timeline_semaphore := vk_create_semaphore(device, timeline_initial_value = MaxFramesInFlight)
-    mark_handle(vk.DestroySemaphore, timeline_semaphore)
+    defer_destroy(vk.DestroySemaphore, timeline_semaphore)
     
     ////////////////////////////////////////////////
     
@@ -478,7 +416,7 @@ main :: proc () {
             queryCount = QueryPoolSize,
         }
         check(vk.CreateQueryPool(device, &create_info, nil, &query_pool))
-        mark_handle(vk.DestroyQueryPool, query_pool)
+        defer_destroy(vk.DestroyQueryPool, query_pool)
     }
     
     ////////////////////////////////////////////////
@@ -604,8 +542,8 @@ main :: proc () {
                 check(query_result)
                 
                 
-                gpu_begin := cast(f64) query_results[0] * cast(f64) device_properties.properties.limits.timestampPeriod * 1e-9
-                gpu_end   := cast(f64) query_results[1] * cast(f64) device_properties.properties.limits.timestampPeriod * 1e-9
+                gpu_begin := cast(f64) query_results[0] * cast(f64) ips.device_properties.properties.limits.timestampPeriod * 1e-9
+                gpu_end   := cast(f64) query_results[1] * cast(f64) ips.device_properties.properties.limits.timestampPeriod * 1e-9
                 gpu_delta := gpu_end - gpu_begin
                 // @note(viktor): this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
                 if gpu_delta > 0 {
@@ -639,7 +577,7 @@ main :: proc () {
         check(vk.BeginCommandBuffer(cb, &vk.CommandBufferBeginInfo { sType = .COMMAND_BUFFER_BEGIN_INFO, flags = { .ONE_TIME_SUBMIT } }))
         
         vk.CmdResetQueryPool(cb, query_pool, 0, QueryPoolSize)
-        // @todo(viktor): make a basic region based profiler out of this the labels and shit
+        // @todo(viktor): make a basic region based profiler out of the labels
         vk.CmdWriteTimestamp(cb, { .BOTTOM_OF_PIPE }, query_pool, 0)
         
         ////////////////////////////////////////////////
@@ -649,8 +587,8 @@ main :: proc () {
         vk.CmdSetViewport(cb, 0, 1, &vk.Viewport {
             x      = 0,
             y      = 0,
-            width  = cast(f32)  swapchain.size.x,
-            height = cast(f32)  swapchain.size.y,
+            width  = cast(f32) swapchain.size.x,
+            height = cast(f32) swapchain.size.y,
             minDepth = 0,
             maxDepth = 1,
         })
@@ -671,7 +609,6 @@ main :: proc () {
         
         vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader.stages, 0, size_of(vk.DeviceAddress), &frame.deviceAddress)
         
-        // @todo(viktor): test performance increase of meshlet culling
         for _ in 0..<1 {
             count := mesh_info.meshlet_count
             // :TaskShader: each task shader should later spawn 32 meshshaders

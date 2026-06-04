@@ -11,7 +11,9 @@ is_newer :: proc (a, b: string) -> bool {
     }
     
     b_info, b_err := os.stat(b, context.temp_allocator)
-    if b_err != nil {
+    if b_err == .Not_Exist {
+        return true
+    } else if b_err != nil {
         fmt.eprintfln("Failed to check modification time of file '%v': %v", b, os.error_string(b_err)) 
         return true
     }
@@ -36,7 +38,6 @@ recompile_shader :: proc (input, output: string, allocator: Allocator) -> (Shade
     append(&cmd, input)
     
     result: Shader
-    // @todo(viktor): start and test later if its finished?
     stdout: string
     stderr: string
     if !run_command(&cmd, or_exit = false, stdout = &stdout, stderr = &stderr) {

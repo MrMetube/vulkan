@@ -13,6 +13,7 @@ IPS :: struct {
     instance:        vk.Instance,
     physical_device: vk.PhysicalDevice,
     surface:         vk.SurfaceKHR,
+    device_properties: vk.PhysicalDeviceProperties2,
 }
 
 Swapchain :: struct {
@@ -67,7 +68,7 @@ Destroy_Info :: struct {
     fn: proc (device: vk.Device, handle: vk.NonDispatchableHandle, pAllocator: ^vk.AllocationCallbacks),
 }
 
-mark_handle :: proc (fn: $F, handle: $T/ vk.NonDispatchableHandle, loc := #caller_location) {
+defer_destroy :: proc (fn: $F, handle: $T/ vk.NonDispatchableHandle, loc := #caller_location) {
     assert(handle != 0, loc = loc)
     append(&to_be_destroyed_handles, Destroy_Info { handle = auto_cast handle, fn = auto_cast fn })
 }
@@ -80,7 +81,70 @@ destroy_all_handles :: proc (device: vk.Device) {
 
 ////////////////////////////////////////////////
 
-vk_choose_physical_device :: proc (ips: IPS) -> vk.PhysicalDevice {
+create_instance_physical_device_and_surface :: proc (window: ^sdl.Window, get_instance_proc: pmm) -> IPS {
+    vk.GetInstanceProcAddr = auto_cast get_instance_proc
+    vk.load_proc_addresses_global(auto_cast vk.GetInstanceProcAddr)
+    
+    ips: IPS
+    {
+        instance_extension_count: u32
+        instance_extensions_raw := sdl.Vulkan_GetInstanceExtensions(&instance_extension_count)
+        
+        instance_extensions := make([dynamic] cstring, 0, instance_extension_count, context.temp_allocator)
+        for i in 0..<instance_extension_count {
+            append(&instance_extensions, instance_extensions_raw[i])
+        }
+        
+        when ODIN_DEBUG {
+            append(&instance_extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
+        }
+        
+        instance_create_info := vk.InstanceCreateInfo {
+            sType = .INSTANCE_CREATE_INFO,
+            pApplicationInfo = &vk.ApplicationInfo {
+                sType = .APPLICATION_INFO,
+                pApplicationName = "How to Vulkan",
+                apiVersion = vk.API_VERSION_1_4,
+            },
+            enabledExtensionCount   = auto_cast len(instance_extensions),
+            ppEnabledExtensionNames = raw_data(instance_extensions),
+        }
+        
+        when ODIN_DEBUG {
+            validation_layers := [] cstring { "VK_LAYER_KHRONOS_validation" }
+            instance_create_info.enabledLayerCount   = auto_cast len(validation_layers)
+            instance_create_info.ppEnabledLayerNames = raw_data(validation_layers)
+            
+            instance_create_info.pNext = &vk.DebugUtilsMessengerCreateInfoEXT {
+                sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+                messageSeverity = { .VERBOSE, .WARNING, .ERROR },
+                messageType = { .VALIDATION, .PERFORMANCE },
+                pfnUserCallback = vk_debug_utils_callback,
+            }
+        }
+        
+        check(vk.CreateInstance(&instance_create_info, nil, &ips.instance))
+        
+        vk.load_proc_addresses_instance(ips.instance)
+    }
+    
+    ////////////////////////////////////////////////
+    
+    ips.physical_device = choose_physical_device(ips)
+    
+    ips.device_properties = vk.PhysicalDeviceProperties2 { sType = .PHYSICAL_DEVICE_PROPERTIES_2 }
+    vk.GetPhysicalDeviceProperties2(ips.physical_device, &ips.device_properties)
+    fmt.printfln("Selected device: %v", cast(cstring) &ips.device_properties.properties.deviceName[0])
+    assert(ips.device_properties.properties.limits.timestampComputeAndGraphics)
+    
+    ////////////////////////////////////////////////
+    
+    check(sdl.Vulkan_CreateSurface(window, ips.instance, nil, &ips.surface))
+    
+    return ips
+}
+
+choose_physical_device :: proc (ips: IPS) -> vk.PhysicalDevice {
     physical_devices: [] vk.PhysicalDevice
     {
         device_count: u32
@@ -153,7 +217,7 @@ vk_debug_utils_callback :: proc "system" (messageSeverity: vk.DebugUtilsMessageS
     return false
 }
 
-vk_get_swapchain_format :: proc (ips: IPS) -> vk.Format {
+get_swapchain_format :: proc (ips: IPS) -> vk.Format {
     format_count: u32
     // @study: GetPhysicalDeviceSurfaceFormats2KHR: would this help?
     check(vk.GetPhysicalDeviceSurfaceFormatsKHR(ips.physical_device, ips.surface, &format_count, nil))
@@ -275,7 +339,7 @@ create_depth_buffer :: proc (device: vk.Device, window_size: uv2, allocator: vma
 
 ////////////////////////////////////////////////
 
-create_device :: proc (ips: IPS) -> (vk.Device, vk.Queue, (#soa [] Frame_Data), vk.CommandPool) {
+create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips: IPS) -> (vk.Device, vk.Queue, (#soa [] Frame_Data), vk.CommandPool) {
     device: vk.Device
     queue_family_index: u32
     
@@ -409,7 +473,7 @@ create_device :: proc (ips: IPS) -> (vk.Device, vk.Queue, (#soa [] Frame_Data), 
         frame.deviceAddress = vk.GetBufferDeviceAddress(device, &device_address_info)
         
         frame.image_aquired = vk_create_semaphore(device)
-        mark_handle(vk.DestroySemaphore, frame.image_aquired)
+        defer_destroy(vk.DestroySemaphore, frame.image_aquired)
     }
     
     ////////////////////////////////////////////////
@@ -418,7 +482,7 @@ create_device :: proc (ips: IPS) -> (vk.Device, vk.Queue, (#soa [] Frame_Data), 
     {
         command_pool_create_info := vk.CommandPoolCreateInfo {
             sType = .COMMAND_POOL_CREATE_INFO,
-            flags = { .RESET_COMMAND_BUFFER },
+            flags            = { .RESET_COMMAND_BUFFER },
             queueFamilyIndex = queue_family_index,
         }
         
@@ -430,7 +494,7 @@ create_device :: proc (ips: IPS) -> (vk.Device, vk.Queue, (#soa [] Frame_Data), 
             commandBufferCount = cast(u32) len(frames),
         }
         check(vk.AllocateCommandBuffers(device, &command_buffer_allocate_info, &frames.command_buffer[0]))
-        mark_handle(vk.DestroyCommandPool, command_pool)
+        defer_destroy(vk.DestroyCommandPool, command_pool)
     }
     
     return device, queue, frames, command_pool
@@ -458,13 +522,13 @@ transition_state: struct {
     barriers: [dynamic] vk.ImageMemoryBarrier2,
 }
 
-vk_begin_transition_images :: proc () {
+begin_transition_images :: proc () {
     assert(!transition_state.is_open)
     
     transition_state.is_open = true
 }
 
-vk_append_image_memory_barrier_2 :: proc (image: vk.Image, src_stage_mask: vk.PipelineStageFlags2, src_access_mask: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage_mask: vk.PipelineStageFlags2, dst_access_mask: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
+append_image_memory_barrier_2 :: proc (image: vk.Image, src_stage_mask: vk.PipelineStageFlags2, src_access_mask: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage_mask: vk.PipelineStageFlags2, dst_access_mask: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
     assert(transition_state.is_open)
     
     append(&transition_state.barriers, vk.ImageMemoryBarrier2 {
@@ -480,7 +544,7 @@ vk_append_image_memory_barrier_2 :: proc (image: vk.Image, src_stage_mask: vk.Pi
     })
 }
 
-vk_end_transition_images :: proc (command_buffer: vk.CommandBuffer) {
+end_transition_images :: proc (command_buffer: vk.CommandBuffer) {
     assert(transition_state.is_open)
     
     vk.CmdPipelineBarrier2(command_buffer, &vk.DependencyInfo {
@@ -810,10 +874,10 @@ gpu_delete_buffer :: proc (buffer: Buffer) {
 begin_rendering :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, image_index: u32, depth_image: vk.Image, depth_image_view: vk.ImageView, clear_color: v4) {
     swapchain_info := &swapchain.infos[image_index]
     
-    vk_begin_transition_images()
-        vk_append_image_memory_barrier_2(swapchain_info.image, { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT }, { .COLOR_ATTACHMENT_READ, . COLOR_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL)
-        vk_append_image_memory_barrier_2(depth_image, { .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .UNDEFINED, { .EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, aspect_mask = { .DEPTH, .STENCIL })
-    vk_end_transition_images(cb)
+    begin_transition_images()
+        append_image_memory_barrier_2(swapchain_info.image, { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT }, { .COLOR_ATTACHMENT_READ, . COLOR_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL)
+        append_image_memory_barrier_2(depth_image, { .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .UNDEFINED, { .EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, aspect_mask = { .DEPTH, .STENCIL })
+    end_transition_images(cb)
     
     
     rendering_info := vk.RenderingInfo {
@@ -849,9 +913,9 @@ end_rendering :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, image_index: 
     
     ////////////////////////////////////////////////
     
-    vk_begin_transition_images()
-        vk_append_image_memory_barrier_2(swapchain_info.image, { .COLOR_ATTACHMENT_OUTPUT }, { .COLOR_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, {}, {}, .PRESENT_SRC_KHR)
-    vk_end_transition_images(cb)
+    begin_transition_images()
+        append_image_memory_barrier_2(swapchain_info.image, { .COLOR_ATTACHMENT_OUTPUT }, { .COLOR_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, {}, {}, .PRESENT_SRC_KHR)
+    end_transition_images(cb)
 }
 
 queue_submit :: proc (queue: vk.Queue, swapchain: Swapchain, frame: Frame_Data, image_index: u32, signal_value: u64, timeline_semaphore: vk.Semaphore) {
