@@ -307,7 +307,7 @@ recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, allocato
     check(vk.GetSwapchainImagesKHR(device, result.swapchain, &image_count, result.infos.image))
     
     for &info in result.infos {
-        info.view = create_2d_image_view(device, info.image, result.format, { .COLOR })
+        info.view = create_image_view(device, info.image, result.format, { .COLOR })
         info.render_completed = vk_create_semaphore(device)
     }
     
@@ -334,7 +334,7 @@ recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, allocato
         
         check(vma.create_image(allocator, depth_image_create_info, alloc_create_info, &depth_buffer.image, &depth_buffer.allocation, nil))
         
-        depth_buffer.view = create_2d_image_view(device, depth_buffer.image, depth_buffer.format, { .DEPTH })
+        depth_buffer.view = create_image_view(device, depth_buffer.image, depth_buffer.format, { .DEPTH })
     }
     
     old_swapchain ^= result
@@ -519,7 +519,7 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
 
 ////////////////////////////////////////////////
 
-create_2d_image_view :: proc (device: vk.Device, image: vk.Image, format: vk.Format, aspect_mask: vk.ImageAspectFlags, level_count: u32 = 1) -> vk.ImageView {
+create_image_view :: proc (device: vk.Device, image: vk.Image, format: vk.Format, aspect_mask: vk.ImageAspectFlags, level_count: u32 = 1) -> vk.ImageView {
     result: vk.ImageView
     
     check(vk.CreateImageView(device, &vk.ImageViewCreateInfo {
@@ -591,7 +591,7 @@ should_recreate_pipeline :: proc (pipeline: Pipeline) -> bool {
     return false
 }
 
-create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, vertices_descriptor_set_layout, textures_descriptor_set_layout: vk.DescriptorSetLayout, old: Pipeline = {}) -> Pipeline {
+create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, set_layouts: [] vk.DescriptorSetLayout, old: Pipeline = {}) -> Pipeline {
     shader, ok := recompile_shader(shader_source, shader_output, context.temp_allocator)
     if !ok {
         if old.pipeline == 0 || old.layout == 0 {
@@ -612,11 +612,6 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, verti
     result: Pipeline
     result.shader = shader
         
-    set_layouts := [?] vk.DescriptorSetLayout {
-        vertices_descriptor_set_layout,
-        textures_descriptor_set_layout,
-    }
-    
     ranges := [?] vk.PushConstantRange {
         {
             stageFlags = shader.stages,
@@ -626,7 +621,7 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, verti
     
     pipeline_layout_create_info := vk.PipelineLayoutCreateInfo {
         sType = .PIPELINE_LAYOUT_CREATE_INFO,
-        setLayoutCount = len(set_layouts),
+        setLayoutCount = cast(u32) len(set_layouts),
         pSetLayouts    = &set_layouts[0],
         pushConstantRangeCount = len(ranges),
         pPushConstantRanges    = &ranges[0],
@@ -652,15 +647,13 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, verti
         sType = .GRAPHICS_PIPELINE_CREATE_INFO,
         pNext = &vk.PipelineRenderingCreateInfo {
             sType = .PIPELINE_RENDERING_CREATE_INFO,
-            colorAttachmentCount = 1,
+            colorAttachmentCount    = 1,
             pColorAttachmentFormats = &swapchain_format,
-            depthAttachmentFormat = swapchain.depth_buffer.format,
+            depthAttachmentFormat   = swapchain.depth_buffer.format,
         },
         stageCount = auto_cast len(shader_stages),
         pStages    = &shader_stages[0],
-        pVertexInputState = &vk.PipelineVertexInputStateCreateInfo { // @cleanup
-            sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        },
+        pVertexInputState = &vk.PipelineVertexInputStateCreateInfo { sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO },
         pInputAssemblyState = &vk.PipelineInputAssemblyStateCreateInfo {
             sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
             topology = .TRIANGLE_LIST,

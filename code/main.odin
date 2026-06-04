@@ -193,7 +193,7 @@ main :: proc () {
             image_allocation_create_info := vma.Allocation_Create_Info { usage = .Auto }
             check(vma.create_image(allocator, image_create_info, image_allocation_create_info, &texture.image, &texture.allocation, nil))
             
-            texture.view = create_2d_image_view(device, texture.image, image_create_info.format, { .COLOR }, loaded_texture.mip_levels)
+            texture.view = create_image_view(device, texture.image, image_create_info.format, { .COLOR }, loaded_texture.mip_levels)
             defer_destroy(vk.DestroyImageView, texture.view)
             
             // @todo(viktor): use gpu_make_xxx here for the first copy
@@ -290,7 +290,7 @@ main :: proc () {
     
     // @volatile needs to match the bindings in shader.slang
     StorageBufferCount :: 4
-    vertex_descriptor_set_layout: vk.DescriptorSetLayout
+    data_descriptor_set_layout: vk.DescriptorSetLayout
     {
         bindings := [StorageBufferCount] vk.DescriptorSetLayoutBinding {
             {
@@ -326,29 +326,29 @@ main :: proc () {
             pBindings    = &bindings[0],
         }
         
-        check(vk.CreateDescriptorSetLayout(device, &vertices_descriptor_layout_create_info, nil, &vertex_descriptor_set_layout))
-        defer_destroy(vk.DestroyDescriptorSetLayout, vertex_descriptor_set_layout)
+        check(vk.CreateDescriptorSetLayout(device, &vertices_descriptor_layout_create_info, nil, &data_descriptor_set_layout))
+        defer_destroy(vk.DestroyDescriptorSetLayout, data_descriptor_set_layout)
     }
     
     ////////////////////////////////////////////////
     
     textures_descriptor_set_layout: vk.DescriptorSetLayout
-    textures_descriptor_set: vk.DescriptorSet
-    textures_descriptor_pool: vk.DescriptorPool
+    textures_descriptor_set:        vk.DescriptorSet
+    textures_descriptor_pool:       vk.DescriptorPool
     {
         desc_layout_textures_create_info := vk.DescriptorSetLayoutCreateInfo {
             sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             pNext = &vk.DescriptorSetLayoutBindingFlagsCreateInfo {
                 sType = .DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
-                bindingCount = 1,
+                bindingCount  = 1,
                 pBindingFlags = &vk.DescriptorBindingFlags { .VARIABLE_DESCRIPTOR_COUNT },
             },
             bindingCount = 1,
             pBindings = &vk.DescriptorSetLayoutBinding {
-                binding = 0,
-                descriptorType = .COMBINED_IMAGE_SAMPLER,
+                binding         = 0,
+                descriptorType  = .COMBINED_IMAGE_SAMPLER,
                 descriptorCount = len(textures),
-                stageFlags = { .FRAGMENT },
+                stageFlags      = { .FRAGMENT },
             },
         }
         
@@ -357,9 +357,9 @@ main :: proc () {
         
         desc_pool_create_info := vk.DescriptorPoolCreateInfo {
             sType = .DESCRIPTOR_POOL_CREATE_INFO,
-            maxSets = 1,
+            maxSets       = 1,
             poolSizeCount = 1,
-            pPoolSizes = &vk.DescriptorPoolSize {
+            pPoolSizes    = &vk.DescriptorPoolSize {
                 type = .COMBINED_IMAGE_SAMPLER,
                 descriptorCount = len(textures),
             },
@@ -375,11 +375,11 @@ main :: proc () {
             pNext = &vk.DescriptorSetVariableDescriptorCountAllocateInfo {
                 sType = .DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO,
                 descriptorSetCount = 1,
-                pDescriptorCounts = &variable_desc_count,
+                pDescriptorCounts  = &variable_desc_count,
             },
-            descriptorPool = textures_descriptor_pool,
+            descriptorPool     = textures_descriptor_pool,
             descriptorSetCount = 1,
-            pSetLayouts = &textures_descriptor_set_layout,
+            pSetLayouts        = &textures_descriptor_set_layout,
         }
         
         check(vk.AllocateDescriptorSets(device, &textures_desc_set_allocate_info, &textures_descriptor_set))
@@ -396,8 +396,10 @@ main :: proc () {
     }
     
     ////////////////////////////////////////////////
-
-    pipeline := create_graphics_pipeline(device, swapchain, vertex_descriptor_set_layout, textures_descriptor_set_layout)
+    
+    set_layouts := [] vk.DescriptorSetLayout { data_descriptor_set_layout, textures_descriptor_set_layout }
+    
+    pipeline := create_graphics_pipeline(device, swapchain, set_layouts)
     
     vertex_descriptor_update_template := create_vertex_update_template(device, pipeline, StorageBufferCount)
     
@@ -495,7 +497,7 @@ main :: proc () {
         }
         
         if should_recreate_pipeline(pipeline) {
-            pipeline = create_graphics_pipeline(device, swapchain, vertex_descriptor_set_layout, textures_descriptor_set_layout, pipeline)
+            pipeline = create_graphics_pipeline(device, swapchain, set_layouts, pipeline)
             vertex_descriptor_update_template = create_vertex_update_template(device, pipeline, StorageBufferCount, vertex_descriptor_update_template)
         }
         
