@@ -114,11 +114,17 @@ struct Mesh_Result {
     v3 debug_color;
 }
 
+// @volatile this order must match the layout of Push_Data on the cpu side
+struct Push_Data {
+    Data *data;
+    uint mesh_index;
+}
+
 [shader("mesh")]
 [outputtopology("triangle")]
 [numthreads(MeshWidth, 1, 1)]
 [outputtopology("triangle")]
-void main(in payload Task_Result input, uniform Data *data, uniform uint mesh_index,
+void main(in payload Task_Result input, uniform Push_Data push,
     uint group_index : SV_GroupID, uint thread_index : SV_GroupThreadID,
     out OutputVertices<Mesh_Result, VertexLimit> out_vertices, out OutputIndices<uint3, TriangleLimit> out_indices) {
         
@@ -129,13 +135,14 @@ void main(in payload Task_Result input, uniform Data *data, uniform uint mesh_in
     u32 meshlet_index = group_index;
 #endif
     
-    if (meshlet_index < data->meshlet_count) {
+    Data data = *push.data;
+    Mesh_Draw draw = draw_buffer[push.mesh_index];
+    
+    if (meshlet_index < data.meshlet_count) {
         meshlet = meshlet_buffer[meshlet_index];
     }
     
-    Mesh_Draw draw = draw_buffer[mesh_index];
-    
-    m4 model_view = mul(data->view, draw.model);
+    m4 model_view = mul(data.view, draw.model);
     
     // @todo(viktor): apparently i need more data for a perspective correct culling
     // v4 cone  = meshlet.cone;
@@ -165,11 +172,11 @@ void main(in payload Task_Result input, uniform Data *data, uniform uint mesh_in
         
         result.normal = mul((m3) model_view, n);
         result.uv = t;
-        result.pos = mul(data->projection, view_p);
+        result.pos = mul(data.projection, view_p);
         
         // Calculate view vectors required for lighting
         for (int li = 0; li < 4; li++) {
-            result.light_vec[li] = data->light_pos[li].xyz - view_p.xyz;
+            result.light_vec[li] = data.light_pos[li].xyz - view_p.xyz;
         }
         result.view_vec = -view_p.xyz;
         

@@ -620,12 +620,15 @@ main :: proc () {
         
         vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline.layout, 1, 1, &textures_descriptor_set, 0, nil)
         
-        vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader.stages, cast(u32) offset_of(Push_Data{}.address), size_of(vk.DeviceAddress), &frame.deviceAddress)
         
         for index in 0..<len(draws) {
-            mesh_index := cast(u32) index
+            push_data := Push_Data {
+                address    = frame.deviceAddress,
+                mesh_index = cast(u32) index,
+            }
+            vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader.stages, 0, size_of(Push_Data), &push_data)
+            
             count := mesh_info.meshlet_count
-            vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader.stages, cast(u32) offset_of(Push_Data{}.mesh_index), size_of(u32), &mesh_index)
             // :TaskShader: each task shader should later spawn 32 meshshaders
             // count  = (count + 31) / 32
             vk.CmdDrawMeshTasksEXT(cb, count, 1, 1)
