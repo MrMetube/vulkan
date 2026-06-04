@@ -20,13 +20,17 @@ load_mesh_from_obj :: proc (filepath: string, allocator: Allocator) -> Mesh {
     has_uvs := len(model.texture_coords) != 0
     
     for &v, index in vertices {
-        n := model.normals[index]  * { 1, -1, 1 }
-        p := model.vertices[index] * { 1, -1, 1 }
+        n := model.normals[index]
+        p := model.vertices[index]
+        uv: v2
+        if has_uvs {
+            uv = model.texture_coords[index] * { 1, -1 }
+        }
         
         v = Vertex {
             p  = p,
             n  = cast([3] u8) ((n + 1) * 127),
-            uv = has_uvs ? model.texture_coords[index] * { 1, -1 } : 0,
+            uv = uv,
         }
     }
     

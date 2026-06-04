@@ -26,15 +26,15 @@ recompile_shader :: proc (input, output: string, allocator: Allocator) -> (Shade
     cmd.allocator = context.temp_allocator
     
     append(&cmd, "slangc")
-    /* @study:
-        -O optimization level
-        -fvk-invert-y
-    */
     append(&cmd, "-target", "spirv",)
     append(&cmd, "-o", output)
     if ODIN_DEBUG {
         append(&cmd, "-g1") // @note(viktor): embed shader source code for renderdoc
     }
+    if Optimized {
+        append(&cmd, "-Omaximal")
+    }
+    append(&cmd, "-fvk-invert-y")
     append(&cmd, input)
     
     result: Shader

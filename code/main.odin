@@ -15,7 +15,9 @@ import vk "vendor:vulkan"
 
 ////////////////////////////////////////////////
 
-VSync :: true && ODIN_DEBUG
+Optimized :: ODIN_OPTIMIZATION_MODE == .Speed
+
+VSync :: true && (!Optimized)
 MaxFramesInFlight :: 2
 
 ////////////////////////////////////////////////
@@ -473,8 +475,8 @@ main :: proc () {
             
             case .MOUSE_MOTION:
                 if event.button.button == sdl.BUTTON_LEFT {
-                    object_rotation.x -= event.motion.yrel * delta_time
                     object_rotation.y += event.motion.xrel * delta_time
+                    object_rotation.x += event.motion.yrel * delta_time
                 }
                 
             case .MOUSE_WHEEL:
@@ -553,13 +555,6 @@ main :: proc () {
             }
         }
         
-        smooth_update(delta_time_64, &cpu_time, delta_time_64)
-        
-        view :: proc (seconds: f64) -> time.Duration {
-            return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
-        }
-        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, triangles: %v, meshlets: %v, triangles/s %v", view(cpu_time.value), view(gpu_time.value), view_magnitude(mesh_info.triangle_count), view_magnitude(mesh_info.meshlet_count), view_magnitude(cast(f64) mesh_info.triangle_count / gpu_time.value)))
-            
         ////////////////////////////////////////////////
         
         shader_data.projection = la.matrix4_perspective(45 * RadPerDeg, cast(f32) swapchain.size.x / cast(f32) swapchain.size.y, 0.1, 128)
@@ -582,6 +577,15 @@ main :: proc () {
         }
         
         copy(db_view, draws[:])
+        
+        ////////////////////////////////////////////////
+        
+        smooth_update(delta_time_64, &cpu_time, delta_time_64)
+        
+        view :: proc (seconds: f64) -> time.Duration {
+            return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
+        }
+        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, triangles: %v, meshlets: %v, triangles/s %v", view(cpu_time.value), view(gpu_time.value), view_magnitude(mesh_info.triangle_count), view_magnitude(mesh_info.meshlet_count), view_magnitude(cast(f64) mesh_info.triangle_count * len(draws) / gpu_time.value)))
         
         ////////////////////////////////////////////////
         

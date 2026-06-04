@@ -9,7 +9,7 @@ main :: proc () {
     parse_run_and_debug_arguments()
     
     if begin_build(cmd, "code", "engine.exe", .Kill) {
-        build_meander(debug = optimize ? "" : "-debug")
+        build_meander()
         
         build_optimizations(optimize)
         build_native()
