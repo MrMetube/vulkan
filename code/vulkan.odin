@@ -22,6 +22,12 @@ Swapchain :: struct {
     format: vk.Format,
 }
 
+Swapchain_Info :: struct {
+    image: vk.Image,
+    view:  vk.ImageView,
+    
+    render_completed: vk.Semaphore,
+}
 
 Pipeline :: struct {
     pipeline: vk.Pipeline,
@@ -31,21 +37,39 @@ Pipeline :: struct {
 
 Shader :: struct {
     stages: vk.ShaderStageFlags,
-    bytes: [] u8,
+    bytes:  [] u8,
+}
+
+Image :: struct {
+    image: vk.Image,
+    view:  vk.ImageView,
+    
+    // optional
+    format: vk.Format,
+    
+    allocation: vma.Allocation,
+	sampler:    vk.Sampler,
+}
+
+Buffer :: struct {
+    buffer: vk.Buffer,
+    memory: vk.DeviceMemory,
+    
+    data: [] u8,
 }
 
 ////////////////////////////////////////////////
 
-to_be_destroyed_handles: [dynamic] DestroyInfo
+to_be_destroyed_handles: [dynamic] Destroy_Info
 
-DestroyInfo :: struct { 
+Destroy_Info :: struct { 
     handle: vk.NonDispatchableHandle, 
     fn: proc (device: vk.Device, handle: vk.NonDispatchableHandle, pAllocator: ^vk.AllocationCallbacks),
 }
 
 mark_handle :: proc (fn: $F, handle: $T/ vk.NonDispatchableHandle, loc := #caller_location) {
     assert(handle != 0, loc = loc)
-    append(&to_be_destroyed_handles, DestroyInfo { handle = auto_cast handle, fn = auto_cast fn })
+    append(&to_be_destroyed_handles, Destroy_Info { handle = auto_cast handle, fn = auto_cast fn })
 }
 
 destroy_all_handles :: proc (device: vk.Device) {
@@ -217,15 +241,11 @@ destroy_swapchain :: proc (device: vk.Device, swapchain: ^Swapchain) {
 }
 
 // @cleanup this always happens after create_swapchain
-vk_create_depth_image :: proc (device: vk.Device, depth_format: vk.Format, window_size: uv2, allocator: vma.Allocator) -> (vk.Image, vk.ImageView, vma.Allocation) {
-    image: vk.Image
-    allocation: vma.Allocation
-    image_view: vk.ImageView
-    
+vk_create_depth_image :: proc (device: vk.Device, window_size: uv2, allocator: vma.Allocator, result: ^Image) {
     depth_image_create_info := vk.ImageCreateInfo {
         sType = .IMAGE_CREATE_INFO,
         imageType = .D2,
-        format = depth_format,
+        format = result.format,
         extent = vk_to_extent(window_size, depth = 1),
         mipLevels = 1,
         arrayLayers = 1,
@@ -240,11 +260,9 @@ vk_create_depth_image :: proc (device: vk.Device, depth_format: vk.Format, windo
         usage = .Auto,
     }
     
-    check(vma.create_image(allocator, depth_image_create_info, alloc_create_info, &image, &allocation, nil))
+    check(vma.create_image(allocator, depth_image_create_info, alloc_create_info, &result.image, &result.allocation, nil))
     
-    image_view = vk_create_2d_image_view(device, image, depth_format, { .DEPTH })
-    
-    return image, image_view, allocation
+    result.view = vk_create_2d_image_view(device, result.image, result.format, { .DEPTH })
 }
 
 ////////////////////////////////////////////////
@@ -333,7 +351,7 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_for
     shader_module_create_info := vk.ShaderModuleCreateInfo {
         sType = .SHADER_MODULE_CREATE_INFO,
         codeSize = len(shader.bytes),
-        pCode = cast(^u32) &shader.bytes[0],
+        pCode    = cast(^u32) &shader.bytes[0],
     }
     
     ////////////////////////////////////////////////
@@ -354,7 +372,7 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_for
         pushConstantRangeCount = 1,
         pPushConstantRanges    = &vk.PushConstantRange {
             stageFlags = shader.stages,
-            size = size_of(vk.DeviceAddress),
+            size       = size_of(vk.DeviceAddress),
         },
     }
     
@@ -491,13 +509,6 @@ create_vertex_update_template :: proc (device: vk.Device, pipeline: Pipeline, ol
 
 ////////////////////////////////////////////////
 
-Buffer :: struct {
-    buffer: vk.Buffer,
-    memory: vk.DeviceMemory,
-    
-    data: [] u8,
-}
-
 @(thread_local) gpu_allocator_state: struct {
     initialized: bool,
     
@@ -516,7 +527,14 @@ init_gpu_allocator :: proc (ips: IPS, device: vk.Device) {
     }
 }
 
-gpu_make_buffer :: proc (usage: vk.BufferUsageFlags, #any_int size: vk.DeviceSize) -> Buffer {
+gpu_make_buffer :: proc { gpu_make_buffer_slice, gpu_make_buffer_size }
+gpu_make_buffer_slice :: proc (usage: vk.BufferUsageFlags, $S: typeid / [] $E, #any_int len: umm) -> (Buffer, S) {
+    size   := size_of(E) * len
+    buffer := gpu_make_buffer_size(usage, size)
+    view   := slice_from_parts(E, &buffer.data[0], len)
+    return buffer, view
+}
+gpu_make_buffer_size :: proc (usage: vk.BufferUsageFlags, #any_int size: vk.DeviceSize) -> Buffer {
     assert(gpu_allocator_state.initialized)
     
     device := gpu_allocator_state.device

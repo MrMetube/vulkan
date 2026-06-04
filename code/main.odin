@@ -27,40 +27,10 @@ Frame_Data :: struct {
     image_aquired:      vk.Semaphore,
 }
 
-// @volatile shader.slang needs to match this layout
-Shader_Data :: struct {
-    projection: m4,
-    view:       m4,
-    model:      m4,
-    light_pos:  [4] v4,
-    
-    meshlet_count: u32,
-}
-
-Swapchain_Info :: struct {
-    image: vk.Image,
-    view:  vk.ImageView,
-    
-    render_completed: vk.Semaphore,
-}
-
-Texture :: struct {
-	image: vk.Image,
-	view:  vk.ImageView,
-    
-	allocation: vma.Allocation,
-	sampler:    vk.Sampler,
-}
-
 DescriptorUpdateData :: struct #raw_union {
     buffer: vk.DescriptorBufferInfo,
     image:  vk.DescriptorImageInfo,
 }
-
-////////////////////////////////////////////////
-
-MaxVertices  :: 64
-MaxTriangles :: 84
 
 Mesh :: struct {
     vertices: [] Vertex,
@@ -68,6 +38,24 @@ Mesh :: struct {
     
     meshlets: [] Meshlet,
     meshlet_data: [] u32,
+}
+
+////////////////////////////////////////////////
+
+MaxVertices  :: 64
+MaxTriangles :: 84
+
+// @volatile shader.slang needs to match this layout
+Shader_Data :: struct {
+    projection: m4,
+    view:       m4,
+    model:      m4,
+    light_pos:  [4] v4,
+    
+    offset: v3,
+    scale:  v3,
+    
+    meshlet_count: u32,
 }
 
 // @volatile shader.slang needs to match this layout
@@ -79,9 +67,8 @@ Meshlet :: struct #align(16) {
 }
 
 // @volatile shader.slang needs to match this layout
-// @speed we could go down to f16s for p and uv
 Vertex :: struct {
-    p:  v3, p_pad: f32,
+    p:  v3,      p_pad: f32,
     n:  [3] u8,  n_pad: u8,
     uv: v2,
 }
@@ -214,7 +201,7 @@ main :: proc () {
                 
                 // @todo(viktor): check if this would help the texture upload hostImageCopy
                 // hostImageCopy = true,
-                // @note(viktor): scalarBlockLayout - struct members are padded like c/c++ would, I assume it make simple memcopy possible
+                // @note(viktor): scalarBlockLayout - struct members are padded like c/c++ would, I assume it makes simple memcopy possible
                 
             pNext = &vk.PhysicalDeviceVulkan13Features {
                 sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
@@ -300,10 +287,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    depth_format: vk.Format
-    depth_image: vk.Image
-    depth_image_view: vk.ImageView
-    depth_image_allocation: vma.Allocation
+    depth_image: Image
     {
         depth_format_list := [] vk.Format { .D32_SFLOAT_S8_UINT, .D24_UNORM_S8_UINT }
         for it in depth_format_list {
@@ -311,12 +295,12 @@ main :: proc () {
             vk.GetPhysicalDeviceFormatProperties2(ips.physical_device, it, &format_properties)
             
             if .DEPTH_STENCIL_ATTACHMENT in format_properties.formatProperties.optimalTilingFeatures {
-                depth_format = it
+                depth_image.format = it
                 break
             }
         }
         
-        depth_image, depth_image_view, depth_image_allocation = vk_create_depth_image(device, depth_format, swapchain.size, allocator)
+        vk_create_depth_image(device, swapchain.size, allocator, &depth_image)
     }
     
     ////////////////////////////////////////////////
@@ -326,9 +310,9 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     // @speed :ScratchBuffer: use a scratch buffer and have some api like copy(vkstuff, dest_buffer_in_device_local_memory, scratch_buffer, data), The main reason for this, is that we want all of the data for the shader to be in device_local memory.
-    vertex_buffer       := gpu_make_buffer({ .STORAGE_BUFFER }, 256 * Megabyte)
-    meshlet_buffer      := gpu_make_buffer({ .STORAGE_BUFFER }, 256 * Megabyte)
-    meshlet_data_buffer := gpu_make_buffer({ .STORAGE_BUFFER }, 256 * Megabyte)
+    vertex_buffer,       vb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Vertex,  256 * Megabyte / size_of(Vertex))
+    meshlet_buffer,      mb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Meshlet, 256 * Megabyte / size_of(Meshlet))
+    meshlet_data_buffer, mdb_view := gpu_make_buffer({ .STORAGE_BUFFER }, [] u32,     256 * Megabyte / size_of(u32))
     
     Mesh_Info :: struct {
         triangle_count: u32,
@@ -337,9 +321,9 @@ main :: proc () {
     // @todo(viktor): we only read indices len for debug info and meshlets len for the dispatch
     mesh_info: Mesh_Info
     {
-        // mesh := load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
+        mesh := load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
         // mesh := load_mesh_from_obj("models/bunny.obj", context.temp_allocator)
-        mesh := load_mesh_from_obj("models/lucy_280k.obj", context.temp_allocator)
+        // mesh := load_mesh_from_obj("models/lucy_280k.obj", context.temp_allocator)
         
         optimize_mesh(&mesh, context.temp_allocator)
         
@@ -348,9 +332,9 @@ main :: proc () {
         mesh_info.triangle_count = cast(u32) len(mesh.indices)
         mesh_info.meshlet_count  = meshlet_count
         
-        copy(vertex_buffer.data,  slice_to_bytes(mesh.vertices))
-        copy(meshlet_buffer.data, slice_to_bytes(mesh.meshlets))
-        copy(meshlet_data_buffer.data, slice_to_bytes(mesh.meshlet_data))
+        copy(vb_view, mesh.vertices)
+        copy(mb_view, mesh.meshlets)
+        copy(mdb_view, mesh.meshlet_data)
     }
     
     ////////////////////////////////////////////////
@@ -401,7 +385,7 @@ main :: proc () {
         mark_handle(vk.DestroyCommandPool, command_pool)
     }
      
-    textures: [3] Texture
+    textures: [3] Image
     texture_descriptors: [len(textures)] vk.DescriptorImageInfo
     
     {
@@ -430,6 +414,7 @@ main :: proc () {
             texture.view = vk_create_2d_image_view(device, texture.image, image_create_info.format, { .COLOR }, loaded_texture.mip_levels)
             mark_handle(vk.DestroyImageView, texture.view)
             
+            // @todo(viktor): use gpu_make_xxx here for the first copy
             image_src_buffer: vk.Buffer
             image_src_allocation: vma.Allocation
             image_src_allocation_info: vma.Allocation_Info
@@ -456,7 +441,7 @@ main :: proc () {
             cb_once: vk.CommandBuffer
             cb_once_allocate_info := vk.CommandBufferAllocateInfo {
                 sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-                commandPool = command_pool,
+                commandPool        = command_pool,
                 commandBufferCount = 1,
             }
             check(vk.AllocateCommandBuffers(device, &cb_once_allocate_info, &cb_once))
@@ -621,7 +606,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
 
-    pipeline := create_graphics_pipeline(device, swapchain.format, depth_format, vertex_descriptor_set_layout, textures_descriptor_set_layout)
+    pipeline := create_graphics_pipeline(device, swapchain.format, depth_image.format, vertex_descriptor_set_layout, textures_descriptor_set_layout)
     
     vertex_descriptor_update_template := create_vertex_update_template(device, pipeline)
     
@@ -717,13 +702,13 @@ main :: proc () {
             
             recreate_swapchain(ips, device, sdl_get_window_size(window), &swapchain)
             
-            vma.destroy_image(allocator, depth_image, depth_image_allocation)
-            vk.DestroyImageView(device, depth_image_view, nil)
-            depth_image, depth_image_view, depth_image_allocation = vk_create_depth_image(device, depth_format, swapchain.size, allocator)
+            vma.destroy_image(allocator, depth_image.image, depth_image.allocation)
+            vk.DestroyImageView(device, depth_image.view, nil)
+            vk_create_depth_image(device, swapchain.size, allocator, &depth_image)
         }
         
         if should_recreate_pipeline(pipeline) {
-            pipeline = create_graphics_pipeline(device, swapchain.format, depth_format, vertex_descriptor_set_layout, textures_descriptor_set_layout, pipeline)
+            pipeline = create_graphics_pipeline(device, swapchain.format, depth_image.format, vertex_descriptor_set_layout, textures_descriptor_set_layout, pipeline)
             vertex_descriptor_update_template = create_vertex_update_template(device, pipeline, vertex_descriptor_update_template)
         }
         
@@ -889,12 +874,12 @@ main :: proc () {
 
     
     // @note(viktor): as we sometimes need to recreate the depth buffer, we currently cant just mark_handle it. maybe we could unmark it in the array, but that already seems overkill
-    vk.DestroyImageView(device, depth_image_view, nil) 
+    vk.DestroyImageView(device, depth_image.view, nil) 
     vk.DestroyDescriptorUpdateTemplate(device, vertex_descriptor_update_template, nil)
 
     destroy_pipeline(device, pipeline)
     
-	vma.destroy_image(allocator, depth_image, depth_image_allocation)
+	vma.destroy_image(allocator, depth_image.image, depth_image.allocation)
     for texture in textures {
         vma.destroy_image(allocator, texture.image, texture.allocation)
     }
