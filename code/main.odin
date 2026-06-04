@@ -173,12 +173,13 @@ main :: proc () {
     texture_descriptors: [len(textures)] vk.DescriptorImageInfo
     
     {
+        // @cleanup to do the copy into gpu memory ourselves, we need the tiling to be .LINEAR and not .OPTIMAL, 
+        // but in that case we cannot specify any mip_levels. :(
         for &texture, index in textures {
             filename := fmt.tprintf("tutorial/suzanne%v.ktx", index)
             
             loaded_texture := load_ktx_texture(filename, context.temp_allocator)
             
-            // @cleanup use my allocator and then just copy by hand if possible
             image_create_info := vk.ImageCreateInfo {
                 sType = .IMAGE_CREATE_INFO,
                 imageType     = .D2,
@@ -198,7 +199,6 @@ main :: proc () {
             texture.view = create_image_view(device, texture.image, image_create_info.format, { .COLOR }, loaded_texture.mip_levels)
             defer_destroy(vk.DestroyImageView, texture.view)
             
-            // @todo(viktor): use gpu_make_xxx here for the first copy
             image_src_buffer: vk.Buffer
             image_src_allocation: vma.Allocation
             image_src_allocation_info: vma.Allocation_Info
