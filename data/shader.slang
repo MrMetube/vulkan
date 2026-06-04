@@ -190,41 +190,22 @@ void main(in payload Task_Result input, uniform Data *data, uint group_index : S
     // [a  b  c  d][e  f  g  h][i  j  k  l]
     // [a  b  c][d  e  f][g  h  i][j  k  l]
     uint triangle_index = thread_index * 4;
-    int word_index      = thread_index * 3;
+    int  word_offset    = thread_index * 3;
     uint group_count    = (meshlet.triangle_count * 3 + 3) / 4;
-    while (word_index < group_count) {
-        uint xx = index_offset + word_index;
-        // @todo(viktor): measure if the other version has a perf degredation
-#if 0 
-        uint4 u = unpack_u8u32(meshlet_data_buffer[xx]);
+    while (word_offset < group_count) {
+        uint word_index = index_offset + word_offset;
         
-        out_indices[triangle_index+0] = u.xyz;
-        out_indices[triangle_index+1].x = u.w;
+        uint4 u0 = unpack_u8u32(meshlet_data_buffer[word_index + 0]);
+        uint4 u1 = unpack_u8u32(meshlet_data_buffer[word_index + 1]);
+        uint4 u2 = unpack_u8u32(meshlet_data_buffer[word_index + 2]);
         
-        xx = index_offset + word_index + 1;
-        u = unpack_u8u32(meshlet_data_buffer[xx]);
-        out_indices[triangle_index+1].yz = u.xy;
-        out_indices[triangle_index+2].xy = u.zw;
+        out_indices[triangle_index+0] = u0.xyz;
+        out_indices[triangle_index+1] = uint3(u0.w, u1.xy);
+        out_indices[triangle_index+2] = uint3(u1.zw, u2.x);
+        out_indices[triangle_index+3] = u2.yzw;
         
-        xx = index_offset + word_index + 2;
-        u = unpack_u8u32(meshlet_data_buffer[xx]);
-        out_indices[triangle_index+2].z = u.x;
-        out_indices[triangle_index+3] = u.yzw;
-#else 
-
-        uint4 u0 = unpack_u8u32(meshlet_data_buffer[word_index+0]);
-        uint4 u1 = unpack_u8u32(meshlet_data_buffer[word_index+1]);
-        uint4 u2 = unpack_u8u32(meshlet_data_buffer[word_index+2]);
-        
-        out_indices[triangle_index+0]    = u0.xyz;
-        out_indices[triangle_index+1].x  = u0.w;
-        out_indices[triangle_index+1].yz = u1.xy;
-        out_indices[triangle_index+2].xy = u1.zw;
-        out_indices[triangle_index+2].z  = u2.x;
-        out_indices[triangle_index+3]    = u2.yzw;
-#endif
         triangle_index += 4 * MeshWidth;
-        word_index     += 3 * MeshWidth;
+        word_offset    += 3 * MeshWidth;
     }
 }
 
