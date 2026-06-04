@@ -223,7 +223,7 @@ recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, old_swap
     check(vk.GetSwapchainImagesKHR(device, result.swapchain, &image_count, result.infos.image))
     
     for &info in result.infos {
-        info.view = vk_create_2d_image_view(device, info.image, result.format, { .COLOR })
+        info.view = create_2d_image_view(device, info.image, result.format, { .COLOR })
         info.render_completed = vk_create_semaphore(device)
     }
     
@@ -242,6 +242,14 @@ destroy_swapchain :: proc (device: vk.Device, swapchain: ^Swapchain) {
 
 // @cleanup this always happens after create_swapchain
 create_depth_buffer :: proc (device: vk.Device, window_size: uv2, allocator: vma.Allocator, result: ^Image) {
+    if result.allocation != nil {
+        vma.destroy_image(allocator, result.image, result.allocation)
+        vk.DestroyImageView(device, result.view, nil)
+        result.allocation = nil
+        result.view       = 0
+        result.image      = 0
+    }
+    
     depth_image_create_info := vk.ImageCreateInfo {
         sType = .IMAGE_CREATE_INFO,
         imageType = .D2,
@@ -262,12 +270,175 @@ create_depth_buffer :: proc (device: vk.Device, window_size: uv2, allocator: vma
     
     check(vma.create_image(allocator, depth_image_create_info, alloc_create_info, &result.image, &result.allocation, nil))
     
-    result.view = vk_create_2d_image_view(device, result.image, result.format, { .DEPTH })
+    result.view = create_2d_image_view(device, result.image, result.format, { .DEPTH })
 }
 
 ////////////////////////////////////////////////
 
-vk_create_2d_image_view :: proc (device: vk.Device, image: vk.Image, format: vk.Format, aspect_mask: vk.ImageAspectFlags, level_count: u32 = 1) -> vk.ImageView {
+create_device :: proc (ips: IPS) -> (vk.Device, vk.Queue, (#soa [] Frame_Data), vk.CommandPool) {
+    device: vk.Device
+    queue_family_index: u32
+    
+    queue_family_priority := [] f32 { 1 }
+    
+    if false {
+        // @todo(viktor): GetPhysicalDeviceFeatures2 crashes
+        f14 := &vk.PhysicalDeviceVulkan14Features { sType = .PHYSICAL_DEVICE_VULKAN_1_4_FEATURES, pNext = nil }
+        f13 := &vk.PhysicalDeviceVulkan13Features { sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, pNext = &f14 }
+        f12 := &vk.PhysicalDeviceVulkan12Features { sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, pNext = &f13 }
+        f11 := &vk.PhysicalDeviceVulkan11Features { sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, pNext = &f12 }
+        supported_features := vk.PhysicalDeviceFeatures2 { sType = .PHYSICAL_DEVICE_FEATURES_2, pNext = &f11 }
+        
+        vk.GetPhysicalDeviceFeatures2(ips.physical_device, &supported_features)
+        if 
+            !f14.maintenance5 || !f14.pushDescriptor ||
+            !f13.dynamicRendering ||  !f13.synchronization2 || 
+            !f12.timelineSemaphore || !f12.descriptorIndexing || 
+            !f12.shaderSampledImageArrayNonUniformIndexing || 
+            !f12.descriptorBindingVariableDescriptorCount || 
+            !f12.runtimeDescriptorArray || !f12.bufferDeviceAddress ||
+            !f12.shaderInt8 || !f12.uniformAndStorageBuffer8BitAccess || 
+            !f12.shaderFloat16 ||
+            !f11.shaderDrawParameters || !f11.storageBuffer16BitAccess || !f11.uniformAndStorageBuffer16BitAccess {
+            fmt.printfln("Physical device doesn't meet the feauture requirements")
+            check(false)
+        }
+    }
+    
+    device_extensions := [] cstring { 
+        vk.KHR_SWAPCHAIN_EXTENSION_NAME,
+        vk.EXT_MESH_SHADER_EXTENSION_NAME,
+    }
+    
+    device_create_info := vk.DeviceCreateInfo {
+        sType = .DEVICE_CREATE_INFO,
+        
+        pNext = &vk.PhysicalDeviceFeatures2 {
+            sType = .PHYSICAL_DEVICE_FEATURES_2,
+            
+            features = {
+                samplerAnisotropy = true, // @note(viktor): since 1.4 this is required
+                shaderInt16 = true,
+            },
+            
+        pNext = &vk.PhysicalDeviceVulkan14Features {
+            sType = .PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
+            
+            maintenance5   = true, // @note(viktor): deprecates ShaderModule
+            pushDescriptor = true, // @note(viktor): remove the need for CmdBindVertexBuffers
+            
+            // @todo(viktor): check if this would help the texture upload hostImageCopy
+            // hostImageCopy = true,
+            // @note(viktor): scalarBlockLayout - struct members are padded like c/c++ would, I assume it makes simple memcopy possible
+            
+        pNext = &vk.PhysicalDeviceVulkan13Features {
+            sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+            
+            synchronization2 = true,
+            dynamicRendering = true,
+            
+        pNext = &vk.PhysicalDeviceVulkan12Features {
+            sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+            descriptorIndexing                        = true,
+            shaderSampledImageArrayNonUniformIndexing = true,
+            descriptorBindingVariableDescriptorCount  = true,
+            runtimeDescriptorArray                    = true,
+            bufferDeviceAddress                       = true,
+            timelineSemaphore                         = true,
+            
+            shaderFloat16 = true,
+            shaderInt8 = true,
+            uniformAndStorageBuffer8BitAccess = true,
+            storageBuffer8BitAccess = true,
+            
+        pNext = &vk.PhysicalDeviceVulkan11Features {
+            sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+            
+            storageBuffer16BitAccess = true,
+            uniformAndStorageBuffer16BitAccess = true,
+            shaderDrawParameters = true,
+            
+        pNext = &vk.PhysicalDeviceMeshShaderFeaturesEXT {
+            sType = .PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
+            
+            meshShader = true,
+            taskShader = true,
+        },
+        },
+        },
+        },
+        },
+        },
+        
+        queueCreateInfoCount = 1,
+        pQueueCreateInfos    = &vk.DeviceQueueCreateInfo {
+            sType = .DEVICE_QUEUE_CREATE_INFO,
+            queueFamilyIndex = queue_family_index,
+            queueCount       = auto_cast len(queue_family_priority),
+            pQueuePriorities = raw_data(queue_family_priority),
+        },
+        
+        enabledExtensionCount   = auto_cast len(device_extensions),
+        ppEnabledExtensionNames = raw_data(device_extensions),
+    }
+    
+    check(vk.CreateDevice(ips.physical_device, &device_create_info, nil, &device))
+    
+    vk.load_proc_addresses_device(device)
+
+    ////////////////////////////////////////////////
+    
+    queue: vk.Queue
+    vk.GetDeviceQueue(device, queue_family_index, 0, &queue)
+    
+    ////////////////////////////////////////////////
+    
+    init_gpu_allocator(ips, device)
+    
+    ////////////////////////////////////////////////
+    
+    frames := make(#soa [] Frame_Data, MaxFramesInFlight, context.allocator)
+    
+    for &frame in frames {
+        frame.buffer = gpu_make_buffer({ .SHADER_DEVICE_ADDRESS }, size_of(Shader_Data))
+        
+        device_address_info := vk.BufferDeviceAddressInfo {
+            sType  = .BUFFER_DEVICE_ADDRESS_INFO,
+            buffer = frame.buffer.buffer,
+        }
+        frame.deviceAddress = vk.GetBufferDeviceAddress(device, &device_address_info)
+        
+        frame.image_aquired = vk_create_semaphore(device)
+        mark_handle(vk.DestroySemaphore, frame.image_aquired)
+    }
+    
+    ////////////////////////////////////////////////
+    
+    command_pool: vk.CommandPool
+    {
+        command_pool_create_info := vk.CommandPoolCreateInfo {
+            sType = .COMMAND_POOL_CREATE_INFO,
+            flags = { .RESET_COMMAND_BUFFER },
+            queueFamilyIndex = queue_family_index,
+        }
+        
+        check(vk.CreateCommandPool(device, &command_pool_create_info, nil, &command_pool))
+        
+        command_buffer_allocate_info := vk.CommandBufferAllocateInfo {
+            sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+            commandPool        = command_pool,
+            commandBufferCount = cast(u32) len(frames),
+        }
+        check(vk.AllocateCommandBuffers(device, &command_buffer_allocate_info, &frames.command_buffer[0]))
+        mark_handle(vk.DestroyCommandPool, command_pool)
+    }
+    
+    return device, queue, frames, command_pool
+}
+
+////////////////////////////////////////////////
+
+create_2d_image_view :: proc (device: vk.Device, image: vk.Image, format: vk.Format, aspect_mask: vk.ImageAspectFlags, level_count: u32 = 1) -> vk.ImageView {
     result: vk.ImageView
     
     check(vk.CreateImageView(device, &vk.ImageViewCreateInfo {

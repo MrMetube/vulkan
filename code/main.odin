@@ -16,6 +16,7 @@ import vk "vendor:vulkan"
 ////////////////////////////////////////////////
 
 VSync :: true && ODIN_DEBUG
+MaxFramesInFlight :: 2
 
 ////////////////////////////////////////////////
 
@@ -23,8 +24,8 @@ Frame_Data :: struct {
     buffer:        Buffer,
     deviceAddress: vk.DeviceAddress,
     
-    command_buffer:     vk.CommandBuffer,
-    image_aquired:      vk.Semaphore,
+    command_buffer: vk.CommandBuffer,
+    image_aquired:  vk.Semaphore,
 }
 
 DescriptorUpdateData :: struct #raw_union {
@@ -51,9 +52,6 @@ Shader_Data :: struct {
     view:       m4,
     model:      m4,
     light_pos:  [4] v4,
-    
-    offset: v3,
-    scale:  v3,
     
     meshlet_count: u32,
 }
@@ -148,119 +146,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    device: vk.Device
-    queue_family_index: u32
-    {
-        queue_family_priority := [] f32 { 1 }
-        
-        if false {
-            // @todo(viktor): GetPhysicalDeviceFeatures2 crashes
-            f14 := &vk.PhysicalDeviceVulkan14Features { sType = .PHYSICAL_DEVICE_VULKAN_1_4_FEATURES, pNext = nil }
-            f13 := &vk.PhysicalDeviceVulkan13Features { sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, pNext = &f14 }
-            f12 := &vk.PhysicalDeviceVulkan12Features { sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, pNext = &f13 }
-            f11 := &vk.PhysicalDeviceVulkan11Features { sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, pNext = &f12 }
-            supported_features := vk.PhysicalDeviceFeatures2 { sType = .PHYSICAL_DEVICE_FEATURES_2, pNext = &f11 }
-            
-            vk.GetPhysicalDeviceFeatures2(ips.physical_device, &supported_features)
-            if 
-                !f14.maintenance5 || !f14.pushDescriptor ||
-                !f13.dynamicRendering ||  !f13.synchronization2 || 
-                !f12.timelineSemaphore || !f12.descriptorIndexing || 
-                !f12.shaderSampledImageArrayNonUniformIndexing || 
-                !f12.descriptorBindingVariableDescriptorCount || 
-                !f12.runtimeDescriptorArray || !f12.bufferDeviceAddress ||
-                !f12.shaderInt8 || !f12.uniformAndStorageBuffer8BitAccess || 
-                !f12.shaderFloat16 ||
-                !f11.shaderDrawParameters || !f11.storageBuffer16BitAccess || !f11.uniformAndStorageBuffer16BitAccess {
-                fmt.printfln("Physical device doesn't meet the feauture requirements")
-                check(false)
-            }
-        }
-        
-        device_extensions := [] cstring { 
-            vk.KHR_SWAPCHAIN_EXTENSION_NAME,
-            vk.EXT_MESH_SHADER_EXTENSION_NAME,
-        }
-        
-        device_create_info := vk.DeviceCreateInfo {
-            sType = .DEVICE_CREATE_INFO,
-            
-            pNext = &vk.PhysicalDeviceFeatures2 {
-                sType = .PHYSICAL_DEVICE_FEATURES_2,
-                
-                features = {
-                    samplerAnisotropy = true, // @note(viktor): since 1.4 this is required
-                    shaderInt16 = true,
-                },
-                
-            pNext = &vk.PhysicalDeviceVulkan14Features {
-                sType = .PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
-                
-                maintenance5   = true, // @note(viktor): deprecates ShaderModule
-                pushDescriptor = true, // @note(viktor): remove the need for CmdBindVertexBuffers
-                
-                // @todo(viktor): check if this would help the texture upload hostImageCopy
-                // hostImageCopy = true,
-                // @note(viktor): scalarBlockLayout - struct members are padded like c/c++ would, I assume it makes simple memcopy possible
-                
-            pNext = &vk.PhysicalDeviceVulkan13Features {
-                sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-                
-                synchronization2 = true,
-                dynamicRendering = true,
-                
-            pNext = &vk.PhysicalDeviceVulkan12Features {
-                sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-                descriptorIndexing                        = true,
-                shaderSampledImageArrayNonUniformIndexing = true,
-                descriptorBindingVariableDescriptorCount  = true,
-                runtimeDescriptorArray                    = true,
-                bufferDeviceAddress                       = true,
-                timelineSemaphore                         = true,
-                
-                shaderFloat16 = true,
-                shaderInt8 = true,
-                uniformAndStorageBuffer8BitAccess = true,
-                storageBuffer8BitAccess = true,
-                
-            pNext = &vk.PhysicalDeviceVulkan11Features {
-                sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-                
-                storageBuffer16BitAccess = true,
-                uniformAndStorageBuffer16BitAccess = true,
-                shaderDrawParameters = true,
-                
-            pNext = &vk.PhysicalDeviceMeshShaderFeaturesEXT {
-                sType = .PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
-                
-                meshShader = true,
-                taskShader = true,
-            },
-            },
-            },
-            },
-            },
-            },
-            
-            queueCreateInfoCount = 1,
-            pQueueCreateInfos    = &vk.DeviceQueueCreateInfo {
-                sType = .DEVICE_QUEUE_CREATE_INFO,
-                queueFamilyIndex = queue_family_index,
-                queueCount       = auto_cast len(queue_family_priority),
-                pQueuePriorities = raw_data(queue_family_priority),
-            },
-            
-            enabledExtensionCount   = auto_cast len(device_extensions),
-            ppEnabledExtensionNames = raw_data(device_extensions),
-        }
-        
-        check(vk.CreateDevice(ips.physical_device, &device_create_info, nil, &device))
-        
-        vk.load_proc_addresses_device(device)
-    }
-    
-    queue: vk.Queue
-    vk.GetDeviceQueue(device, queue_family_index, 0, &queue)
+    device, queue, frames, command_pool := create_device(ips)
     
     ////////////////////////////////////////////////
     
@@ -305,8 +191,6 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    init_gpu_allocator(ips, device)
-    
     ////////////////////////////////////////////////
     
     // @speed :ScratchBuffer: use a scratch buffer and have some api like copy(vkstuff, dest_buffer_in_device_local_memory, scratch_buffer, data), The main reason for this, is that we want all of the data for the shader to be in device_local memory.
@@ -347,44 +231,8 @@ main :: proc () {
         pos.xz += arm(t * Tau)
     }
 
-    MaxFramesInFlight :: 2
-    
-    frames := #soa [MaxFramesInFlight] Frame_Data {}
-    
-    for &frame in frames {
-        frame.buffer = gpu_make_buffer({ .SHADER_DEVICE_ADDRESS }, size_of(Shader_Data))
-        
-        device_address_info := vk.BufferDeviceAddressInfo {
-            sType  = .BUFFER_DEVICE_ADDRESS_INFO,
-            buffer = frame.buffer.buffer,
-        }
-        frame.deviceAddress = vk.GetBufferDeviceAddress(device, &device_address_info)
-        
-        frame.image_aquired = vk_create_semaphore(device)
-        mark_handle(vk.DestroySemaphore, frame.image_aquired)
-    }
-    
     ////////////////////////////////////////////////
     
-    command_pool: vk.CommandPool
-    {
-        command_pool_create_info := vk.CommandPoolCreateInfo {
-            sType = .COMMAND_POOL_CREATE_INFO,
-            flags = { .RESET_COMMAND_BUFFER },
-            queueFamilyIndex = queue_family_index,
-        }
-        
-        check(vk.CreateCommandPool(device, &command_pool_create_info, nil, &command_pool))
-        
-        command_buffer_allocate_info := vk.CommandBufferAllocateInfo {
-            sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-            commandPool = command_pool,
-            commandBufferCount = len(frames.command_buffer),
-        }
-        check(vk.AllocateCommandBuffers(device, &command_buffer_allocate_info, &frames.command_buffer[0]))
-        mark_handle(vk.DestroyCommandPool, command_pool)
-    }
-     
     textures: [3] Image
     texture_descriptors: [len(textures)] vk.DescriptorImageInfo
     
@@ -411,7 +259,7 @@ main :: proc () {
             image_allocation_create_info := vma.Allocation_Create_Info { usage = .Auto }
             check(vma.create_image(allocator, image_create_info, image_allocation_create_info, &texture.image, &texture.allocation, nil))
             
-            texture.view = vk_create_2d_image_view(device, texture.image, image_create_info.format, { .COLOR }, loaded_texture.mip_levels)
+            texture.view = create_2d_image_view(device, texture.image, image_create_info.format, { .COLOR }, loaded_texture.mip_levels)
             mark_handle(vk.DestroyImageView, texture.view)
             
             // @todo(viktor): use gpu_make_xxx here for the first copy
@@ -506,10 +354,11 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
+    // @volatile needs to match the bindings in shader.slang
+    StorageBufferCount :: 3
     vertex_descriptor_set_layout: vk.DescriptorSetLayout
     {
-        // @volatile needs to match the bindings in shader.slang
-        bindings := [?] vk.DescriptorSetLayoutBinding {
+        bindings := [StorageBufferCount] vk.DescriptorSetLayoutBinding {
             {
                 binding = 0,
                 descriptorType = .STORAGE_BUFFER,
@@ -529,11 +378,12 @@ main :: proc () {
                 stageFlags = { .MESH_EXT }, // :TaskShader: + { .TASK_EXT }
             },
         }
-        vertices_descriptor_layout_create_info := vk.DescriptorSetLayoutCreateInfo{
+        
+        vertices_descriptor_layout_create_info := vk.DescriptorSetLayoutCreateInfo {
             sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            flags = { .PUSH_DESCRIPTOR },
+            flags        = { .PUSH_DESCRIPTOR },
             bindingCount = len(bindings),
-            pBindings = &bindings[0],
+            pBindings    = &bindings[0],
         }
         
         check(vk.CreateDescriptorSetLayout(device, &vertices_descriptor_layout_create_info, nil, &vertex_descriptor_set_layout))
@@ -610,7 +460,7 @@ main :: proc () {
     pipeline := create_graphics_pipeline(device, swapchain.format, depth_buffer.format, vertex_descriptor_set_layout, textures_descriptor_set_layout)
     
     // @volatile needs to match the bindings in shader.slang
-    vertex_descriptor_update_template := create_vertex_update_template(device, pipeline, 4)
+    vertex_descriptor_update_template := create_vertex_update_template(device, pipeline, StorageBufferCount)
     
     ////////////////////////////////////////////////
     
@@ -703,16 +553,13 @@ main :: proc () {
             vk.DeviceWaitIdle(device)
             
             recreate_swapchain(ips, device, sdl_get_window_size(window), &swapchain)
-            
-            vma.destroy_image(allocator, depth_buffer.image, depth_buffer.allocation)
-            vk.DestroyImageView(device, depth_buffer.view, nil)
             create_depth_buffer(device, swapchain.size, allocator, &depth_buffer)
         }
         
         if should_recreate_pipeline(pipeline) {
             pipeline = create_graphics_pipeline(device, swapchain.format, depth_buffer.format, vertex_descriptor_set_layout, textures_descriptor_set_layout, pipeline)
             // @volatile needs to match the bindings in shader.slang
-            vertex_descriptor_update_template = create_vertex_update_template(device, pipeline, 4, vertex_descriptor_update_template)
+            vertex_descriptor_update_template = create_vertex_update_template(device, pipeline, StorageBufferCount, vertex_descriptor_update_template)
         }
         
         ////////////////////////////////////////////////
@@ -812,6 +659,7 @@ main :: proc () {
         
         vk.CmdBindPipeline(cb, .GRAPHICS, pipeline.pipeline)
         
+        // @volatile needs to match the bindings in shader.slang 
         descriptor_update_data := [?] DescriptorUpdateData {
             { buffer = { vertex_buffer.buffer,       0, auto_cast vk.WHOLE_SIZE }},
             { buffer = { meshlet_buffer.buffer,      0, auto_cast vk.WHOLE_SIZE }},
