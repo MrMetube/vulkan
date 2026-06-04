@@ -22,7 +22,6 @@ static const uint TriangleLimit = 84;
 struct Data {
     m4 projection;
     m4 view;
-    m4 model;
     v4 light_pos[4];
     
     u32 meshlet_count;
@@ -43,9 +42,15 @@ struct Meshlet {
     u8  triangle_count;
 }
 
-[[vk::binding(0)]] StructuredBuffer<Vertex>  vertex_buffer;
-[[vk::binding(1)]] StructuredBuffer<Meshlet> meshlet_buffer;
-[[vk::binding(2)]] StructuredBuffer<u32>     meshlet_data_buffer;
+// @volatile cpu needs to match this layout
+struct Mesh_Draw {
+    m4  model;
+}
+
+[[vk::binding(0)]] StructuredBuffer<Vertex>    vertex_buffer;
+[[vk::binding(1)]] StructuredBuffer<Meshlet>   meshlet_buffer;
+[[vk::binding(2)]] StructuredBuffer<u32>       meshlet_data_buffer;
+[[vk::binding(3)]] StructuredBuffer<Mesh_Draw> draw_buffer;
 
 [[vk::binding(0, 1)]] Sampler2D textures[];
 
@@ -113,7 +118,8 @@ struct Mesh_Result {
 [outputtopology("triangle")]
 [numthreads(MeshWidth, 1, 1)]
 [outputtopology("triangle")]
-void main(in payload Task_Result input, uniform Data *data, uint group_index : SV_GroupID, uint thread_index : SV_GroupThreadID,
+void main(in payload Task_Result input, uniform Data *data, uniform uint mesh_index,
+    uint group_index : SV_GroupID, uint thread_index : SV_GroupThreadID,
     out OutputVertices<Mesh_Result, VertexLimit> out_vertices, out OutputIndices<uint3, TriangleLimit> out_indices) {
         
     Meshlet meshlet = {0};
@@ -127,9 +133,10 @@ void main(in payload Task_Result input, uniform Data *data, uint group_index : S
         meshlet = meshlet_buffer[meshlet_index];
     }
     
-    //@cleanup make this a single model transform
-    m4 model_view = mul(data->view, data->model);
-
+    Mesh_Draw draw = draw_buffer[mesh_index];
+    
+    m4 model_view = mul(data->view, draw.model);
+    
     // @todo(viktor): apparently i need more data for a perspective correct culling
     // v4 cone  = meshlet.cone;
     // cone.xyz = normalize(mul((m3) transpose(model_view.invertse)), cone.xyz));
@@ -139,6 +146,7 @@ void main(in payload Task_Result input, uniform Data *data, uint group_index : S
     // }
     
     SetMeshOutputCounts(meshlet.vertex_count, meshlet.triangle_count);
+    
     
     uint vertex_offset = meshlet.data_offset;
     uint index_offset  = vertex_offset + meshlet.vertex_count;

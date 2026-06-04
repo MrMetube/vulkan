@@ -50,7 +50,6 @@ MaxTriangles :: 84
 Shader_Data :: struct {
     projection: m4,
     view:       m4,
-    model:      m4,
     light_pos:  [4] v4,
     
     meshlet_count: u32,
@@ -65,10 +64,22 @@ Meshlet :: struct #align(16) {
 }
 
 // @volatile shader.slang needs to match this layout
+Mesh_Draw :: struct #align(16) {
+    model:  m4,
+}
+
+// @volatile shader.slang needs to match this layout
 Vertex :: struct {
     p:  v3,      p_pad: f32,
     n:  [3] u8,  n_pad: u8,
     uv: v2,
+}
+
+// @volatile shader.slang uniforms/push constants need to align with this layout
+// @note(viktor): this is technically only used for its layout and size, which we query from the compiler
+Push_Data :: struct {
+    address:    vk.DeviceAddress,
+    mesh_index: u32,
 }
 
 ////////////////////////////////////////////////
@@ -116,9 +127,10 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    vertex_buffer,       vb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Vertex,  256 * Megabyte / size_of(Vertex))
-    meshlet_buffer,      mb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Meshlet, 256 * Megabyte / size_of(Meshlet))
-    meshlet_data_buffer, mdb_view := gpu_make_buffer({ .STORAGE_BUFFER }, [] u32,     256 * Megabyte / size_of(u32))
+    vertex_buffer,       vb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Vertex,    256 * Megabyte / size_of(Vertex))
+    meshlet_buffer,      mb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Meshlet,   256 * Megabyte / size_of(Meshlet))
+    meshlet_data_buffer, mdb_view := gpu_make_buffer({ .STORAGE_BUFFER }, [] u32,       256 * Megabyte / size_of(u32))
+    draw_buffer,         db_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Mesh_Draw, 256 * Megabyte / size_of(Mesh_Draw))
     
     Mesh_Info :: struct {
         triangle_count: u32,
@@ -277,7 +289,7 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     // @volatile needs to match the bindings in shader.slang
-    StorageBufferCount :: 3
+    StorageBufferCount :: 4
     vertex_descriptor_set_layout: vk.DescriptorSetLayout
     {
         bindings := [StorageBufferCount] vk.DescriptorSetLayoutBinding {
@@ -295,6 +307,12 @@ main :: proc () {
             },
             {
                 binding = 2,
+                descriptorType = .STORAGE_BUFFER,
+                descriptorCount = 1,
+                stageFlags = { .MESH_EXT }, // :TaskShader: + { .TASK_EXT }
+            },
+            {
+                binding = 3,
                 descriptorType = .STORAGE_BUFFER,
                 descriptorCount = 1,
                 stageFlags = { .MESH_EXT }, // :TaskShader: + { .TASK_EXT }
@@ -381,7 +399,6 @@ main :: proc () {
 
     pipeline := create_graphics_pipeline(device, swapchain, vertex_descriptor_set_layout, textures_descriptor_set_layout)
     
-    // @volatile needs to match the bindings in shader.slang
     vertex_descriptor_update_template := create_vertex_update_template(device, pipeline, StorageBufferCount)
     
     ////////////////////////////////////////////////
@@ -479,7 +496,6 @@ main :: proc () {
         
         if should_recreate_pipeline(pipeline) {
             pipeline = create_graphics_pipeline(device, swapchain, vertex_descriptor_set_layout, textures_descriptor_set_layout, pipeline)
-            // @volatile needs to match the bindings in shader.slang
             vertex_descriptor_update_template = create_vertex_update_template(device, pipeline, StorageBufferCount, vertex_descriptor_update_template)
         }
         
@@ -546,11 +562,24 @@ main :: proc () {
         
         shader_data.projection = la.matrix4_perspective(45 * RadPerDeg, cast(f32) swapchain.size.x / cast(f32) swapchain.size.y, 0.1, 128)
         shader_data.view = la.matrix4_translate(cam_pos)
-        instance_pos := v3{}
-        shader_data.model = la.matrix4_translate(instance_pos) * la.matrix4_from_quaternion(la.quaternion_from_euler_angles_f32(expand_values(object_rotation), .XYX))
         shader_data.meshlet_count = mesh_info.meshlet_count
         
         copy(frame.buffer.data, to_bytes(&shader_data))
+        
+        draws: [100] Mesh_Draw
+        for &draw, i in draws {
+            p := v3{}
+            p.x = linear_blend(cast(f32) -2, 2,  cast(f32) (i%10) / 10) + 0.5/10
+            p.y = linear_blend(cast(f32) -2, 2,  cast(f32) (i/10) / 10) + 0.5/10
+            
+            t := la.matrix4_translate(p)
+            r := la.matrix4_from_quaternion(la.quaternion_from_euler_angles_f32(expand_values(object_rotation), .XYX))
+            s := la.matrix4_scale(cast(f32) 1.0 / 10)
+            
+            draw.model = t * r * s
+        }
+        
+        copy(db_view, draws[:])
         
         ////////////////////////////////////////////////
         
@@ -581,19 +610,22 @@ main :: proc () {
         vk.CmdBindPipeline(cb, .GRAPHICS, pipeline.pipeline)
         
         // @volatile needs to match the bindings in shader.slang 
-        descriptor_update_data := [?] DescriptorUpdateData {
+        descriptor_update_data := [StorageBufferCount] DescriptorUpdateData {
             { buffer = { vertex_buffer.buffer,       0, auto_cast vk.WHOLE_SIZE }},
             { buffer = { meshlet_buffer.buffer,      0, auto_cast vk.WHOLE_SIZE }},
             { buffer = { meshlet_data_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
+            { buffer = { draw_buffer.buffer,         0, auto_cast vk.WHOLE_SIZE }},
         }
         vk.CmdPushDescriptorSetWithTemplate(cb,  vertex_descriptor_update_template, pipeline.layout, 0, &descriptor_update_data[0])
         
         vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline.layout, 1, 1, &textures_descriptor_set, 0, nil)
         
-        vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader.stages, 0, size_of(vk.DeviceAddress), &frame.deviceAddress)
+        vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader.stages, cast(u32) offset_of(Push_Data{}.address), size_of(vk.DeviceAddress), &frame.deviceAddress)
         
-        for _ in 0..<1 {
+        for index in 0..<len(draws) {
+            mesh_index := cast(u32) index
             count := mesh_info.meshlet_count
+            vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader.stages, cast(u32) offset_of(Push_Data{}.mesh_index), size_of(u32), &mesh_index)
             // :TaskShader: each task shader should later spawn 32 meshshaders
             // count  = (count + 31) / 32
             vk.CmdDrawMeshTasksEXT(cb, count, 1, 1)

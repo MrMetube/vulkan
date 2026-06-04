@@ -617,11 +617,10 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, verti
         textures_descriptor_set_layout,
     }
     
-    // @volatile needs to match the push constants in shader.slang
     ranges := [?] vk.PushConstantRange {
         {
             stageFlags = shader.stages,
-            size       = size_of(vk.DeviceAddress),
+            size       = size_of(Push_Data),
         },
     }
     
