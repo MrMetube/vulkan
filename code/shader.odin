@@ -66,7 +66,6 @@ recompile_shader :: proc (input, output: string, allocator: Allocator) -> (Shade
         shader_code := slice_from_parts(u32, raw_data(shader_bytes), len(shader_bytes) / 4)
         
         assert(shader_code[0] == SpvMagicNumber)
-        id_bound := shader_code[3]
         code     := shader_code[5:]
         
         for len(code) != 0 {

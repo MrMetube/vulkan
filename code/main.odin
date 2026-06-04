@@ -15,7 +15,7 @@ import vk "vendor:vulkan"
 
 ////////////////////////////////////////////////
 
-VSync :: !true
+VSync :: true && ODIN_DEBUG
 
 ////////////////////////////////////////////////
 
@@ -89,9 +89,10 @@ Vertex :: struct {
 ////////////////////////////////////////////////
 
 main :: proc () {
+    defer sdl.Quit()
+    
     check(sdl.InitSubSystem({ .VIDEO }))
     defer sdl.QuitSubSystem({ .VIDEO })
-    defer sdl.Quit()
     
     window := sdl.CreateWindow("How to Vulkan", 1280, 720, sdl.WINDOW_VULKAN | sdl.WINDOW_RESIZABLE)
     check_sdl(window != nil)
@@ -118,25 +119,26 @@ main :: proc () {
         
         instance_create_info := vk.InstanceCreateInfo {
             sType = .INSTANCE_CREATE_INFO,
-            pNext = &vk.DebugUtilsMessengerCreateInfoEXT {
-                sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-                messageSeverity = { .VERBOSE, .WARNING, .ERROR },
-                messageType = { .VALIDATION, .PERFORMANCE },
-                pfnUserCallback = vk_debug_utils_callback,
-            },
             pApplicationInfo = &vk.ApplicationInfo {
                 sType = .APPLICATION_INFO,
                 pApplicationName = "How to Vulkan",
                 apiVersion = vk.API_VERSION_1_4,
             },
-            enabledExtensionCount = auto_cast len(instance_extensions),
+            enabledExtensionCount   = auto_cast len(instance_extensions),
             ppEnabledExtensionNames = raw_data(instance_extensions),
         }
         
         when ODIN_DEBUG {
-            validation_layers := []cstring{ "VK_LAYER_KHRONOS_validation" }
-            instance_create_info.enabledLayerCount = auto_cast len(validation_layers)
+            validation_layers := [] cstring { "VK_LAYER_KHRONOS_validation" }
+            instance_create_info.enabledLayerCount   = auto_cast len(validation_layers)
             instance_create_info.ppEnabledLayerNames = raw_data(validation_layers)
+            
+            instance_create_info.pNext = &vk.DebugUtilsMessengerCreateInfoEXT {
+                sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+                messageSeverity = { .VERBOSE, .WARNING, .ERROR },
+                messageType = { .VALIDATION, .PERFORMANCE },
+                pfnUserCallback = vk_debug_utils_callback,
+            }
         }
         
         check(vk.CreateInstance(&instance_create_info, nil, &ips.instance))
@@ -680,7 +682,8 @@ main :: proc () {
         // @todo(viktor): we currently include the time sdl.PollEvents and therefore windows window events take, which can just block us.
         current_time := time.tick_now()
         delta_tick := time.tick_diff(last_time, current_time)
-        delta_time := cast(f32) time.duration_seconds(delta_tick)
+        delta_time_64 := time.duration_seconds(delta_tick)
+        delta_time := cast(f32) delta_time_64
         last_time = current_time
         
         ////////////////////////////////////////////////
@@ -733,8 +736,8 @@ main :: proc () {
         wait_info := vk.SemaphoreWaitInfo {
             sType = .SEMAPHORE_WAIT_INFO,
             semaphoreCount = 1,
-            pSemaphores = &timeline_semaphore,
-            pValues = &wait_value,
+            pSemaphores    = &timeline_semaphore,
+            pValues        = &wait_value,
         }
         wait_result := vk.WaitSemaphores(device, &wait_info, Timeout)
         if wait_result == .TIMEOUT {
@@ -771,12 +774,12 @@ main :: proc () {
                 gpu_delta := gpu_end - gpu_begin
                 // @note(viktor): this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
                 if gpu_delta > 0 {
-                    smooth_update(cast(f64) delta_time, &gpu_time, gpu_delta)
+                    smooth_update(delta_time_64, &gpu_time, gpu_delta)
                 }
             }
         }
         
-        smooth_update(cast(f64) delta_time, &cpu_time, cast(f64) delta_time)
+        smooth_update(delta_time_64, &cpu_time, delta_time_64)
         
         view :: proc (seconds: f64) -> time.Duration {
             return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
@@ -903,8 +906,6 @@ main :: proc () {
     
 	vk.DestroySurfaceKHR(ips.instance, ips.surface, nil)
 	vk.DestroyInstance(ips.instance, nil)
-    
-	sdl.DestroyWindow(window)
 }
 
 ////////////////////////////////////////////////

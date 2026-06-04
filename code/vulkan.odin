@@ -40,7 +40,7 @@ to_be_destroyed_handles: [dynamic] DestroyInfo
 
 DestroyInfo :: struct { 
     handle: vk.NonDispatchableHandle, 
-    fn: proc (device: vk.Device, handle: vk.NonDispatchableHandle, pAllocator: ^vk.AllocationCallbacks)
+    fn: proc (device: vk.Device, handle: vk.NonDispatchableHandle, pAllocator: ^vk.AllocationCallbacks),
 }
 
 mark_handle :: proc (fn: $F, handle: $T/ vk.NonDispatchableHandle, loc := #caller_location) {
@@ -366,7 +366,7 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_for
             sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
             stage = { stage }, 
             pName = "main", 
-            pNext = &shader_module_create_info
+            pNext = &shader_module_create_info,
         })
     }
     

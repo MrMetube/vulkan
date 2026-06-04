@@ -84,26 +84,3 @@ build_meshlets :: proc (mesh: ^Mesh, allocator: Allocator) -> u32 {
     
     return cast(u32) actual_count
 }
-
-xx_index :: proc (data: [] $T, indices: [$N] $I) -> [N] T {
-    result: [N] T
-    for index, i in indices {
-        result[i] = data[index]
-    }
-    return result
-}
-xx_index_ref :: proc (data: [] $T, indices: [$N] $I) -> [N] ^T {
-    result: [N] ^T
-    for index, i in indices {
-        result[i] = &data[index]
-    }
-    return result
-}
-
-xx_take :: proc (data: [] $T, $N: int) -> [N] T {
-    result: [N] T
-    for &r, index in result {
-        r = data[index]
-    }
-    return result
-}

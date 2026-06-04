@@ -9,13 +9,13 @@ main :: proc () {
     parse_run_and_debug_arguments()
     
     if begin_build(cmd, "code", "engine.exe", .Kill) {
-        build_meander()
+        build_meander(debug = optimize ? "" : "-debug")
         
         build_optimizations(optimize)
         build_native()
         build_pedantic(pedantic)
         append(cmd, "-collection:lib=libs")
-        if false {
+        if !false && pedantic {
             append(cmd, "-vet-packages:main", "-vet-unused-procedures")
         }
         
