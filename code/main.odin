@@ -91,13 +91,6 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    swapchain: Swapchain
-    swapchain.format = get_swapchain_format(ips)
-    
-    recreate_swapchain(ips, device, sdl_get_window_size(window), &swapchain)
-    
-    ////////////////////////////////////////////////
-    
     allocator: vma.Allocator
     {
         vma_vulkan_functions := vma.create_vulkan_functions()
@@ -111,24 +104,15 @@ main :: proc () {
         }
         check(vma.create_allocator(allocator_create_info, &allocator))
     }
-    
+        
     ////////////////////////////////////////////////
     
-    depth_buffer: Image
-    {
-        depth_format_list := [] vk.Format { .D32_SFLOAT_S8_UINT, .D24_UNORM_S8_UINT }
-        for it in depth_format_list {
-            format_properties := vk.FormatProperties2 { sType = .FORMAT_PROPERTIES_2 }
-            vk.GetPhysicalDeviceFormatProperties2(ips.physical_device, it, &format_properties)
-            
-            if .DEPTH_STENCIL_ATTACHMENT in format_properties.formatProperties.optimalTilingFeatures {
-                depth_buffer.format = it
-                break
-            }
-        }
-        
-        create_depth_buffer(device, swapchain.size, allocator, &depth_buffer)
-    }
+    swapchain: Swapchain
+    
+    swapchain.format    = get_swapchain_format(ips)
+    swapchain.depth_buffer.format = get_depth_buffer_format(ips)
+    
+    recreate_swapchain(ips, device, sdl_get_window_size(window), allocator, &swapchain)
     
     ////////////////////////////////////////////////
     
@@ -395,7 +379,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
 
-    pipeline := create_graphics_pipeline(device, swapchain.format, depth_buffer.format, vertex_descriptor_set_layout, textures_descriptor_set_layout)
+    pipeline := create_graphics_pipeline(device, swapchain, vertex_descriptor_set_layout, textures_descriptor_set_layout)
     
     // @volatile needs to match the bindings in shader.slang
     vertex_descriptor_update_template := create_vertex_update_template(device, pipeline, StorageBufferCount)
@@ -490,12 +474,11 @@ main :: proc () {
             
             vk.DeviceWaitIdle(device)
             
-            recreate_swapchain(ips, device, sdl_get_window_size(window), &swapchain)
-            create_depth_buffer(device, swapchain.size, allocator, &depth_buffer)
+            recreate_swapchain(ips, device, sdl_get_window_size(window), allocator, &swapchain)
         }
         
         if should_recreate_pipeline(pipeline) {
-            pipeline = create_graphics_pipeline(device, swapchain.format, depth_buffer.format, vertex_descriptor_set_layout, textures_descriptor_set_layout, pipeline)
+            pipeline = create_graphics_pipeline(device, swapchain, vertex_descriptor_set_layout, textures_descriptor_set_layout, pipeline)
             // @volatile needs to match the bindings in shader.slang
             vertex_descriptor_update_template = create_vertex_update_template(device, pipeline, StorageBufferCount, vertex_descriptor_update_template)
         }
@@ -582,7 +565,7 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        begin_rendering(cb, swapchain, image_index, depth_buffer.image, depth_buffer.view, {0.07, 0.07, 0.07, 1})
+        begin_rendering(cb, swapchain, image_index, swapchain.depth_buffer.image, swapchain.depth_buffer.view, {0.07, 0.07, 0.07, 1})
         
         vk.CmdSetViewport(cb, 0, 1, &vk.Viewport {
             x      = 0,
@@ -658,16 +641,10 @@ main :: proc () {
     gpu_delete_buffer(meshlet_buffer)
     gpu_delete_buffer(meshlet_data_buffer)
     
-    destroy_swapchain(device, &swapchain)
-
-    
-    // @note(viktor): as we sometimes need to recreate the depth buffer, we currently cant just mark_handle it. maybe we could unmark it in the array, but that already seems overkill
-    vk.DestroyImageView(device, depth_buffer.view, nil) 
+    destroy_swapchain(device, &swapchain, allocator)
     vk.DestroyDescriptorUpdateTemplate(device, vertex_descriptor_update_template, nil)
-
     destroy_pipeline(device, pipeline)
     
-	vma.destroy_image(allocator, depth_buffer.image, depth_buffer.allocation)
     for texture in textures {
         vma.destroy_image(allocator, texture.image, texture.allocation)
     }

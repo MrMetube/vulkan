@@ -21,6 +21,8 @@ Swapchain :: struct {
     infos: #soa [dynamic] Swapchain_Info,
     size:   uv2,
     format: vk.Format,
+    
+    depth_buffer: Image,
 }
 
 Swapchain_Info :: struct {
@@ -237,7 +239,24 @@ get_swapchain_format :: proc (ips: IPS) -> vk.Format {
     return formats[0].format
 }
 
-recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, old_swapchain: ^Swapchain) {
+get_depth_buffer_format :: proc (ips: IPS) -> vk.Format {
+    result: vk.Format
+    
+    depth_format_list := [] vk.Format { .D32_SFLOAT_S8_UINT, .D24_UNORM_S8_UINT }
+    for it in depth_format_list {
+        format_properties := vk.FormatProperties2 { sType = .FORMAT_PROPERTIES_2 }
+        vk.GetPhysicalDeviceFormatProperties2(ips.physical_device, it, &format_properties)
+        
+        if .DEPTH_STENCIL_ATTACHMENT in format_properties.formatProperties.optimalTilingFeatures {
+            result = it
+            break
+        }
+    }
+    
+    return result
+}
+
+recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, allocator: vma.Allocator, old_swapchain: ^Swapchain) {
     surface_capabilities: vk.SurfaceCapabilitiesKHR
     check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(ips.physical_device, ips.surface, &surface_capabilities))
     
@@ -274,11 +293,12 @@ recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, old_swap
     result.size   = new_size
     result.format = old_swapchain.format
     result.infos  = old_swapchain.infos
+    result.depth_buffer.format = old_swapchain.depth_buffer.format
     
     check(vk.CreateSwapchainKHR(device, &swapchain_create_info, nil, &result.swapchain))
     
     if old_swapchain.swapchain != 0 {
-        destroy_swapchain(device, old_swapchain)
+        destroy_swapchain(device, old_swapchain, allocator)
     }
     
     image_count: u32
@@ -291,50 +311,47 @@ recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, old_swap
         info.render_completed = vk_create_semaphore(device)
     }
     
+    {
+        depth_buffer := &result.depth_buffer
+        
+        depth_image_create_info := vk.ImageCreateInfo {
+            sType = .IMAGE_CREATE_INFO,
+            imageType = .D2,
+            format = depth_buffer.format,
+            extent = vk_to_extent(result.size, depth = 1),
+            mipLevels = 1,
+            arrayLayers = 1,
+            samples = { ._1 },
+            tiling = .OPTIMAL,
+            usage = { .DEPTH_STENCIL_ATTACHMENT },
+            initialLayout = .UNDEFINED,
+        }
+        
+        alloc_create_info := vma.Allocation_Create_Info {
+            flags = { .Dedicated_Memory },
+            usage = .Auto,
+        }
+        
+        check(vma.create_image(allocator, depth_image_create_info, alloc_create_info, &depth_buffer.image, &depth_buffer.allocation, nil))
+        
+        depth_buffer.view = create_2d_image_view(device, depth_buffer.image, depth_buffer.format, { .DEPTH })
+    }
+    
     old_swapchain ^= result
 }
 
-destroy_swapchain :: proc (device: vk.Device, swapchain: ^Swapchain) {
+destroy_swapchain :: proc (device: vk.Device, swapchain: ^Swapchain, allocator: vma.Allocator) {
     for &info in swapchain.infos {
+        // @note(viktor): the swapchain images are acquired from the device and not allocated by use, so we do not need to free them.
         vk.DestroyImageView(device, info.view, nil)
         vk.DestroySemaphore(device, info.render_completed, nil)
     }
     clear(&swapchain.infos)
     
+    vma.destroy_image(allocator, swapchain.depth_buffer.image, swapchain.depth_buffer.allocation)
+    vk.DestroyImageView(device, swapchain.depth_buffer.view, nil)
+    
     vk.DestroySwapchainKHR(device, swapchain.swapchain, nil)
-}
-
-// @cleanup this always happens after create_swapchain
-create_depth_buffer :: proc (device: vk.Device, window_size: uv2, allocator: vma.Allocator, result: ^Image) {
-    if result.allocation != nil {
-        vma.destroy_image(allocator, result.image, result.allocation)
-        vk.DestroyImageView(device, result.view, nil)
-        result.allocation = nil
-        result.view       = 0
-        result.image      = 0
-    }
-    
-    depth_image_create_info := vk.ImageCreateInfo {
-        sType = .IMAGE_CREATE_INFO,
-        imageType = .D2,
-        format = result.format,
-        extent = vk_to_extent(window_size, depth = 1),
-        mipLevels = 1,
-        arrayLayers = 1,
-        samples = { ._1 },
-        tiling = .OPTIMAL,
-        usage = { .DEPTH_STENCIL_ATTACHMENT },
-        initialLayout = .UNDEFINED,
-    }
-    
-    alloc_create_info := vma.Allocation_Create_Info {
-        flags = { .Dedicated_Memory },
-        usage = .Auto,
-    }
-    
-    check(vma.create_image(allocator, depth_image_create_info, alloc_create_info, &result.image, &result.allocation, nil))
-    
-    result.view = create_2d_image_view(device, result.image, result.format, { .DEPTH })
 }
 
 ////////////////////////////////////////////////
@@ -574,7 +591,7 @@ should_recreate_pipeline :: proc (pipeline: Pipeline) -> bool {
     return false
 }
 
-create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_format: vk.Format, vertices_descriptor_set_layout, textures_descriptor_set_layout: vk.DescriptorSetLayout, old: Pipeline = {}) -> Pipeline {
+create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, vertices_descriptor_set_layout, textures_descriptor_set_layout: vk.DescriptorSetLayout, old: Pipeline = {}) -> Pipeline {
     shader, ok := recompile_shader(shader_source, shader_output, context.temp_allocator)
     if !ok {
         if old.pipeline == 0 || old.layout == 0 {
@@ -630,7 +647,7 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_for
     
     dynamic_states := [] vk.DynamicState { .VIEWPORT, .SCISSOR }
     
-    swapchain_format := swapchain_format
+    swapchain_format := swapchain.format
     
     pipeline_create_info := vk.GraphicsPipelineCreateInfo {
         sType = .GRAPHICS_PIPELINE_CREATE_INFO,
@@ -638,7 +655,7 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain_format, depth_for
             sType = .PIPELINE_RENDERING_CREATE_INFO,
             colorAttachmentCount = 1,
             pColorAttachmentFormats = &swapchain_format,
-            depthAttachmentFormat = depth_format,
+            depthAttachmentFormat = swapchain.depth_buffer.format,
         },
         stageCount = auto_cast len(shader_stages),
         pStages    = &shader_stages[0],
