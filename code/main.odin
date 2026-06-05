@@ -65,7 +65,6 @@ Draw_Globals :: struct {
     meshlet_count: u32,
 }
 
-// @cleanup remove the drawIndexed field
 // @volatile shader.slang
 Draw :: struct {
     command: vk.DrawMeshTasksIndirectCommandEXT, pad: u32,
@@ -73,7 +72,6 @@ Draw :: struct {
     orientation: q32,
     p:           v3,
     scale:       f32,
-    color: v4, // no checkin
 }
 
 // @volatile shader.slang
@@ -479,15 +477,31 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
+        mouse_delta: v2
+        @(static) left_down: bool
+        @(static) space_down: bool
         for event: sdl.Event; sdl.PollEvent(&event); {
             #partial switch event.type {
             case .QUIT:
                 quit = true
             
             case .MOUSE_MOTION:
+                mouse_delta = { event.motion.xrel, event.motion.yrel }
+            case .MOUSE_BUTTON_DOWN:
                 if event.button.button == sdl.BUTTON_LEFT {
-                    object_rotation.y += event.motion.xrel * delta_time
-                    object_rotation.x += event.motion.yrel * delta_time
+                    left_down = true
+                }
+            case .MOUSE_BUTTON_UP:
+                if event.button.button == sdl.BUTTON_LEFT {
+                    left_down = false
+                }
+            case .KEY_DOWN:
+                if event.key.key == sdl.K_SPACE {
+                    space_down = true
+                }
+            case .KEY_UP:
+                if event.key.key == sdl.K_SPACE {
+                    space_down = false
                 }
                 
             case .MOUSE_WHEEL:
@@ -495,6 +509,14 @@ main :: proc () {
                 
             case .WINDOW_RESIZED:
                 should_recreate_swapchain = true
+            }
+        }
+        
+        if mouse_delta != 0 && left_down {
+            if space_down {
+                cam_pos.xy += mouse_delta * {-1, 1} * delta_time * 5
+            } else {
+                object_rotation.yx += mouse_delta * delta_time
             }
         }
         
@@ -596,15 +618,13 @@ main :: proc () {
         @(static) draws: [18000] Draw
         color_wheel := color_wheel
         for &draw in draws {
-            p := random_bilateral(&entropy, v3) * {30, 20, 20}
-            p.z -= 30
+            p := random_bilateral(&entropy, v3) * {30, 20, 60}
+            p.z -= 70
             
             draw.p           = p
-            draw.scale       = linear_blend(cast(f32) 1.5, 4, square(random_unilateral(&entropy, f32))) / 5
+            draw.scale       = linear_blend(cast(f32) .1, .8, square(random_unilateral(&entropy, f32)))
             draw.orientation = la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
             draw.orientation = la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX) * draw.orientation
-            draw.color.rgb = random_unilateral(&entropy, v3) * 0.8 + 0.1
-            draw.color.a = 1
             draw.command = {
                 // @volatile this division needs to match the TaskWidth
                 // :TaskShader: each one dispatches 32 so we need to divide this by 32 later on

@@ -1,4 +1,4 @@
-static const bool Debug = !false;
+static const bool Debug = false;
 
 ////////////////////////////////////////////////
 // @todo(viktor): make the cpu output generated.slang with these structures auto generated based on the cpu layout
@@ -29,7 +29,6 @@ struct Draw {
     q4  orientation;
     v3  p;
     f32 scale;
-    v4 color;
 }
 
 // @volatile
@@ -197,8 +196,6 @@ void main(in payload Task_Result input, uniform Push_Data push,
             result.debug_color = v3(f32(mhash & 255), f32((mhash >> 8) & 255), f32((mhash >> 16) & 255)) / 255;
         }
         
-        result.debug_color = draw.color.rgb;
-        
         out_vertices[i] = result;
     }
     
@@ -241,12 +238,12 @@ v4 main(Mesh_Result input) {
     }
     
     Sampler2D texture = textures[NonUniformResourceIndex(0)];
-    v3 albedo = input.debug_color; //texture.Sample(input.uv).rgb;
+    v3 albedo = texture.Sample(input.uv).rgb;
     v3 color = diffuse * albedo + specular;
     
-    // if (Debug) {
-    //     color = input.debug_color;
-    // }
+    if (Debug) {
+        color = input.debug_color;
+    }
     
     return v4(color, 1);
 }
