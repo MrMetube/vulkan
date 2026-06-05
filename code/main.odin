@@ -53,8 +53,7 @@ MaxTriangles :: 84
 // @volatile shader.slang
 // @note(viktor): this is technically only used for its layout and size, which we query from the compiler
 Push_Data :: struct {
-    address:    vk.DeviceAddress,
-    mesh_index: u32,
+    address: vk.DeviceAddress,
 }
 
 // @volatile shader.slang
@@ -66,11 +65,15 @@ Draw_Globals :: struct {
     meshlet_count: u32,
 }
 
+// @cleanup remove the drawIndexed field
 // @volatile shader.slang
-Draw_Mesh :: struct #align(16) {
+Draw :: struct {
+    command: vk.DrawMeshTasksIndirectCommandEXT, pad: u32,
+    
+    orientation: q32,
     p:           v3,
     scale:       f32,
-    orientation: q32,
+    color: v4, // no checkin
 }
 
 // @volatile shader.slang
@@ -124,7 +127,7 @@ main :: proc () {
     vertex_buffer,       vb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Vertex,    256 * Megabyte / size_of(Vertex))
     meshlet_buffer,      mb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Meshlet,   256 * Megabyte / size_of(Meshlet))
     meshlet_data_buffer, mdb_view := gpu_make_buffer({ .STORAGE_BUFFER }, [] u32,       256 * Megabyte / size_of(u32))
-    draw_buffer,         db_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Draw_Mesh, 256 * Megabyte / size_of(Draw_Mesh))
+    draw_buffer,         db_view  := gpu_make_buffer({ .STORAGE_BUFFER, .INDIRECT_BUFFER }, [] Draw, 256 * Megabyte / size_of(Draw))
     
     Mesh_Info :: struct {
         triangle_count: u32,
@@ -133,8 +136,8 @@ main :: proc () {
     
     mesh_info: Mesh_Info
     {
-        // mesh := load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
-        mesh := load_mesh_from_obj("models/bunny.obj", context.temp_allocator)
+        mesh := load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
+        // mesh := load_mesh_from_obj("models/bunny.obj", context.temp_allocator)
         // mesh := load_mesh_from_obj("models/lucy_280k.obj", context.temp_allocator)
         
         optimize_mesh(&mesh, context.temp_allocator)
@@ -590,15 +593,25 @@ main :: proc () {
         copy(frame.buffer.data, to_bytes(&shader_data))
         
         entropy := seed_random_series(5175546)
-        draws: [100] Draw_Mesh
+        @(static) draws: [18000] Draw
+        color_wheel := color_wheel
         for &draw in draws {
-            p := random_bilateral(&entropy, v3) * {30, 20, 10}
-            p.z -= 20
+            p := random_bilateral(&entropy, v3) * {30, 20, 20}
+            p.z -= 30
             
             draw.p           = p
-            draw.scale       = linear_blend(cast(f32) 1.5, 4, square(random_unilateral(&entropy, f32)))
+            draw.scale       = linear_blend(cast(f32) 1.5, 4, square(random_unilateral(&entropy, f32))) / 5
             draw.orientation = la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
-            draw.orientation = la.quaternion_from_euler_angles_f32(expand_values(object_rotation), .XYX) * draw.orientation
+            draw.orientation = la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX) * draw.orientation
+            draw.color.rgb = random_unilateral(&entropy, v3) * 0.8 + 0.1
+            draw.color.a = 1
+            draw.command = {
+                // @volatile this division needs to match the TaskWidth
+                // :TaskShader: each one dispatches 32 so we need to divide this by 32 later on
+                groupCountX = mesh_info.meshlet_count,
+                groupCountY = 1,
+                groupCountZ = 1,
+            }
         }
         
         copy(db_view, draws[:])
@@ -610,7 +623,14 @@ main :: proc () {
         view :: proc (seconds: f64) -> time.Duration {
             return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
         }
-        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, triangles: %v, meshlets: %v, triangles/s %v", view(cpu_time.value), view(gpu_time.value), view_magnitude(mesh_info.triangle_count), view_magnitude(mesh_info.meshlet_count), view_magnitude(cast(f64) mesh_info.triangle_count * len(draws) / gpu_time.value)))
+        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, triangles: %v, meshlets: %v, %v triangles/s, %v models/s", 
+            view(cpu_time.value), 
+            view(gpu_time.value), 
+            view_magnitude(mesh_info.triangle_count), 
+            view_magnitude(mesh_info.meshlet_count), 
+            view_magnitude(cast(f64) mesh_info.triangle_count * len(draws) / cpu_time.value),
+            view_magnitude(cast(f64) len(draws) / cpu_time.value)
+        ))
         
         ////////////////////////////////////////////////
         
@@ -659,15 +679,9 @@ main :: proc () {
         vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline.layout, 1, 1, &textures_descriptor_set, 0, nil)
         
         
-        for index in 0..<len(draws) {
-            vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader.stages, 0, size_of(Push_Data), &Push_Data { address = frame.deviceAddress, mesh_index = cast(u32) index })
-            
-            count := mesh_info.meshlet_count
-            // :TaskShader: each task shader should later spawn 32 meshshaders
-            // @volatile this division needs to match the TaskWidth
-            // count  = (count + 31) / 32
-            vk.CmdDrawMeshTasksEXT(cb, count, 1, 1)
-        }
+        vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader.stages, 0, size_of(Push_Data), &Push_Data { address = frame.deviceAddress })
+        // @todo(viktor): this is deprecated, use vkCmdDrawMeshTasksIndirect2EXT
+        vk.CmdDrawMeshTasksIndirectEXT(cb, draw_buffer.buffer, auto_cast offset_of(Draw{}.command), len(draws), size_of(Draw))
         
         ////////////////////////////////////////////////
         

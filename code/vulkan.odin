@@ -99,7 +99,7 @@ create_instance_physical_device_and_surface :: proc (window: ^sdl.Window, get_in
             append(&instance_extensions, instance_extensions_raw[i])
         }
         
-        when ODIN_DEBUG {
+        when !Optimized {
             append(&instance_extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
         }
         
@@ -114,7 +114,7 @@ create_instance_physical_device_and_surface :: proc (window: ^sdl.Window, get_in
             ppEnabledExtensionNames = raw_data(instance_extensions),
         }
         
-        when ODIN_DEBUG {
+        when !Optimized {
             validation_layers := [] cstring { "VK_LAYER_KHRONOS_validation" }
             instance_create_info.enabledLayerCount   = auto_cast len(validation_layers)
             instance_create_info.ppEnabledLayerNames = raw_data(validation_layers)
@@ -380,7 +380,8 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
             
             features = {
                 samplerAnisotropy = true, // @note(viktor): since 1.4 this is required
-                shaderInt16 = true,
+                shaderInt16       = true,
+                multiDrawIndirect = true, // @study check availablity in general nowadays
             },
             
         pNext = &vk.PhysicalDeviceVulkan14Features {
@@ -410,9 +411,9 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
             timelineSemaphore                         = true,
             
             shaderFloat16 = true,
-            shaderInt8 = true,
+            shaderInt8    = true,
             uniformAndStorageBuffer8BitAccess = true,
-            storageBuffer8BitAccess = true,
+            storageBuffer8BitAccess           = true,
             
         pNext = &vk.PhysicalDeviceVulkan11Features {
             sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,

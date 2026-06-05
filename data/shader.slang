@@ -1,4 +1,4 @@
-static const bool Debug = false;
+static const bool Debug = !false;
 
 ////////////////////////////////////////////////
 // @todo(viktor): make the cpu output generated.slang with these structures auto generated based on the cpu layout
@@ -7,10 +7,10 @@ static const bool Debug = false;
 static const uint VertexLimit   = 64;
 static const uint TriangleLimit = 84;
 
+// @cleanup with multidraw indirect I could remove the mesh index, leaving this just as a single member: a pointer to another struct. Can this just be unwrapped back to that pointer?
 // @volatile
 struct Push_Data {
     Draw_Globals *globals;
-    uint     mesh_index;
 }
 
 // @volatile
@@ -23,10 +23,13 @@ struct Draw_Globals {
 }
 
 // @volatile
-struct Draw_Mesh {
-    v3 p;
-    f32 scale;
+struct Draw {
+    u8 command_data[3]; u32 _pad;
+    
     q4  orientation;
+    v3  p;
+    f32 scale;
+    v4 color;
 }
 
 // @volatile
@@ -53,7 +56,7 @@ struct Vertex {
 [[vk::binding(0)]] StructuredBuffer<Vertex>    vertex_buffer;
 [[vk::binding(1)]] StructuredBuffer<Meshlet>   meshlet_buffer;
 [[vk::binding(2)]] StructuredBuffer<u32>       meshlet_data_buffer;
-[[vk::binding(3)]] StructuredBuffer<Draw_Mesh> draw_buffer;
+[[vk::binding(3)]] StructuredBuffer<Draw> draw_buffer;
 
 [[vk::binding(0, 1)]] Sampler2D textures[];
 
@@ -121,7 +124,7 @@ struct Mesh_Result {
 [numthreads(MeshWidth, 1, 1)]
 [outputtopology("triangle")]
 void main(in payload Task_Result input, uniform Push_Data push,
-    uint group_index : SV_GroupID, uint thread_index : SV_GroupThreadID,
+    uint group_index : SV_GroupID, uint thread_index : SV_GroupThreadID, uint draw_index : SV_DrawIndex,
     out OutputVertices<Mesh_Result, VertexLimit> out_vertices, out OutputIndices<uint3, TriangleLimit> out_indices) {
         
     Meshlet meshlet = {0};
@@ -132,7 +135,7 @@ void main(in payload Task_Result input, uniform Push_Data push,
 #endif
     
     Draw_Globals globals = *push.globals;
-    Draw_Mesh draw = draw_buffer[push.mesh_index];
+    Draw draw = draw_buffer[draw_index];
     
     if (meshlet_index < globals.meshlet_count) {
         meshlet = meshlet_buffer[meshlet_index];
@@ -194,6 +197,8 @@ void main(in payload Task_Result input, uniform Push_Data push,
             result.debug_color = v3(f32(mhash & 255), f32((mhash >> 8) & 255), f32((mhash >> 16) & 255)) / 255;
         }
         
+        result.debug_color = draw.color.rgb;
+        
         out_vertices[i] = result;
     }
     
@@ -236,12 +241,12 @@ v4 main(Mesh_Result input) {
     }
     
     Sampler2D texture = textures[NonUniformResourceIndex(0)];
-    v3 albedo = texture.Sample(input.uv).rgb;
+    v3 albedo = input.debug_color; //texture.Sample(input.uv).rgb;
     v3 color = diffuse * albedo + specular;
     
-    if (Debug) {
-        color = input.debug_color;
-    }
+    // if (Debug) {
+    //     color = input.debug_color;
+    // }
     
     return v4(color, 1);
 }

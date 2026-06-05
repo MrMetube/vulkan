@@ -1,6 +1,8 @@
 # Modern Vulkan Engine
 A Vulkan 1.4 Engine written in Odin language, that defines itself by:
 - using modern mesh shaders with meshlet rendering, which replaces the old vertex (, tesselation and geometry) shaders
+    - this allows us to do per meshlet culling, when a meshlet is facing backwards towards the camera
+- renders everything with one draw call by using a indirect Multidraw command
 - aiming to be bindless, by using descriptor indexing
 - making use of dynamic rendering and therefore not using render passes, which did not turn out to be of value
 - using the modern shader language Slang
