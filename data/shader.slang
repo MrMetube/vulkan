@@ -1,25 +1,19 @@
-typealias u8  = uint8_t;
-typealias u16 = uint16_t;
-typealias u32 = uint32_t;
-
-typealias f16 = half;
-typealias f32 = float;
-typealias v2 = float2;
-typealias v3 = float3;
-typealias v4 = float4;
-typealias m3 = float3x3;
-typealias m4 = float4x4;
-
-
 static const bool Debug = false;
 
 ////////////////////////////////////////////////
 
+// @volatile
 static const uint VertexLimit   = 64;
 static const uint TriangleLimit = 84;
 
-// @volatile cpu needs to match this layout
-struct Data {
+// @volatile
+struct Push_Data {
+    Draw_Globals *globals;
+    uint     mesh_index;
+}
+
+// @volatile
+struct Draw_Globals {
     m4 projection;
     m4 view;
     v4 light_pos[4];
@@ -27,14 +21,12 @@ struct Data {
     u32 meshlet_count;
 }
 
-// @volatile cpu needs to match this layout
-struct Vertex {
-    f32 px, py, pz, p_pad;
-    u8  nx, ny, nz, n_pad;
-	f32 tu, tv;
+// @volatile
+struct Draw_Mesh {
+    m4  model;
 }
 
-// @volatile cpu needs to match this layout
+// @volatile
 struct Meshlet {
     v4  cone;
     u32 data_offset;
@@ -42,15 +34,19 @@ struct Meshlet {
     u8  triangle_count;
 }
 
-// @volatile cpu needs to match this layout
-struct Mesh_Draw {
-    m4  model;
+// @volatile
+struct Vertex {
+    f32 px, py, pz, p_pad;
+    u8  nx, ny, nz, n_pad;
+	f32 tu, tv;
 }
+
+////////////////////////////////////////////////
 
 [[vk::binding(0)]] StructuredBuffer<Vertex>    vertex_buffer;
 [[vk::binding(1)]] StructuredBuffer<Meshlet>   meshlet_buffer;
 [[vk::binding(2)]] StructuredBuffer<u32>       meshlet_data_buffer;
-[[vk::binding(3)]] StructuredBuffer<Mesh_Draw> draw_buffer;
+[[vk::binding(3)]] StructuredBuffer<Draw_Mesh> draw_buffer;
 
 [[vk::binding(0, 1)]] Sampler2D textures[];
 
@@ -62,7 +58,7 @@ groupshared Task_Result result;
 groupshared Atomic<uint> meshlet_count;
 
 struct Task_Result {
-    u32 offset;
+    u32  offset;
     uint indices[TaskWidth];
 }
 
@@ -71,7 +67,7 @@ struct Task_Result {
 #if Taskshader
 [shader("task")]
 [numthreads(TaskWidth, 1, 1)]
-void main(uniform Data *data, uint group_id : SV_GroupID, uint thread_id : SV_GroupThreadID) {
+void main(uniform Draw_Globals *globals, uint group_id : SV_GroupID, uint thread_id : SV_GroupThreadID) {
     Task_Result result;
     
     uint group_index = group_id.x;
@@ -86,7 +82,7 @@ void main(uniform Data *data, uint group_id : SV_GroupID, uint thread_id : SV_Gr
     uint meshlet_index  = meshlet_group_offset + thread_index;
     // v4 cone = meshlet_buffer[meshlet_index].cone;
     
-    // cone.xyz = normalize(mul((m3) data->model, cone.xyz));
+    // cone.xyz = normalize(mul((m3) globals->model, cone.xyz));
     // if (!cone_cull(cone.xyz, cone.w, v3(0, 0, 1))) {
     //     uint index = meshlet_count.add(1);
     //     result.indices[index] = (u8) thread_index;
@@ -114,12 +110,6 @@ struct Mesh_Result {
     v3 debug_color;
 }
 
-// @volatile this order must match the layout of Push_Data on the cpu side
-struct Push_Data {
-    Data *data;
-    uint mesh_index;
-}
-
 [shader("mesh")]
 [outputtopology("triangle")]
 [numthreads(MeshWidth, 1, 1)]
@@ -135,14 +125,14 @@ void main(in payload Task_Result input, uniform Push_Data push,
     u32 meshlet_index = group_index;
 #endif
     
-    Data data = *push.data;
-    Mesh_Draw draw = draw_buffer[push.mesh_index];
+    Draw_Globals globals = *push.globals;
+    Draw_Mesh draw = draw_buffer[push.mesh_index];
     
-    if (meshlet_index < data.meshlet_count) {
+    if (meshlet_index < globals.meshlet_count) {
         meshlet = meshlet_buffer[meshlet_index];
     }
     
-    m4 model_view = mul(data.view, draw.model);
+    m4 model_view = mul(globals.view, draw.model);
     
     // @todo(viktor): apparently i need more data for a perspective correct culling
     // v4 cone  = meshlet.cone;
@@ -163,7 +153,7 @@ void main(in payload Task_Result input, uniform Push_Data push,
         Vertex vertex = vertex_buffer[vertex_index];
         
         v3 p = v3(vertex.px, vertex.py, vertex.pz);
-        p.z *= -1; // :InverseZ:
+        p.z *= -1; // :ReversedZ:
         
         // 0..255 -> 0..2 -> -1..1
         v3 n = v3(vertex.nx, vertex.ny, vertex.nz) / 127.0 - 1.0;
@@ -174,11 +164,11 @@ void main(in payload Task_Result input, uniform Push_Data push,
         
         result.normal = mul((m3) model_view, n);
         result.uv = t;
-        result.pos = mul(data.projection, view_p);
+        result.pos = mul(globals.projection, view_p);
         
         // Calculate view vectors required for lighting
         for (int li = 0; li < 4; li++) {
-            result.light_vec[li] = data.light_pos[li].xyz - view_p.xyz;
+            result.light_vec[li] = globals.light_pos[li].xyz - view_p.xyz;
         }
         result.view_vec = -view_p.xyz;
         
@@ -254,3 +244,5 @@ uint hash(uint a) {
     a = (a ^ 0xb55a4f09) ^ (a >> 16);
     return a;
 }
+
+import "common.slang";

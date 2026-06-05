@@ -11,7 +11,7 @@ import la "core:math/linalg"
 import "lib:vma"
 
 import sdl "vendor:sdl3"
-import vk "vendor:vulkan"
+import vk  "vendor:vulkan"
 
 ////////////////////////////////////////////////
 
@@ -46,11 +46,19 @@ Mesh :: struct {
 
 ////////////////////////////////////////////////
 
+// @volatile shader.slang
 MaxVertices  :: 64
 MaxTriangles :: 84
 
-// @volatile shader.slang needs to match this layout
-Shader_Data :: struct {
+// @volatile shader.slang
+// @note(viktor): this is technically only used for its layout and size, which we query from the compiler
+Push_Data :: struct {
+    address:    vk.DeviceAddress,
+    mesh_index: u32,
+}
+
+// @volatile shader.slang
+Draw_Globals :: struct {
     projection: m4,
     view:       m4,
     light_pos:  [4] v4,
@@ -58,7 +66,12 @@ Shader_Data :: struct {
     meshlet_count: u32,
 }
 
-// @volatile shader.slang needs to match this layout
+// @volatile shader.slang
+Draw_Mesh :: struct #align(16) {
+    model:  m4,
+}
+
+// @volatile shader.slang
 Meshlet :: struct #align(16) {
     cone: v4,
     data_offset:    u32, // data_offset:][:vertexcount stores vertex indices, we store indices packed in 4b units after that
@@ -66,23 +79,11 @@ Meshlet :: struct #align(16) {
     triangle_count: u8,
 }
 
-// @volatile shader.slang needs to match this layout
-Mesh_Draw :: struct #align(16) {
-    model:  m4,
-}
-
-// @volatile shader.slang needs to match this layout
+// @volatile shader.slang
 Vertex :: struct {
     p:  v3,      p_pad: f32,
     n:  [3] u8,  n_pad: u8,
     uv: v2,
-}
-
-// @volatile shader.slang uniforms/push constants need to align with this layout
-// @note(viktor): this is technically only used for its layout and size, which we query from the compiler
-Push_Data :: struct {
-    address:    vk.DeviceAddress,
-    mesh_index: u32,
 }
 
 ////////////////////////////////////////////////
@@ -117,7 +118,7 @@ main :: proc () {
     vertex_buffer,       vb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Vertex,    256 * Megabyte / size_of(Vertex))
     meshlet_buffer,      mb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Meshlet,   256 * Megabyte / size_of(Meshlet))
     meshlet_data_buffer, mdb_view := gpu_make_buffer({ .STORAGE_BUFFER }, [] u32,       256 * Megabyte / size_of(u32))
-    draw_buffer,         db_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Mesh_Draw, 256 * Megabyte / size_of(Mesh_Draw))
+    draw_buffer,         db_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Draw_Mesh, 256 * Megabyte / size_of(Draw_Mesh))
     
     Mesh_Info :: struct {
         triangle_count: u32,
@@ -144,7 +145,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    shader_data: Shader_Data
+    shader_data: Draw_Globals
     
     for &pos, index in shader_data.light_pos {
         t := clamp_01_to_range(cast(f32) 0, cast(f32) len(shader_data.light_pos), cast(f32) index)
@@ -562,7 +563,7 @@ main :: proc () {
         
         copy(frame.buffer.data, to_bytes(&shader_data))
         
-        draws: [1000] Mesh_Draw
+        draws: [1000] Draw_Mesh
         for &draw, i in draws {
             p := v3{}
             p.x = linear_blend(cast(f32) -2, 2, cast(f32) (i/100)    / 10)
@@ -575,6 +576,22 @@ main :: proc () {
             
             draw.model = t * r * s
         }
+        
+        /* :ReversedZ:
+            f = 1 / tan(fov_y_radians / 2)
+            glm::mat4(
+                f / aspect_w_h, 0,     0,  0,
+                             0, f,     0,  0,
+                             0, 0,     0, -1, // 1 says niagara
+                             0, 0, zNear,  0,
+                )
+            
+            
+            )
+            
+        
+        
+        */
         
         copy(db_view, draws[:])
         
@@ -639,6 +656,7 @@ main :: proc () {
             
             count := mesh_info.meshlet_count
             // :TaskShader: each task shader should later spawn 32 meshshaders
+            // @volatile this division needs to match the TaskWidth
             // count  = (count + 31) / 32
             vk.CmdDrawMeshTasksEXT(cb, count, 1, 1)
         }

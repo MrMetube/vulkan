@@ -463,7 +463,7 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
     frames := make(#soa [] Frame_Data, MaxFramesInFlight, context.allocator)
     
     for &frame in frames {
-        frame.buffer = gpu_make_buffer({ .SHADER_DEVICE_ADDRESS }, size_of(Shader_Data))
+        frame.buffer = gpu_make_buffer({ .SHADER_DEVICE_ADDRESS }, size_of(Draw_Globals))
         
         device_address_info := vk.BufferDeviceAddressInfo {
             sType  = .BUFFER_DEVICE_ADDRESS_INFO,
@@ -736,7 +736,7 @@ begin_rendering :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, color_buffe
             imageLayout = .ATTACHMENT_OPTIMAL,
             loadOp      = .CLEAR,
             storeOp     = .DONT_CARE,
-            clearValue  = { depthStencil = { 0, 0 } }, // :InverseZ: use a reversed z, so 0 is the maximal value
+            clearValue  = { depthStencil = { 0, 0 } }, // :ReversedZ: 0 is the maximal value
         },
     }
     
