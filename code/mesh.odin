@@ -63,8 +63,10 @@ build_meshlets :: proc (mesh: ^Mesh, allocator: Allocator) -> u32 {
         
         bounds := meshoptimizer.computeMeshletBounds(&source_vertices[0], &source_indices[0], cast(uint) source.triangle_count, cast(^f32) &mesh.vertices[0], len(mesh.vertices), size_of(mesh.vertices[0]))
         
-        dest.cone.xyz = bounds.cone_axis
-        dest.cone.w   = bounds.cone_cutoff
+        dest.center = bounds.center
+        dest.radius = bounds.radius
+        dest.cone_axis   = bounds.cone_axis
+        dest.cone_cutoff = bounds.cone_cutoff
     }
     
     mesh.meshlet_data = meshlet_data[:]

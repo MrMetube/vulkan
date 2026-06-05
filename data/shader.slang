@@ -1,4 +1,4 @@
-static const bool Debug = !false;
+static const bool Debug = false;
 
 ////////////////////////////////////////////////
 
@@ -30,7 +30,11 @@ struct Draw_Mesh {
 
 // @volatile
 struct Meshlet {
-    v4  cone;
+    v3  center;
+    f32 radius;
+    v3  cone_axis;
+    f32 cone_cutoff;
+    
     u32 data_offset;
     u8  vertex_count;
     u8  triangle_count;
@@ -135,15 +139,33 @@ void main(in payload Task_Result input, uniform Push_Data push,
     
     m4 view = globals.view;
     
-    v4 cone = meshlet.cone;
-    cone.xyz = rotate(draw.orientation, cone.xyz);
-    if (cone_cull(cone.xyz, cone.w, v3(0, 0, 1))) {
-        SetMeshOutputCounts(0, 0);
-        return;
+    {
+        v3  cone_axis   = meshlet.cone_axis;
+        f32 cone_cutoff = meshlet.cone_cutoff;
+        v3  center      = meshlet.center;
+        f32 radius      = meshlet.radius;
+        
+        cone_axis = rotate(draw.orientation, cone_axis);
+        // cone_apex = rotate(draw.orientation, cone_apex) * draw.scale + draw.p;
+        center    = rotate(draw.orientation, center) * draw.scale + draw.p;
+        radius   *= draw.scale;
+        
+        
+        // v3 view_direction  = v3(0, 0, -1);
+        v3 camera_position = v3(view[0].w, view[1].w, view[2].w);
+        
+        // bool accept_1 = !cone_cull_1(cone_axis, cone_cutoff, view_direction);
+        // bool accept_2 = !cone_cull_2(cone_apex,      cone_axis, cone_cutoff, camera_position);
+        bool accept_3 = !cone_cull_3(center, radius, cone_axis, cone_cutoff, camera_position);
+        
+        bool accept = accept_3;
+        if (!accept) {
+            SetMeshOutputCounts(0, 0);
+            return;
+        }
     }
     
     SetMeshOutputCounts(meshlet.vertex_count, meshlet.triangle_count);
-    
     
     uint vertex_offset = meshlet.data_offset;
     uint index_offset  = vertex_offset + meshlet.vertex_count;
@@ -233,8 +255,15 @@ v4 main(Mesh_Result input) {
 
 ////////////////////////////////////////////////
 
-bool cone_cull(v3 cone, f32 w, v3 view) {
-    return dot(cone, view) > w;
+bool cone_cull_1(v3 axis, f32 cutoff, v3 view) {
+    return dot(axis, view) > cutoff;
+}
+bool cone_cull_2(v3 apex, v3 axis, f32 cutoff, v3 camera) {
+    return dot(normalize(apex - camera), axis) > cutoff;
+}
+bool cone_cull_3(v3 center, f32 radius, v3 axis, f32 cutoff, v3 camera) {
+    v3 delta = center - camera;
+    return dot(delta, axis) > cutoff * length(delta) + radius;
 }
 
 uint hash(uint a) {

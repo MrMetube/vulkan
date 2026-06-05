@@ -75,7 +75,11 @@ Draw_Mesh :: struct #align(16) {
 
 // @volatile shader.slang
 Meshlet :: struct #align(16) {
-    cone: v4,
+    center: v3,
+    radius: f32,
+    cone_axis:   v3,
+    cone_cutoff: f32,
+    
     data_offset:    u32, // data_offset:][:vertexcount stores vertex indices, we store indices packed in 4b units after that
     vertex_count:   u8,
     triangle_count: u8,
@@ -526,16 +530,6 @@ main :: proc () {
         }
         check(wait_result)
         
-        frame : Frame_Data = frames[absolute_frame_index % MaxFramesInFlight]
-        absolute_frame_index += 1
-        
-        acquire_result := vk.AcquireNextImageKHR(device, swapchain.swapchain, Timeout, frame.image_aquired, {}, &image_index)
-        if acquire_result == .ERROR_OUT_OF_DATE_KHR || acquire_result == .SUBOPTIMAL_KHR {
-            should_recreate_swapchain = true
-            continue
-        }
-        check(acquire_result)
-        
         ////////////////////////////////////////////////
         
         // @note(viktor): QueuePool must be reset before use, but that would require a whole cmd begin-end.
@@ -551,11 +545,23 @@ main :: proc () {
                 gpu_end   := cast(f64) query_results[1] * cast(f64) ips.device_properties.properties.limits.timestampPeriod * 1e-9
                 gpu_delta := gpu_end - gpu_begin
                 // @note(viktor): this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
-                if gpu_delta > 0 {
+                if gpu_delta >= 0 {
                     smooth_update(delta_time_64, &gpu_time, gpu_delta)
                 }
             }
         }
+        
+        ////////////////////////////////////////////////
+        
+        frame : Frame_Data = frames[absolute_frame_index % MaxFramesInFlight]
+        absolute_frame_index += 1
+        
+        acquire_result := vk.AcquireNextImageKHR(device, swapchain.swapchain, Timeout, frame.image_aquired, {}, &image_index)
+        if acquire_result == .ERROR_OUT_OF_DATE_KHR || acquire_result == .SUBOPTIMAL_KHR {
+            should_recreate_swapchain = true
+            continue
+        }
+        check(acquire_result)
         
         ////////////////////////////////////////////////
         
@@ -566,10 +572,10 @@ main :: proc () {
             c := near_z
             // due to homogenous coordinates, z is effectively 1/z
             result := m4 {
-                a, 0, 0, 0,
-                0, b, 0, 0,
-                0, 0, 0, c,
-                0, 0, 1, 0, // -1 in the original blog post
+                a, 0,  0, 0,
+                0, b,  0, 0,
+                0, 0,  0, c,
+                0, 0, -1, 0, // -1 in the original blog post
             }
             
             return result
@@ -583,15 +589,15 @@ main :: proc () {
         
         copy(frame.buffer.data, to_bytes(&shader_data))
         
-        entropy := seed_random_series(57546)
-        draws: [500] Draw_Mesh
-        for &draw, i in draws {
-            p := random_bilateral(&entropy, v3) * 30
-            p.z += 40
+        entropy := seed_random_series(5175546)
+        draws: [600] Draw_Mesh
+        for &draw in draws {
+            p := random_bilateral(&entropy, v3) * {30, 20, 10}
+            p.z -= 20
             
             draw.p           = p
             draw.scale       = linear_blend(cast(f32) 1.5, 4, square(random_unilateral(&entropy, f32)))
-            draw.orientation = la.quaternion_angle_axis(/* random_unilateral(&entropy, f32) * Tau */ cast(f32) 0, random_bilateral(&entropy, v3))
+            draw.orientation = la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
             draw.orientation = la.quaternion_from_euler_angles_f32(expand_values(object_rotation), .XYX) * draw.orientation
         }
         
@@ -709,7 +715,7 @@ main :: proc () {
         } else {
             check(present_result)
         }
-    }    
+    }
     
     ////////////////////////////////////////////////
     // Cleanup and Shutdown

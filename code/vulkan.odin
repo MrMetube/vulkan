@@ -809,7 +809,6 @@ gpu_make_buffer_size :: proc (usage: vk.BufferUsageFlags, #any_int size: vk.Devi
     assert(gpu_allocator_state.initialized)
     
     device := gpu_allocator_state.device
-    memory_properties := gpu_allocator_state.memory_properties
     
     create_info := vk.BufferCreateInfo {
         sType = .BUFFER_CREATE_INFO,
@@ -836,11 +835,10 @@ gpu_make_buffer_size :: proc (usage: vk.BufferUsageFlags, #any_int size: vk.Devi
     return result
 }
 
-gpu_make_image :: proc (size: uv2, format: vk.Format, usage: vk.ImageUsageFlags, aspect_mask: vk.ImageAspectFlags, flags := vk.MemoryPropertyFlags { .DEVICE_LOCAL },) -> Image {
+gpu_make_image :: proc (size: uv2, format: vk.Format, usage: vk.ImageUsageFlags, aspect_mask: vk.ImageAspectFlags, flags := vk.MemoryPropertyFlags { .DEVICE_LOCAL }) -> Image {
     assert(gpu_allocator_state.initialized)
     
     device := gpu_allocator_state.device
-    memory_properties := gpu_allocator_state.memory_properties
     
     create_info := vk.ImageCreateInfo {
         sType = .IMAGE_CREATE_INFO,
