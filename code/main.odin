@@ -77,8 +77,8 @@ Draw_Mesh :: struct #align(16) {
 Meshlet :: struct #align(16) {
     center: v3,
     radius: f32,
-    cone_axis:   v3,
-    cone_cutoff: f32,
+    cone_axis:   [3] i8,
+    cone_cutoff: i8,
     
     data_offset:    u32, // data_offset:][:vertexcount stores vertex indices, we store indices packed in 4b units after that
     vertex_count:   u8,
@@ -590,7 +590,7 @@ main :: proc () {
         copy(frame.buffer.data, to_bytes(&shader_data))
         
         entropy := seed_random_series(5175546)
-        draws: [600] Draw_Mesh
+        draws: [100] Draw_Mesh
         for &draw in draws {
             p := random_bilateral(&entropy, v3) * {30, 20, 10}
             p.z -= 20

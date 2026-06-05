@@ -1,3 +1,4 @@
+typealias s8  = int8_t;
 typealias u8  = uint8_t;
 typealias u16 = uint16_t;
 typealias u32 = uint32_t;

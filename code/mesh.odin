@@ -65,24 +65,16 @@ build_meshlets :: proc (mesh: ^Mesh, allocator: Allocator) -> u32 {
         
         dest.center = bounds.center
         dest.radius = bounds.radius
-        dest.cone_axis   = bounds.cone_axis
-        dest.cone_cutoff = bounds.cone_cutoff
+        dest.cone_axis   = bounds.cone_axis_s8
+        dest.cone_cutoff = bounds.cone_cutoff_s8
     }
     
     mesh.meshlet_data = meshlet_data[:]
     
-    /* 
-    // Trim the meshlet data to minimize waste for meshletVertices/meshletTriangles
-    {
-    const meshopt_Meshlet& last = meshlets.back();
-    meshletVertices.resize(last.vertex_offset + last.vertex_count);
-    meshletTriangles.resize(last.triangle_offset + last.triangle_count * 3);
-    }
-    */
     
-    // for &meshlet in meshlets {
-    //     meshoptimizer.optimizeMeshlet(&vertices[meshlet.vertex_offset], &indices[meshlet.triangle_offset],  meshlet.triangle_count, auto_cast meshlet.vertex_count)
-    // }
+    for &meshlet in mesh.meshlets {
+        meshoptimizer.optimizeMeshlet(&mesh.meshlet_data[meshlet.data_offset], cast(^u8) &mesh.meshlet_data[meshlet.data_offset + auto_cast meshlet.vertex_count], auto_cast meshlet.triangle_count, auto_cast meshlet.vertex_count)
+    }
     
     return cast(u32) actual_count
 }
