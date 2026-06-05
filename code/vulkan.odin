@@ -18,16 +18,18 @@ IPS :: struct {
 
 Swapchain :: struct {
     swapchain: vk.SwapchainKHR,
-    infos: #soa [dynamic] Swapchain_Info,
-    size:   uv2,
-    format: vk.Format,
+    images:           [dynamic] vk.Image,
+    render_completes: [dynamic] vk.Semaphore,
     
+    size:   uv2,
+    format: vk.Format, // @cleanup this should be aligned with the color buffer
+    
+    color_buffer: Image,
     depth_buffer: Image,
 }
 
 Swapchain_Info :: struct {
     image: vk.Image,
-    view:  vk.ImageView,
     
     render_completed: vk.Semaphore,
 }
@@ -44,12 +46,12 @@ Shader :: struct {
 }
 
 Image :: struct {
-    image: vk.Image,
-    view:  vk.ImageView,
-    
-    // optional
     format: vk.Format,
+    image:  vk.Image,
+    view:   vk.ImageView,
+    memory: vk.DeviceMemory,
     
+    // @cleanup only used by loaded ktx textures anymore
     allocation: vma.Allocation,
 	sampler:    vk.Sampler,
 }
@@ -121,7 +123,7 @@ create_instance_physical_device_and_surface :: proc (window: ^sdl.Window, get_in
                 sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
                 messageSeverity = { .VERBOSE, .WARNING, .ERROR },
                 messageType = { .VALIDATION, .PERFORMANCE },
-                pfnUserCallback = vk_debug_utils_callback,
+                pfnUserCallback = vulkan_debug_utils_callback,
             }
         }
         
@@ -158,7 +160,7 @@ choose_physical_device :: proc (ips: IPS) -> vk.PhysicalDevice {
     discrete: vk.PhysicalDevice
     fallback: vk.PhysicalDevice
     
-    vk_get_family_index_with_graphics :: proc (device: vk.PhysicalDevice) -> u32 {
+    get_family_index_with_graphics :: proc (device: vk.PhysicalDevice) -> u32 {
         queue_family_count: u32
         vk.GetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, nil)
         queue_family_properties := make([] vk.QueueFamilyProperties, queue_family_count, context.temp_allocator)
@@ -176,7 +178,7 @@ choose_physical_device :: proc (ips: IPS) -> vk.PhysicalDevice {
     }
     
     for device in physical_devices {
-        family_index := vk_get_family_index_with_graphics(device)
+        family_index := get_family_index_with_graphics(device)
         
         if family_index == vk.QUEUE_FAMILY_IGNORED {
             continue
@@ -211,7 +213,7 @@ choose_physical_device :: proc (ips: IPS) -> vk.PhysicalDevice {
 
 ////////////////////////////////////////////////
 
-vk_debug_utils_callback :: proc "system" (messageSeverity: vk.DebugUtilsMessageSeverityFlagsEXT, messageTypes: vk.DebugUtilsMessageTypeFlagsEXT, pCallbackData: ^vk.DebugUtilsMessengerCallbackDataEXT, pUserData: rawptr) -> b32 {
+vulkan_debug_utils_callback :: proc "system" (messageSeverity: vk.DebugUtilsMessageSeverityFlagsEXT, messageTypes: vk.DebugUtilsMessageTypeFlagsEXT, pCallbackData: ^vk.DebugUtilsMessengerCallbackDataEXT, pUserData: rawptr) -> b32 {
     context = runtime.default_context()
     if .WARNING in messageSeverity || .ERROR in messageSeverity {
         fmt.printfln("Validation Layer: %v", pCallbackData.pMessage)
@@ -242,6 +244,7 @@ get_swapchain_format :: proc (ips: IPS) -> vk.Format {
 get_depth_buffer_format :: proc (ips: IPS) -> vk.Format {
     result: vk.Format
     
+    // @todo(viktor): in niagara it is claimed, that we should "just use D32_SFLOAT" for depth buffer "these days"
     depth_format_list := [] vk.Format { .D32_SFLOAT_S8_UINT, .D24_UNORM_S8_UINT }
     for it in depth_format_list {
         format_properties := vk.FormatProperties2 { sType = .FORMAT_PROPERTIES_2 }
@@ -256,14 +259,15 @@ get_depth_buffer_format :: proc (ips: IPS) -> vk.Format {
     return result
 }
 
-recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, allocator: vma.Allocator, old_swapchain: ^Swapchain) {
+recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, old_swapchain: ^Swapchain) {
+    // @cleanup this should not have changed so we could cache it in IPS
     surface_capabilities: vk.SurfaceCapabilitiesKHR
     check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(ips.physical_device, ips.surface, &surface_capabilities))
     
     swapchain_extent := surface_capabilities.currentExtent
     // @note(viktor): this is like for wayland or something, dont know if i want to maintain that any further
     if surface_capabilities.currentExtent.width == 0xFFFFFFFF {
-        swapchain_extent = vk_to_extent(new_size)
+        swapchain_extent = to_extent(new_size)
     }
     
     if swapchain_extent.width == 0 && swapchain_extent.height == 0 {
@@ -281,7 +285,7 @@ recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, allocato
         imageColorSpace  = .SRGB_NONLINEAR,
         imageExtent      = swapchain_extent,
         imageArrayLayers = 1,
-        imageUsage       = { .COLOR_ATTACHMENT },
+        imageUsage       = { .TRANSFER_DST },
         preTransform     = { .IDENTITY },
         compositeAlpha   = { .OPAQUE },
         presentMode      = VSync ? .FIFO : .IMMEDIATE,
@@ -292,64 +296,41 @@ recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, allocato
     result: Swapchain
     result.size   = new_size
     result.format = old_swapchain.format
-    result.infos  = old_swapchain.infos
     result.depth_buffer.format = old_swapchain.depth_buffer.format
     
     check(vk.CreateSwapchainKHR(device, &swapchain_create_info, nil, &result.swapchain))
     
     if old_swapchain.swapchain != 0 {
-        destroy_swapchain(device, old_swapchain, allocator)
+        destroy_swapchain(device, old_swapchain)
     }
     
     image_count: u32
     check(vk.GetSwapchainImagesKHR(device, result.swapchain, &image_count, nil))
-    resize(&result.infos, image_count)
-    check(vk.GetSwapchainImagesKHR(device, result.swapchain, &image_count, result.infos.image))
+    resize(&result.images, image_count)
+    resize(&result.render_completes, image_count)
+    check(vk.GetSwapchainImagesKHR(device, result.swapchain, &image_count, &result.images[0]))
     
-    for &info in result.infos {
-        info.view = create_image_view(device, info.image, result.format, { .COLOR })
-        info.render_completed = vk_create_semaphore(device)
+    // @waste semaphores only need to be deleted and recreated, if the image_count changes up or down respectively
+    for &it in result.render_completes {
+        it = create_semaphore(device)
     }
     
-    {
-        depth_buffer := &result.depth_buffer
-        
-        depth_image_create_info := vk.ImageCreateInfo {
-            sType = .IMAGE_CREATE_INFO,
-            imageType = .D2,
-            format = depth_buffer.format,
-            extent = vk_to_extent(result.size, depth = 1),
-            mipLevels = 1,
-            arrayLayers = 1,
-            samples = { ._1 },
-            tiling = .OPTIMAL,
-            usage = { .DEPTH_STENCIL_ATTACHMENT },
-            initialLayout = .UNDEFINED,
-        }
-        
-        alloc_create_info := vma.Allocation_Create_Info {
-            flags = { .Dedicated_Memory },
-            usage = .Auto,
-        }
-        
-        check(vma.create_image(allocator, depth_image_create_info, alloc_create_info, &depth_buffer.image, &depth_buffer.allocation, nil))
-        
-        depth_buffer.view = create_image_view(device, depth_buffer.image, depth_buffer.format, { .DEPTH })
-    }
+    result.depth_buffer = gpu_make_image(result.size, result.depth_buffer.format, { .DEPTH_STENCIL_ATTACHMENT },         { .DEPTH })
+    result.color_buffer = gpu_make_image(result.size, result.format,              { .COLOR_ATTACHMENT , .TRANSFER_SRC }, { .COLOR })
     
     old_swapchain ^= result
 }
 
-destroy_swapchain :: proc (device: vk.Device, swapchain: ^Swapchain, allocator: vma.Allocator) {
-    for &info in swapchain.infos {
-        // @note(viktor): the swapchain images are acquired from the device and not allocated by use, so we do not need to free them.
-        vk.DestroyImageView(device, info.view, nil)
-        vk.DestroySemaphore(device, info.render_completed, nil)
+destroy_swapchain :: proc (device: vk.Device, swapchain: ^Swapchain) {
+    for &it in swapchain.render_completes {
+        vk.DestroySemaphore(device, it, nil)
     }
-    clear(&swapchain.infos)
+    clear(&swapchain.render_completes)
+    // @note(viktor): the images are allocated for use, so we can just drop the handles
+    clear(&swapchain.images)
     
-    vma.destroy_image(allocator, swapchain.depth_buffer.image, swapchain.depth_buffer.allocation)
-    vk.DestroyImageView(device, swapchain.depth_buffer.view, nil)
+    gpu_delete_image(swapchain.depth_buffer)
+    gpu_delete_image(swapchain.color_buffer)
     
     vk.DestroySwapchainKHR(device, swapchain.swapchain, nil)
 }
@@ -407,6 +388,7 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
             
             maintenance5   = true, // @note(viktor): deprecates ShaderModule
             pushDescriptor = true, // @note(viktor): remove the need for CmdBindVertexBuffers
+            dynamicRenderingLocalRead = true, // @note(viktor): allows rendering to an image and then copying into the swapchain image, whilst using dynamic_rendering
             
             // @todo(viktor): check if this would help the texture upload hostImageCopy
             // hostImageCopy = true,
@@ -489,7 +471,7 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
         }
         frame.deviceAddress = vk.GetBufferDeviceAddress(device, &device_address_info)
         
-        frame.image_aquired = vk_create_semaphore(device)
+        frame.image_aquired = create_semaphore(device)
         defer_destroy(vk.DestroySemaphore, frame.image_aquired)
     }
     
@@ -519,20 +501,6 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
 
 ////////////////////////////////////////////////
 
-create_image_view :: proc (device: vk.Device, image: vk.Image, format: vk.Format, aspect_mask: vk.ImageAspectFlags, level_count: u32 = 1) -> vk.ImageView {
-    result: vk.ImageView
-    
-    check(vk.CreateImageView(device, &vk.ImageViewCreateInfo {
-        sType = .IMAGE_VIEW_CREATE_INFO,
-        image = image,
-        viewType = .D2,
-        format = format,
-        subresourceRange = { aspectMask = aspect_mask, levelCount = level_count, layerCount = 1 },
-    }, nil, &result))
-    
-    return result
-}
-
 @(thread_local)
 transition_state: struct {
     is_open:  bool,
@@ -545,14 +513,12 @@ begin_transition_images :: proc () {
     transition_state.is_open = true
 }
 
-append_image_memory_barrier_2 :: proc (image: vk.Image, src_stage_mask: vk.PipelineStageFlags2, src_access_mask: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage_mask: vk.PipelineStageFlags2, dst_access_mask: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
+append_image_memory_barrier_2 :: proc (image: vk.Image, src_access_mask: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_access_mask: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
     assert(transition_state.is_open)
     
     append(&transition_state.barriers, vk.ImageMemoryBarrier2 {
         sType = .IMAGE_MEMORY_BARRIER_2,
-        srcStageMask  = src_stage_mask,
         srcAccessMask = src_access_mask,
-        dstStageMask  = dst_stage_mask,
         dstAccessMask = dst_access_mask,
         oldLayout = old_layout,
         newLayout = new_layout,
@@ -561,8 +527,13 @@ append_image_memory_barrier_2 :: proc (image: vk.Image, src_stage_mask: vk.Pipel
     })
 }
 
-end_transition_images :: proc (command_buffer: vk.CommandBuffer) {
+end_transition_images :: proc (command_buffer: vk.CommandBuffer, src_stage_mask, dst_stage_mask: vk.PipelineStageFlags2) {
     assert(transition_state.is_open)
+    
+    for &it in transition_state.barriers {
+        it.srcStageMask = src_stage_mask
+        it.dstStageMask = dst_stage_mask
+    }
     
     vk.CmdPipelineBarrier2(command_buffer, &vk.DependencyInfo {
         sType = .DEPENDENCY_INFO,
@@ -676,7 +647,7 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, set_l
             sType = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
             depthTestEnable  = true,
             depthWriteEnable = true,
-            depthCompareOp   = .LESS_OR_EQUAL,
+            depthCompareOp   = .GREATER,
         },
         pColorBlendState = &vk.PipelineColorBlendStateCreateInfo {
             sType = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
@@ -745,6 +716,69 @@ create_vertex_update_template :: proc (device: vk.Device, pipeline: Pipeline, st
 
 ////////////////////////////////////////////////
 
+begin_rendering :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, color_buffer: Image, image_index: u32, clear_color: v4) {
+    rendering_info := vk.RenderingInfo {
+        sType = .RENDERING_INFO, 
+        renderArea = { extent = to_extent(swapchain.size) },
+        layerCount = 1,
+        colorAttachmentCount = 1,
+        pColorAttachments = &vk.RenderingAttachmentInfo {
+            sType = .RENDERING_ATTACHMENT_INFO,
+            imageView   = color_buffer.view,
+            imageLayout = .ATTACHMENT_OPTIMAL,
+            loadOp      = .CLEAR,
+            storeOp     = .STORE,
+            clearValue  = { color = { float32 = clear_color } },
+        },
+        pDepthAttachment  = &vk.RenderingAttachmentInfo {
+            sType = .RENDERING_ATTACHMENT_INFO,
+            imageView   = swapchain.depth_buffer.view,
+            imageLayout = .ATTACHMENT_OPTIMAL,
+            loadOp      = .CLEAR,
+            storeOp     = .DONT_CARE,
+            clearValue  = { depthStencil = { 0, 0 } }, // :InverseZ: use a reversed z, so 0 is the maximal value
+        },
+    }
+    
+    vk.CmdBeginRendering(cb, &rendering_info)
+}
+
+queue_submit :: proc (queue: vk.Queue, swapchain: Swapchain, frame: Frame_Data, image_index: u32, signal_value: u64, timeline_semaphore: vk.Semaphore) {
+    render_complete_and_timeline_submit_info := [] vk.SemaphoreSubmitInfo {
+        {
+            sType = .SEMAPHORE_SUBMIT_INFO,
+            semaphore = swapchain.render_completes[image_index],
+            stageMask = { .ALL_GRAPHICS },
+        },
+        {
+            sType = .SEMAPHORE_SUBMIT_INFO,
+            semaphore = timeline_semaphore,
+            value = signal_value,
+            stageMask = { .ALL_COMMANDS },
+        },
+    }
+    
+    submit_info := vk.SubmitInfo2 {
+        sType = .SUBMIT_INFO_2,
+        waitSemaphoreInfoCount = 1,
+        pWaitSemaphoreInfos = &vk.SemaphoreSubmitInfo {
+            sType = .SEMAPHORE_SUBMIT_INFO,
+            semaphore = frame.image_aquired,
+            stageMask = { .TRANSFER },
+        },
+        commandBufferInfoCount = 1,
+        pCommandBufferInfos = &vk.CommandBufferSubmitInfo {
+            sType = .COMMAND_BUFFER_SUBMIT_INFO,
+            commandBuffer = frame.command_buffer,
+        },
+        signalSemaphoreInfoCount = auto_cast len(render_complete_and_timeline_submit_info),
+        pSignalSemaphoreInfos    = raw_data(render_complete_and_timeline_submit_info),
+    }
+    vk.QueueSubmit2(queue, 1, &submit_info, 0)
+}
+
+////////////////////////////////////////////////
+
 @(thread_local) gpu_allocator_state: struct {
     initialized: bool,
     
@@ -765,6 +799,7 @@ init_gpu_allocator :: proc (ips: IPS, device: vk.Device) {
 
 gpu_make_buffer :: proc { gpu_make_buffer_slice, gpu_make_buffer_size }
 gpu_make_buffer_slice :: proc (usage: vk.BufferUsageFlags, $S: typeid / [] $E, #any_int len: umm) -> (Buffer, S) {
+    // @todo(viktor): why then even store the [] u8 in the Buffer struct?
     size   := size_of(E) * len
     buffer := gpu_make_buffer_size(usage, size)
     view   := slice_from_parts(E, &buffer.data[0], len)
@@ -790,6 +825,58 @@ gpu_make_buffer_size :: proc (usage: vk.BufferUsageFlags, #any_int size: vk.Devi
     
     flags := vk.MemoryPropertyFlags { .HOST_VISIBLE, .HOST_COHERENT }
     
+    result.memory = select_memory_type_and_allocate(requirements, flags, add_device_address_flag = .SHADER_DEVICE_ADDRESS in usage)
+    
+    check(vk.BindBufferMemory(device, result.buffer, result.memory, 0))
+    
+    raw := cast(^RawSlice) &result.data
+    raw.len = cast(int) size
+    vk.MapMemory(device, result.memory, 0, size, {}, &raw.data)
+    
+    return result
+}
+
+gpu_make_image :: proc (size: uv2, format: vk.Format, usage: vk.ImageUsageFlags, aspect_mask: vk.ImageAspectFlags, flags := vk.MemoryPropertyFlags { .DEVICE_LOCAL },) -> Image {
+    assert(gpu_allocator_state.initialized)
+    
+    device := gpu_allocator_state.device
+    memory_properties := gpu_allocator_state.memory_properties
+    
+    create_info := vk.ImageCreateInfo {
+        sType = .IMAGE_CREATE_INFO,
+        imageType     = .D2,
+        format        = format,
+        extent        = to_extent(size, 1),
+        mipLevels     = 1,
+        arrayLayers   = 1,
+        samples       = { ._1 },
+        tiling        = .OPTIMAL,
+        usage         = usage,
+        initialLayout = .UNDEFINED,
+    }
+    
+    result: Image
+    result.format = format
+    check(vk.CreateImage(device, &create_info, nil, &result.image))
+    
+    requirements: vk.MemoryRequirements
+    vk.GetImageMemoryRequirements(device, result.image, &requirements)
+    
+    result.memory = select_memory_type_and_allocate(requirements, flags)
+    
+    check(vk.BindImageMemory(device, result.image, result.memory, 0))
+    
+    result.view = create_image_view(device, result.image, format, aspect_mask)
+    
+    return result
+}
+
+select_memory_type_and_allocate :: proc (requirements: vk.MemoryRequirements, flags: vk.MemoryPropertyFlags, add_device_address_flag := false) -> vk.DeviceMemory {
+    assert(gpu_allocator_state.initialized)
+    
+    device := gpu_allocator_state.device
+    memory_properties := gpu_allocator_state.memory_properties
+    
     selected_memory_type_index: u32
     select: {
         set   := transmute(bit_set[0..=31; u32]) requirements.memoryTypeBits
@@ -804,6 +891,7 @@ gpu_make_buffer_size :: proc (usage: vk.BufferUsageFlags, #any_int size: vk.Devi
         assert(false, "No compatible memory type found")
     }
     
+    
     allocate_info := vk.MemoryAllocateInfo {
         sType = .MEMORY_ALLOCATE_INFO,
         allocationSize = requirements.size,
@@ -814,17 +902,27 @@ gpu_make_buffer_size :: proc (usage: vk.BufferUsageFlags, #any_int size: vk.Devi
         sType = .MEMORY_ALLOCATE_FLAGS_INFO,
         flags = { .DEVICE_ADDRESS },
     }
-    if .SHADER_DEVICE_ADDRESS in usage {
+    if add_device_address_flag {
         allocate_info.pNext = &info_for_device_address
     }
     
-    check(vk.AllocateMemory(device, &allocate_info, nil, &result.memory))
+
+    memory: vk.DeviceMemory
+    check(vk.AllocateMemory(device, &allocate_info, nil, &memory))
     
-    check(vk.BindBufferMemory(device, result.buffer, result.memory, 0))
+    return memory
+}
+
+create_image_view :: proc (device: vk.Device, image: vk.Image, format: vk.Format, aspect_mask: vk.ImageAspectFlags, level_count: u32 = 1) -> vk.ImageView {
+    result: vk.ImageView
     
-    raw := cast(^RawSlice) &result.data
-    raw.len = cast(int) size
-    vk.MapMemory(device, result.memory, 0, size, {}, &raw.data)
+    check(vk.CreateImageView(device, &vk.ImageViewCreateInfo {
+        sType = .IMAGE_VIEW_CREATE_INFO,
+        image = image,
+        viewType = .D2,
+        format = format,
+        subresourceRange = { aspectMask = aspect_mask, levelCount = level_count, layerCount = 1 },
+    }, nil, &result))
     
     return result
 }
@@ -874,98 +972,22 @@ gpu_delete_buffer :: proc (buffer: Buffer) {
     assert(gpu_allocator_state.initialized)
     device := gpu_allocator_state.device
     
-    vk.FreeMemory(device,    buffer.memory, nil)
     vk.DestroyBuffer(device, buffer.buffer, nil)
+    vk.FreeMemory(device,    buffer.memory, nil)
+}
+
+gpu_delete_image :: proc (image: Image) {
+    assert(gpu_allocator_state.initialized)
+    device := gpu_allocator_state.device
+    
+    vk.DestroyImageView(device, image.view, nil)
+    vk.DestroyImage(device,     image.image, nil)
+    vk.FreeMemory(device,       image.memory, nil)
 }
 
 ////////////////////////////////////////////////
 
-begin_rendering :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, image_index: u32, depth_image: vk.Image, depth_image_view: vk.ImageView, clear_color: v4) {
-    swapchain_info := &swapchain.infos[image_index]
-    
-    begin_transition_images()
-        append_image_memory_barrier_2(swapchain_info.image, { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT }, { .COLOR_ATTACHMENT_READ, . COLOR_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL)
-        append_image_memory_barrier_2(depth_image, { .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .UNDEFINED, { .EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, aspect_mask = { .DEPTH, .STENCIL })
-    end_transition_images(cb)
-    
-    
-    rendering_info := vk.RenderingInfo {
-        sType = .RENDERING_INFO, 
-        renderArea = { extent = vk_to_extent(swapchain.size) },
-        layerCount = 1,
-        colorAttachmentCount = 1,
-        pColorAttachments = &vk.RenderingAttachmentInfo {
-            sType = .RENDERING_ATTACHMENT_INFO,
-            imageView = swapchain_info.view,
-            imageLayout = .ATTACHMENT_OPTIMAL,
-            loadOp = .CLEAR,
-            storeOp = .STORE,
-            clearValue = { color = { float32 = clear_color } },
-        },
-        pDepthAttachment  = &vk.RenderingAttachmentInfo {
-            sType = .RENDERING_ATTACHMENT_INFO,
-            imageView = depth_image_view,
-            imageLayout = .ATTACHMENT_OPTIMAL,
-            loadOp = .CLEAR,
-            storeOp = .DONT_CARE,
-            clearValue = { depthStencil = { 1, 0 } },
-        },
-    }
-    
-    vk.CmdBeginRendering(cb, &rendering_info)
-}
-
-end_rendering :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, image_index: u32) {
-    swapchain_info := &swapchain.infos[image_index]
-    
-    vk.CmdEndRendering(cb)
-    
-    ////////////////////////////////////////////////
-    
-    begin_transition_images()
-        append_image_memory_barrier_2(swapchain_info.image, { .COLOR_ATTACHMENT_OUTPUT }, { .COLOR_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, {}, {}, .PRESENT_SRC_KHR)
-    end_transition_images(cb)
-}
-
-queue_submit :: proc (queue: vk.Queue, swapchain: Swapchain, frame: Frame_Data, image_index: u32, signal_value: u64, timeline_semaphore: vk.Semaphore) {
-    swapchain_info := &swapchain.infos[image_index]
-    
-    render_complete_and_timeline_submit_info := [] vk.SemaphoreSubmitInfo {
-        {
-            sType = .SEMAPHORE_SUBMIT_INFO,
-            semaphore = swapchain_info.render_completed,
-            stageMask = { .ALL_GRAPHICS },
-        },
-        {
-            sType = .SEMAPHORE_SUBMIT_INFO,
-            semaphore = timeline_semaphore,
-            value = signal_value,
-            stageMask = { .ALL_COMMANDS },
-        },
-    }
-    
-    submit_info := vk.SubmitInfo2 {
-        sType = .SUBMIT_INFO_2,
-        waitSemaphoreInfoCount = 1,
-        pWaitSemaphoreInfos = &vk.SemaphoreSubmitInfo {
-            sType = .SEMAPHORE_SUBMIT_INFO,
-            semaphore = frame.image_aquired,
-            stageMask = { .COLOR_ATTACHMENT_OUTPUT },
-        },
-        commandBufferInfoCount = 1,
-        pCommandBufferInfos = &vk.CommandBufferSubmitInfo {
-            sType = .COMMAND_BUFFER_SUBMIT_INFO,
-            commandBuffer = frame.command_buffer,
-        },
-        signalSemaphoreInfoCount = auto_cast len(render_complete_and_timeline_submit_info),
-        pSignalSemaphoreInfos = raw_data(render_complete_and_timeline_submit_info),
-    }
-    vk.QueueSubmit2(queue, 1, &submit_info, 0)
-}
-
-////////////////////////////////////////////////
-
-vk_create_semaphore :: proc (device: vk.Device, flags: vk.SemaphoreCreateFlags = {}, timeline_initial_value: Maybe(u64) = nil) -> vk.Semaphore {
+create_semaphore :: proc (device: vk.Device, flags: vk.SemaphoreCreateFlags = {}, timeline_initial_value: Maybe(u64) = nil) -> vk.Semaphore {
     create_info := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO, flags = flags }
     
     if timeline_value, is_timeline := timeline_initial_value.?; is_timeline {
@@ -982,7 +1004,7 @@ vk_create_semaphore :: proc (device: vk.Device, flags: vk.SemaphoreCreateFlags =
     return result
 }
 
-vk_create_fence :: proc (device: vk.Device, flags: vk.FenceCreateFlags = {}) -> vk.Fence {
+create_fence :: proc (device: vk.Device, flags: vk.FenceCreateFlags = {}) -> vk.Fence {
     result: vk.Fence
     check(vk.CreateFence(device, &vk.FenceCreateInfo { sType = .FENCE_CREATE_INFO, flags = flags }, nil, &result))
     return result
@@ -990,15 +1012,15 @@ vk_create_fence :: proc (device: vk.Device, flags: vk.FenceCreateFlags = {}) -> 
 
 ////////////////////////////////////////////////
 
-vk_to_extent :: proc { vk_to_extent_2, vk_to_extent_3 }
-vk_to_extent_2 :: proc (size: uv2) -> vk.Extent2D {
+to_extent :: proc { to_extent_2, to_extent_3 }
+to_extent_2 :: proc (size: uv2) -> vk.Extent2D {
     result := vk.Extent2D {
         width  = size.x, 
         height = size.y,
     }
     return result
 }
-vk_to_extent_3 :: proc (size: uv2, depth: u32) -> vk.Extent3D {
+to_extent_3 :: proc (size: uv2, depth: u32) -> vk.Extent3D {
     result := vk.Extent3D {
         width  = size.x, 
         height = size.y,

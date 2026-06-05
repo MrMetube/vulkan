@@ -163,6 +163,8 @@ void main(in payload Task_Result input, uniform Push_Data push,
         Vertex vertex = vertex_buffer[vertex_index];
         
         v3 p = v3(vertex.px, vertex.py, vertex.pz);
+        p.z *= -1; // :InverseZ:
+        
         // 0..255 -> 0..2 -> -1..1
         v3 n = v3(vertex.nx, vertex.ny, vertex.nz) / 127.0 - 1.0;
         v2 t = v2(vertex.tu, vertex.tv);

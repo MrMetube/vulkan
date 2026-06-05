@@ -17,7 +17,8 @@ import vk "vendor:vulkan"
 
 Optimized :: ODIN_OPTIMIZATION_MODE == .Speed
 
-VSync :: true && (!Optimized)
+VSync :: true when !Optimized else false
+
 MaxFramesInFlight :: 2
 
 ////////////////////////////////////////////////
@@ -104,28 +105,12 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    allocator: vma.Allocator
-    {
-        vma_vulkan_functions := vma.create_vulkan_functions()
-        
-        allocator_create_info := vma.Allocator_Create_Info {
-            flags            = { .Buffer_Device_Address },
-            instance         = ips.instance,
-            physical_device  = ips.physical_device,
-            device           = device,
-            vulkan_functions = &vma_vulkan_functions,
-        }
-        check(vma.create_allocator(allocator_create_info, &allocator))
-    }
-        
-    ////////////////////////////////////////////////
-    
     swapchain: Swapchain
     
     swapchain.format    = get_swapchain_format(ips)
     swapchain.depth_buffer.format = get_depth_buffer_format(ips)
     
-    recreate_swapchain(ips, device, sdl_get_window_size(window), allocator, &swapchain)
+    recreate_swapchain(ips, device, sdl_get_window_size(window), &swapchain)
     
     ////////////////////////////////////////////////
     
@@ -166,7 +151,23 @@ main :: proc () {
         pos.xyz = v3{0, -10, 10}
         pos.xz += arm(t * Tau)
     }
-
+    
+    ////////////////////////////////////////////////
+    
+    allocator: vma.Allocator
+    {
+        vma_vulkan_functions := vma.create_vulkan_functions()
+        
+        allocator_create_info := vma.Allocator_Create_Info {
+            flags            = { .Buffer_Device_Address },
+            instance         = ips.instance,
+            physical_device  = ips.physical_device,
+            device           = device,
+            vulkan_functions = &vma_vulkan_functions,
+        }
+        check(vma.create_allocator(allocator_create_info, &allocator))
+    }
+    
     ////////////////////////////////////////////////
     
     textures: [3] Image
@@ -219,7 +220,7 @@ main :: proc () {
             
             mem.copy_non_overlapping(image_src_allocation_info.mapped_data, raw_data(loaded_texture.data), len(loaded_texture.data))
             
-            fence_once := vk_create_fence(device)
+            fence_once := create_fence(device)
             defer vk.DestroyFence(device, fence_once, nil)
             
             cb_once: vk.CommandBuffer
@@ -239,8 +240,8 @@ main :: proc () {
             
             begin_transition_images()
                 // @note(viktor): check if these src masks are correct
-                append_image_memory_barrier_2(texture.image, {}, {}, .UNDEFINED, {.TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
-            end_transition_images(cb_once)
+                append_image_memory_barrier_2(texture.image, {}, .UNDEFINED, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
+            end_transition_images(cb_once, {}, { .TRANSFER })
             
             copy_regions := make([dynamic] vk.BufferImageCopy, context.temp_allocator)
             for level in 0..<loaded_texture.mip_levels {
@@ -256,8 +257,8 @@ main :: proc () {
             vk.CmdCopyBufferToImage(cb_once, image_src_buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
             
             begin_transition_images()
-                append_image_memory_barrier_2(texture.image, {.TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
-            end_transition_images(cb_once)
+                append_image_memory_barrier_2(texture.image, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
+            end_transition_images(cb_once, { .TRANSFER }, { .FRAGMENT_SHADER })
             
             check(vk.EndCommandBuffer(cb_once))
             
@@ -407,7 +408,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    timeline_semaphore := vk_create_semaphore(device, timeline_initial_value = MaxFramesInFlight)
+    timeline_semaphore := create_semaphore(device, timeline_initial_value = MaxFramesInFlight)
     defer_destroy(vk.DestroySemaphore, timeline_semaphore)
     
     ////////////////////////////////////////////////
@@ -495,7 +496,7 @@ main :: proc () {
             
             vk.DeviceWaitIdle(device)
             
-            recreate_swapchain(ips, device, sdl_get_window_size(window), allocator, &swapchain)
+            recreate_swapchain(ips, device, sdl_get_window_size(window), &swapchain)
         }
         
         if should_recreate_pipeline(pipeline) {
@@ -532,8 +533,6 @@ main :: proc () {
         }
         check(acquire_result)
         
-        swapchain_info := &swapchain.infos[image_index]
-        
         ////////////////////////////////////////////////
         
         // @note(viktor): QueuePool must be reset before use, but that would require a whole cmd begin-end.
@@ -563,11 +562,12 @@ main :: proc () {
         
         copy(frame.buffer.data, to_bytes(&shader_data))
         
-        draws: [100] Mesh_Draw
+        draws: [1000] Mesh_Draw
         for &draw, i in draws {
             p := v3{}
-            p.x = linear_blend(cast(f32) -2, 2,  cast(f32) (i%10) / 10) + 0.5/10
-            p.y = linear_blend(cast(f32) -2, 2,  cast(f32) (i/10) / 10) + 0.5/10
+            p.x = linear_blend(cast(f32) -2, 2, cast(f32) (i/100)    / 10)
+            p.y = linear_blend(cast(f32) -2, 2, cast(f32) (i%100/10) / 10)
+            p.z = linear_blend(cast(f32) -2, 2, cast(f32) (i%10)     / 10)
             
             t := la.matrix4_translate(p)
             r := la.matrix4_from_quaternion(la.quaternion_from_euler_angles_f32(expand_values(object_rotation), .XYX))
@@ -594,13 +594,20 @@ main :: proc () {
         
         check(vk.BeginCommandBuffer(cb, &vk.CommandBufferBeginInfo { sType = .COMMAND_BUFFER_BEGIN_INFO, flags = { .ONE_TIME_SUBMIT } }))
         
-        vk.CmdResetQueryPool(cb, query_pool, 0, QueryPoolSize)
         // @todo(viktor): make a basic region based profiler out of the labels
+        vk.CmdResetQueryPool(cb, query_pool, 0, QueryPoolSize)
         vk.CmdWriteTimestamp(cb, { .BOTTOM_OF_PIPE }, query_pool, 0)
         
         ////////////////////////////////////////////////
         
-        begin_rendering(cb, swapchain, image_index, swapchain.depth_buffer.image, swapchain.depth_buffer.view, {0.07, 0.07, 0.07, 1})
+        begin_transition_images()
+            append_image_memory_barrier_2(swapchain.color_buffer.image, {}, .UNDEFINED, { .COLOR_ATTACHMENT_WRITE },         .COLOR_ATTACHMENT_OPTIMAL)
+            append_image_memory_barrier_2(swapchain.depth_buffer.image, {}, .UNDEFINED, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .DEPTH_STENCIL_ATTACHMENT_OPTIMAL, { .DEPTH, .STENCIL })
+        end_transition_images(cb, { .BOTTOM_OF_PIPE }, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS })
+        
+        begin_rendering(cb, swapchain, swapchain.color_buffer, image_index, {0.07, 0.07, 0.07, 1})
+        
+        ////////////////////////////////////////////////
         
         vk.CmdSetViewport(cb, 0, 1, &vk.Viewport {
             x      = 0,
@@ -611,7 +618,7 @@ main :: proc () {
             maxDepth = 1,
         })
         
-        vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D { extent = vk_to_extent(swapchain.size) })
+        vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D { extent = to_extent(swapchain.size) })
         
         vk.CmdBindPipeline(cb, .GRAPHICS, pipeline.pipeline)
         
@@ -628,11 +635,7 @@ main :: proc () {
         
         
         for index in 0..<len(draws) {
-            push_data := Push_Data {
-                address    = frame.deviceAddress,
-                mesh_index = cast(u32) index,
-            }
-            vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader.stages, 0, size_of(Push_Data), &push_data)
+            vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader.stages, 0, size_of(Push_Data), &Push_Data { address = frame.deviceAddress, mesh_index = cast(u32) index })
             
             count := mesh_info.meshlet_count
             // :TaskShader: each task shader should later spawn 32 meshshaders
@@ -640,13 +643,32 @@ main :: proc () {
             vk.CmdDrawMeshTasksEXT(cb, count, 1, 1)
         }
         
-        end_rendering(cb, swapchain, image_index)
+        ////////////////////////////////////////////////
+        
+        vk.CmdEndRendering(cb)
+        
+        begin_transition_images()
+            append_image_memory_barrier_2(swapchain.color_buffer.image, { .COLOR_ATTACHMENT_WRITE }, .COLOR_ATTACHMENT_OPTIMAL, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
+            append_image_memory_barrier_2(swapchain.images[image_index], {}, .UNDEFINED, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
+        end_transition_images(cb, { .COLOR_ATTACHMENT_OUTPUT }, { .TRANSFER })
+        
+        vk.CmdCopyImage(cb, swapchain.color_buffer.image, .TRANSFER_SRC_OPTIMAL, swapchain.images[image_index], .TRANSFER_DST_OPTIMAL, 1, &vk.ImageCopy {
+            srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
+            dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
+            extent         = to_extent(swapchain.size, 1),
+        })
+        
+        begin_transition_images()
+            append_image_memory_barrier_2(swapchain.images[image_index], { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, {}, .PRESENT_SRC_KHR)
+        end_transition_images(cb, { .TRANSFER }, {})
         
         ////////////////////////////////////////////////
         
         vk.CmdWriteTimestamp(cb, { .BOTTOM_OF_PIPE }, query_pool, 1)
         
         vk.EndCommandBuffer(cb)
+        
+        ////////////////////////////////////////////////
         
         queue_submit(queue, swapchain, frame, image_index, signal_value, timeline_semaphore)
         
@@ -655,10 +677,10 @@ main :: proc () {
         present_info := vk.PresentInfoKHR {
             sType = .PRESENT_INFO_KHR,
             waitSemaphoreCount = 1,
-            pWaitSemaphores = &swapchain_info.render_completed,
-            swapchainCount = 1,
-            pSwapchains = &swapchain.swapchain,
-            pImageIndices = &image_index,
+            pWaitSemaphores    = &swapchain.render_completes[image_index],
+            swapchainCount     = 1,
+            pSwapchains        = &swapchain.swapchain,
+            pImageIndices      = &image_index,
         }
         
         present_result := vk.QueuePresentKHR(queue, &present_info)
@@ -681,8 +703,9 @@ main :: proc () {
     gpu_delete_buffer(vertex_buffer)
     gpu_delete_buffer(meshlet_buffer)
     gpu_delete_buffer(meshlet_data_buffer)
+    gpu_delete_buffer(draw_buffer)
     
-    destroy_swapchain(device, &swapchain, allocator)
+    destroy_swapchain(device, &swapchain)
     vk.DestroyDescriptorUpdateTemplate(device, vertex_descriptor_update_template, nil)
     destroy_pipeline(device, pipeline)
     
