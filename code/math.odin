@@ -47,6 +47,7 @@ lane_true  :: cast(lane_u32) 0xffff_ffff
 lane_offset :: lane_u32{0, 1, 2, 3, 4, 5, 6, 7} when LaneWidth == 8 else ( lane_u32{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15} when LaneWidth == 16 else lane_u32{0, 1, 2, 3})
 
 m4 :: matrix[4,4] f32
+q32 :: quaternion128
 
 Rectangle   :: struct($T: typeid) { min, max: T }
 Rectangle2  :: Rectangle(v2)

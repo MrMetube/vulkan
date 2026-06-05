@@ -9,3 +9,9 @@ typealias v3 = float3;
 typealias v4 = float4;
 typealias m3 = float3x3;
 typealias m4 = float4x4;
+
+typealias q4 = float4; // quaternion
+
+v3 rotate (q4 q, v3 v) {
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}

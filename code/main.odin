@@ -59,8 +59,8 @@ Push_Data :: struct {
 
 // @volatile shader.slang
 Draw_Globals :: struct {
-    projection: m4,
     view:       m4,
+    projection: m4,
     light_pos:  [4] v4,
     
     meshlet_count: u32,
@@ -68,7 +68,9 @@ Draw_Globals :: struct {
 
 // @volatile shader.slang
 Draw_Mesh :: struct #align(16) {
-    model:  m4,
+    p:           v3,
+    scale:       f32,
+    orientation: q32,
 }
 
 // @volatile shader.slang
@@ -127,8 +129,8 @@ main :: proc () {
     
     mesh_info: Mesh_Info
     {
-        mesh := load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
-        // mesh := load_mesh_from_obj("models/bunny.obj", context.temp_allocator)
+        // mesh := load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
+        mesh := load_mesh_from_obj("models/bunny.obj", context.temp_allocator)
         // mesh := load_mesh_from_obj("models/lucy_280k.obj", context.temp_allocator)
         
         optimize_mesh(&mesh, context.temp_allocator)
@@ -557,41 +559,41 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        shader_data.projection = la.matrix4_perspective(45 * RadPerDeg, cast(f32) swapchain.size.x / cast(f32) swapchain.size.y, 0.1, 128)
-        shader_data.view = la.matrix4_translate(cam_pos)
+        projection_reversed_z :: proc (fov_y, aspect_w_h, near_z: f32) -> m4 { // :ReversedZ:
+            f := 1 / tan(fov_y / 2)
+            a := f / aspect_w_h
+            b := f
+            c := near_z
+            // due to homogenous coordinates, z is effectively 1/z
+            result := m4 {
+                a, 0, 0, 0,
+                0, b, 0, 0,
+                0, 0, 0, c,
+                0, 0, 1, 0, // -1 in the original blog post
+            }
+            
+            return result
+        }
+        
+        shader_data.projection = projection_reversed_z(70 * RadPerDeg, cast(f32) swapchain.size.x / cast(f32) swapchain.size.y, 0.01)
+        shader_data.view       = translate(1, cam_pos)
+        
+        
         shader_data.meshlet_count = mesh_info.meshlet_count
         
         copy(frame.buffer.data, to_bytes(&shader_data))
         
-        draws: [1000] Draw_Mesh
+        entropy := seed_random_series(57546)
+        draws: [500] Draw_Mesh
         for &draw, i in draws {
-            p := v3{}
-            p.x = linear_blend(cast(f32) -2, 2, cast(f32) (i/100)    / 10)
-            p.y = linear_blend(cast(f32) -2, 2, cast(f32) (i%100/10) / 10)
-            p.z = linear_blend(cast(f32) -2, 2, cast(f32) (i%10)     / 10)
+            p := random_bilateral(&entropy, v3) * 30
+            p.z += 40
             
-            t := la.matrix4_translate(p)
-            r := la.matrix4_from_quaternion(la.quaternion_from_euler_angles_f32(expand_values(object_rotation), .XYX))
-            s := la.matrix4_scale(cast(f32) 1.0 / 10)
-            
-            draw.model = t * r * s
+            draw.p           = p
+            draw.scale       = linear_blend(cast(f32) 1.5, 4, square(random_unilateral(&entropy, f32)))
+            draw.orientation = la.quaternion_angle_axis(/* random_unilateral(&entropy, f32) * Tau */ cast(f32) 0, random_bilateral(&entropy, v3))
+            draw.orientation = la.quaternion_from_euler_angles_f32(expand_values(object_rotation), .XYX) * draw.orientation
         }
-        
-        /* :ReversedZ:
-            f = 1 / tan(fov_y_radians / 2)
-            glm::mat4(
-                f / aspect_w_h, 0,     0,  0,
-                             0, f,     0,  0,
-                             0, 0,     0, -1, // 1 says niagara
-                             0, 0, zNear,  0,
-                )
-            
-            
-            )
-            
-        
-        
-        */
         
         copy(db_view, draws[:])
         
@@ -620,7 +622,7 @@ main :: proc () {
         begin_transition_images()
             append_image_memory_barrier_2(swapchain.color_buffer.image, {}, .UNDEFINED, { .COLOR_ATTACHMENT_WRITE },         .COLOR_ATTACHMENT_OPTIMAL)
             append_image_memory_barrier_2(swapchain.depth_buffer.image, {}, .UNDEFINED, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .DEPTH_STENCIL_ATTACHMENT_OPTIMAL, { .DEPTH, .STENCIL })
-        end_transition_images(cb, { .BOTTOM_OF_PIPE }, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS })
+        end_transition_images(cb, { .BOTTOM_OF_PIPE }, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS })
         
         begin_rendering(cb, swapchain, swapchain.color_buffer, image_index, {0.07, 0.07, 0.07, 1})
         

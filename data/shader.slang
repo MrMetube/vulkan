@@ -1,4 +1,4 @@
-static const bool Debug = false;
+static const bool Debug = !false;
 
 ////////////////////////////////////////////////
 
@@ -14,8 +14,8 @@ struct Push_Data {
 
 // @volatile
 struct Draw_Globals {
-    m4 projection;
     m4 view;
+    m4 projection;
     v4 light_pos[4];
     
     u32 meshlet_count;
@@ -23,7 +23,9 @@ struct Draw_Globals {
 
 // @volatile
 struct Draw_Mesh {
-    m4  model;
+    v3 p;
+    f32 scale;
+    q4  orientation;
 }
 
 // @volatile
@@ -82,7 +84,6 @@ void main(uniform Draw_Globals *globals, uint group_id : SV_GroupID, uint thread
     uint meshlet_index  = meshlet_group_offset + thread_index;
     // v4 cone = meshlet_buffer[meshlet_index].cone;
     
-    // cone.xyz = normalize(mul((m3) globals->model, cone.xyz));
     // if (!cone_cull(cone.xyz, cone.w, v3(0, 0, 1))) {
     //     uint index = meshlet_count.add(1);
     //     result.indices[index] = (u8) thread_index;
@@ -132,15 +133,14 @@ void main(in payload Task_Result input, uniform Push_Data push,
         meshlet = meshlet_buffer[meshlet_index];
     }
     
-    m4 model_view = mul(globals.view, draw.model);
+    m4 view = globals.view;
     
-    // @todo(viktor): apparently i need more data for a perspective correct culling
-    // v4 cone  = meshlet.cone;
-    // cone.xyz = normalize(mul((m3) transpose(model_view.invertse)), cone.xyz));
-    // if (cone_cull(cone.xyz, cone.w, v3(0, 0, 1))) {
-    //     SetMeshOutputCounts(0, 0);
-    //     return;
-    // }
+    v4 cone = meshlet.cone;
+    cone.xyz = rotate(draw.orientation, cone.xyz);
+    if (cone_cull(cone.xyz, cone.w, v3(0, 0, 1))) {
+        SetMeshOutputCounts(0, 0);
+        return;
+    }
     
     SetMeshOutputCounts(meshlet.vertex_count, meshlet.triangle_count);
     
@@ -149,22 +149,24 @@ void main(in payload Task_Result input, uniform Push_Data push,
     uint index_offset  = vertex_offset + meshlet.vertex_count;
     for (int i = thread_index; i < meshlet.vertex_count; i += MeshWidth) {
         uint vertex_index = meshlet_data_buffer[vertex_offset + i];
-        
         Vertex vertex = vertex_buffer[vertex_index];
         
         v3 p = v3(vertex.px, vertex.py, vertex.pz);
-        p.z *= -1; // :ReversedZ:
+        p = rotate(draw.orientation, p);
+        p *= draw.scale;
+        p += draw.p;
+        v4 view_p = v4(p, 1);
         
-        // 0..255 -> 0..2 -> -1..1
         v3 n = v3(vertex.nx, vertex.ny, vertex.nz) / 127.0 - 1.0;
+        // @todo(viktor): fix normal rotation
         v2 t = v2(vertex.tu, vertex.tv);
         
         Mesh_Result result;
-        v4 view_p = mul(model_view, v4(p, 1));
+        view_p = mul(globals.view, view_p);
         
-        result.normal = mul((m3) model_view, n);
+        result.pos    = mul(globals.projection, mul(globals.view, view_p));
+        result.normal = mul((m3) globals.view, n);
         result.uv = t;
-        result.pos = mul(globals.projection, view_p);
         
         // Calculate view vectors required for lighting
         for (int li = 0; li < 4; li++) {
@@ -172,12 +174,12 @@ void main(in payload Task_Result input, uniform Push_Data push,
         }
         result.view_vec = -view_p.xyz;
         
-        out_vertices[i] = result;
-        
         if (Debug) {
             uint mhash = hash(meshlet_index);
             result.debug_color = v3(f32(mhash & 255), f32((mhash >> 8) & 255), f32((mhash >> 16) & 255)) / 255;
         }
+        
+        out_vertices[i] = result;
     }
     
     // @speed as the indices are really [3] u8, we could write them packed into a u32 and get 4x throughput
