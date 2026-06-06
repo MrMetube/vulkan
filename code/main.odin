@@ -20,9 +20,11 @@ MaxFramesInFlight :: 2
 
 ////////////////////////////////////////////////
 
-Frame_Data :: struct {
-    buffer:        Buffer,
-    deviceAddress: vk.DeviceAddress,
+// @todo(viktor): should vk.DeviceAddress be part of the buffer, so that it is all in one member
+Frame :: struct {
+    buffer:      Buffer,
+    globals_cpu: ^Draw_Globals,
+    globals_gpu: vk.DeviceAddress,
     
     command_buffer: vk.CommandBuffer,
     image_aquired:  vk.Semaphore,
@@ -149,10 +151,10 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    shader_data: Draw_Globals
+    draw_globals: Draw_Globals
     
-    for &pos, index in shader_data.light_pos {
-        t := clamp_01_to_range(cast(f32) 0, cast(f32) len(shader_data.light_pos), cast(f32) index)
+    for &pos, index in draw_globals.light_pos {
+        t := clamp_01_to_range(cast(f32) 0, cast(f32) len(draw_globals.light_pos), cast(f32) index)
         pos.xyz = v3{0, -10, 10}
         pos.xz += arm(t * Tau)
     }
@@ -172,10 +174,10 @@ main :: proc () {
             
             texture = gpu_make_image({loaded_texture.width, loaded_texture.height}, loaded_texture.format, { .TRANSFER_DST, .SAMPLED }, { .COLOR }, mip_levels = loaded_texture.mip_levels)
             
-            source_buffer := gpu_make_buffer_size({ .TRANSFER_SRC }, len(loaded_texture.data))
-            defer gpu_delete_buffer(source_buffer)
+            source_buffer, source_buffer_data := gpu_make_buffer({ .TRANSFER_SRC }, [] u8, len(loaded_texture.data))
+            defer gpu_delete(source_buffer)
             
-            copy(source_buffer.data, loaded_texture.data)
+            copy(source_buffer_data, loaded_texture.data)
             
             ////////////////////////////////////////////////
             
@@ -527,7 +529,7 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        frame : Frame_Data = frames[absolute_frame_index % MaxFramesInFlight]
+        frame := frames[absolute_frame_index % MaxFramesInFlight]
         absolute_frame_index += 1
         
         acquire_result := vk.AcquireNextImageKHR(device, swapchain.swapchain, Timeout, frame.image_aquired, {}, &image_index)
@@ -555,13 +557,12 @@ main :: proc () {
             return result
         }
         
-        shader_data.projection = projection_reversed_z(70 * RadPerDeg, cast(f32) swapchain.size.x / cast(f32) swapchain.size.y, 0.01)
-        shader_data.view       = translate(1, cam_pos)
+        draw_globals.projection = projection_reversed_z(70 * RadPerDeg, cast(f32) swapchain.size.x / cast(f32) swapchain.size.y, 0.01)
+        draw_globals.view       = translate(1, cam_pos)
         
         
-        shader_data.meshlet_count = mesh_info.meshlet_count
-        
-        copy(frame.buffer.data, to_bytes(&shader_data))
+        draw_globals.meshlet_count = mesh_info.meshlet_count
+        frame.globals_cpu^ = draw_globals
         
         entropy := seed_random_series(5175546)
         @(static) draws: [18000] Draw
@@ -648,7 +649,7 @@ main :: proc () {
         vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline.layout, 1, 1, &textures_descriptor_set, 0, nil)
         
         
-        vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader.stages, 0, size_of(Push_Data), &Push_Data { address = frame.deviceAddress })
+        vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader.stages, 0, size_of(Push_Data), &Push_Data { address = frame.globals_gpu })
         // @todo(viktor): this is deprecated, use vkCmdDrawMeshTasksIndirect2EXT
         vk.CmdDrawMeshTasksIndirectEXT(cb, draw_buffer.buffer, auto_cast offset_of(Draw{}.command), len(draws), size_of(Draw))
         
@@ -706,20 +707,20 @@ main :: proc () {
 	check(vk.DeviceWaitIdle(device))
     
     for frame in frames {
-        gpu_delete_buffer(frame.buffer)
+        gpu_delete(frame.buffer)
     }
     
-    gpu_delete_buffer(vertex_buffer)
-    gpu_delete_buffer(meshlet_buffer)
-    gpu_delete_buffer(meshlet_data_buffer)
-    gpu_delete_buffer(draw_buffer)
+    gpu_delete(vertex_buffer)
+    gpu_delete(meshlet_buffer)
+    gpu_delete(meshlet_data_buffer)
+    gpu_delete(draw_buffer)
     
     destroy_swapchain(device, &swapchain)
     vk.DestroyDescriptorUpdateTemplate(device, vertex_descriptor_update_template, nil)
     destroy_pipeline(device, pipeline)
     
     for texture in textures {
-        gpu_delete_image(texture)
+        gpu_delete(texture)
     }
     
     destroy_all_handles(device)

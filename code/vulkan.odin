@@ -56,8 +56,6 @@ Image :: struct {
 Buffer :: struct {
     buffer: vk.Buffer,
     memory: vk.DeviceMemory,
-    
-    data: [] u8,
 }
 
 ////////////////////////////////////////////////
@@ -326,15 +324,15 @@ destroy_swapchain :: proc (device: vk.Device, swapchain: ^Swapchain) {
     // @note(viktor): the images are allocated for use, so we can just drop the handles
     clear(&swapchain.images)
     
-    gpu_delete_image(swapchain.depth_buffer)
-    gpu_delete_image(swapchain.color_buffer)
+    gpu_delete(swapchain.depth_buffer)
+    gpu_delete(swapchain.color_buffer)
     
     vk.DestroySwapchainKHR(device, swapchain.swapchain, nil)
 }
 
 ////////////////////////////////////////////////
 
-create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips: IPS) -> (vk.Device, vk.Queue, (#soa [] Frame_Data), vk.CommandPool) {
+create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips: IPS) -> (vk.Device, vk.Queue, [] Frame, vk.CommandPool) {
     device: vk.Device
     queue_family_index: u32
     
@@ -458,16 +456,16 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
     
     ////////////////////////////////////////////////
     
-    frames := make(#soa [] Frame_Data, MaxFramesInFlight, context.allocator)
+    frames := make([] Frame, MaxFramesInFlight, context.allocator)
     
     for &frame in frames {
-        frame.buffer = gpu_make_buffer({ .SHADER_DEVICE_ADDRESS }, size_of(Draw_Globals))
+        frame.buffer, frame.globals_cpu = gpu_make_buffer_struct({ .SHADER_DEVICE_ADDRESS }, Draw_Globals)
         
         device_address_info := vk.BufferDeviceAddressInfo {
             sType  = .BUFFER_DEVICE_ADDRESS_INFO,
             buffer = frame.buffer.buffer,
         }
-        frame.deviceAddress = vk.GetBufferDeviceAddress(device, &device_address_info)
+        frame.globals_gpu = vk.GetBufferDeviceAddress(device, &device_address_info)
         
         frame.image_aquired = create_semaphore(device)
         defer_destroy(vk.DestroySemaphore, frame.image_aquired)
@@ -490,7 +488,14 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
             commandPool        = command_pool,
             commandBufferCount = cast(u32) len(frames),
         }
-        check(vk.AllocateCommandBuffers(device, &command_buffer_allocate_info, &frames.command_buffer[0]))
+        
+        command_buffers := make([] vk.CommandBuffer, len(frames), context.temp_allocator)
+        check(vk.AllocateCommandBuffers(device, &command_buffer_allocate_info, &command_buffers[0]))
+        
+        for &frame, i in frames {
+            frame.command_buffer = command_buffers[i]
+        }
+        
         defer_destroy(vk.DestroyCommandPool, command_pool)
     }
     
@@ -741,7 +746,7 @@ begin_rendering :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, color_buffe
     vk.CmdBeginRendering(cb, &rendering_info)
 }
 
-queue_submit :: proc (queue: vk.Queue, swapchain: Swapchain, frame: Frame_Data, image_index: u32, signal_value: u64, timeline_semaphore: vk.Semaphore) {
+queue_submit :: proc (queue: vk.Queue, swapchain: Swapchain, frame: Frame, image_index: u32, signal_value: u64, timeline_semaphore: vk.Semaphore) {
     render_complete_and_timeline_submit_info := [] vk.SemaphoreSubmitInfo {
         {
             sType = .SEMAPHORE_SUBMIT_INFO,
@@ -797,13 +802,18 @@ init_gpu_allocator :: proc (ips: IPS, device: vk.Device) {
 
 gpu_make_buffer :: proc { gpu_make_buffer_slice, gpu_make_buffer_size }
 gpu_make_buffer_slice :: proc (usage: vk.BufferUsageFlags, $S: typeid / [] $E, #any_int len: umm) -> (Buffer, S) {
-    // @todo(viktor): why then even store the [] u8 in the Buffer struct?
     size   := size_of(E) * len
-    buffer := gpu_make_buffer_size(usage, size)
-    view   := slice_from_parts(E, &buffer.data[0], len)
+    buffer, pointer := gpu_make_buffer_size(usage, size)
+    view   := slice_from_parts(E, pointer, len)
     return buffer, view
 }
-gpu_make_buffer_size :: proc (usage: vk.BufferUsageFlags, #any_int size: vk.DeviceSize) -> Buffer {
+gpu_make_buffer_struct :: proc (usage: vk.BufferUsageFlags, $S: typeid) -> (Buffer, ^S) {
+    size   := size_of(E)
+    buffer, pointer := gpu_make_buffer_size(usage, size)
+    data := cast(^S) pointer
+    return buffer, data
+}
+gpu_make_buffer_size :: proc (usage: vk.BufferUsageFlags, #any_int size: vk.DeviceSize) -> (Buffer, pmm) {
     assert(gpu_allocator_state.initialized)
     
     device := gpu_allocator_state.device
@@ -826,11 +836,10 @@ gpu_make_buffer_size :: proc (usage: vk.BufferUsageFlags, #any_int size: vk.Devi
     
     check(vk.BindBufferMemory(device, result.buffer, result.memory, 0))
     
-    raw := cast(^RawSlice) &result.data
-    raw.len = cast(int) size
-    vk.MapMemory(device, result.memory, 0, size, {}, &raw.data)
+    pointer: pmm
+    vk.MapMemory(device, result.memory, 0, size, {}, &pointer)
     
-    return result
+    return result, pointer
 }
 
 gpu_make_image :: proc (size: uv2, format: vk.Format, usage: vk.ImageUsageFlags, aspect_mask: vk.ImageAspectFlags, flags := vk.MemoryPropertyFlags { .DEVICE_LOCAL }, mip_levels : u32 = 1) -> Image {
@@ -956,7 +965,7 @@ void uploadBuffer(VkDevice device, VkCommandPool commandPool, VkCommandBuffer co
     VK_CHECK(vkDeviceWaitIdle(device));
 }
 */
-
+gpu_delete :: proc { gpu_delete_buffer, gpu_delete_image }
 gpu_delete_buffer :: proc (buffer: Buffer) {
     assert(gpu_allocator_state.initialized)
     device := gpu_allocator_state.device
