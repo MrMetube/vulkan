@@ -5,10 +5,7 @@ import "base:intrinsics"
 import "core:fmt"
 import "core:os"
 import "core:time"
-import "core:mem"
 import la "core:math/linalg"
-
-import "lib:vma"
 
 import sdl "vendor:sdl3"
 import vk  "vendor:vulkan"
@@ -162,22 +159,6 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    allocator: vma.Allocator
-    {
-        vma_vulkan_functions := vma.create_vulkan_functions()
-        
-        allocator_create_info := vma.Allocator_Create_Info {
-            flags            = { .Buffer_Device_Address },
-            instance         = ips.instance,
-            physical_device  = ips.physical_device,
-            device           = device,
-            vulkan_functions = &vma_vulkan_functions,
-        }
-        check(vma.create_allocator(allocator_create_info, &allocator))
-    }
-    
-    ////////////////////////////////////////////////
-    
     textures: [3] Image
     texture_descriptors: [len(textures)] vk.DescriptorImageInfo
     
@@ -189,44 +170,14 @@ main :: proc () {
             
             loaded_texture := load_ktx_texture(filename, context.temp_allocator)
             
-            image_create_info := vk.ImageCreateInfo {
-                sType = .IMAGE_CREATE_INFO,
-                imageType     = .D2,
-                format        = loaded_texture.format,
-                extent        = { width = loaded_texture.width, height = loaded_texture.height, depth = 1 },
-                mipLevels     = loaded_texture.mip_levels,
-                arrayLayers   = 1,
-                samples       = { ._1 },
-                tiling        = .OPTIMAL,
-                usage         = { .TRANSFER_DST, .SAMPLED },
-                initialLayout = .UNDEFINED,
-            }
+            texture = gpu_make_image({loaded_texture.width, loaded_texture.height}, loaded_texture.format, { .TRANSFER_DST, .SAMPLED }, { .COLOR }, mip_levels = loaded_texture.mip_levels)
             
-            image_allocation_create_info := vma.Allocation_Create_Info { usage = .Auto }
-            check(vma.create_image(allocator, image_create_info, image_allocation_create_info, &texture.image, &texture.allocation, nil))
+            source_buffer := gpu_make_buffer_size({ .TRANSFER_SRC }, len(loaded_texture.data))
+            defer gpu_delete_buffer(source_buffer)
             
-            texture.view = create_image_view(device, texture.image, image_create_info.format, { .COLOR }, loaded_texture.mip_levels)
-            defer_destroy(vk.DestroyImageView, texture.view)
+            copy(source_buffer.data, loaded_texture.data)
             
-            image_src_buffer: vk.Buffer
-            image_src_allocation: vma.Allocation
-            image_src_allocation_info: vma.Allocation_Info
-            
-            image_src_buffer_create_info := vk.BufferCreateInfo {
-                sType = .BUFFER_CREATE_INFO,
-                size  = auto_cast len(loaded_texture.data),
-                usage = { .TRANSFER_SRC },
-            }
-            
-            image_src_allocation_create_info := vma.Allocation_Create_Info {
-                flags = { .Host_Access_Sequential_Write, .Mapped },
-                usage = .Auto,
-            }
-            
-            check(vma.create_buffer(allocator, image_src_buffer_create_info, image_src_allocation_create_info, &image_src_buffer, &image_src_allocation, &image_src_allocation_info))
-            defer vma.destroy_buffer(allocator, image_src_buffer, image_src_allocation)
-            
-            mem.copy_non_overlapping(image_src_allocation_info.mapped_data, raw_data(loaded_texture.data), len(loaded_texture.data))
+            ////////////////////////////////////////////////
             
             fence_once := create_fence(device)
             defer vk.DestroyFence(device, fence_once, nil)
@@ -245,9 +196,7 @@ main :: proc () {
             }
             check(vk.BeginCommandBuffer(cb_once, &cb_once_begin_info))
             
-            
             begin_transition_images()
-                // @note(viktor): check if these src masks are correct
                 append_image_memory_barrier_2(texture.image, {}, .UNDEFINED, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
             end_transition_images(cb_once, {}, { .TRANSFER })
             
@@ -262,7 +211,7 @@ main :: proc () {
                 })
             }
             
-            vk.CmdCopyBufferToImage(cb_once, image_src_buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
+            vk.CmdCopyBufferToImage(cb_once, source_buffer.buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
             
             begin_transition_images()
                 append_image_memory_barrier_2(texture.image, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
@@ -770,9 +719,8 @@ main :: proc () {
     destroy_pipeline(device, pipeline)
     
     for texture in textures {
-        vma.destroy_image(allocator, texture.image, texture.allocation)
+        gpu_delete_image(texture)
     }
-	vma.destroy_allocator(allocator)
     
     destroy_all_handles(device)
     

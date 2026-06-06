@@ -1,6 +1,6 @@
 package build
 
-optimize :: !false
+optimize :: false
 pedantic :: false
 
 main :: proc () {

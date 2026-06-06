@@ -6,7 +6,6 @@ import "core:fmt"
 
 import vk "vendor:vulkan"
 import sdl "vendor:sdl3"
-import "lib:vma"
 
 // @naming
 IPS :: struct {
@@ -51,9 +50,7 @@ Image :: struct {
     view:   vk.ImageView,
     memory: vk.DeviceMemory,
     
-    // @cleanup only used by loaded ktx textures anymore
-    allocation: vma.Allocation,
-	sampler:    vk.Sampler,
+	sampler: vk.Sampler,
 }
 
 Buffer :: struct {
@@ -836,7 +833,7 @@ gpu_make_buffer_size :: proc (usage: vk.BufferUsageFlags, #any_int size: vk.Devi
     return result
 }
 
-gpu_make_image :: proc (size: uv2, format: vk.Format, usage: vk.ImageUsageFlags, aspect_mask: vk.ImageAspectFlags, flags := vk.MemoryPropertyFlags { .DEVICE_LOCAL }) -> Image {
+gpu_make_image :: proc (size: uv2, format: vk.Format, usage: vk.ImageUsageFlags, aspect_mask: vk.ImageAspectFlags, flags := vk.MemoryPropertyFlags { .DEVICE_LOCAL }, mip_levels : u32 = 1) -> Image {
     assert(gpu_allocator_state.initialized)
     
     device := gpu_allocator_state.device
@@ -846,7 +843,7 @@ gpu_make_image :: proc (size: uv2, format: vk.Format, usage: vk.ImageUsageFlags,
         imageType     = .D2,
         format        = format,
         extent        = to_extent(size, 1),
-        mipLevels     = 1,
+        mipLevels     = mip_levels,
         arrayLayers   = 1,
         samples       = { ._1 },
         tiling        = .OPTIMAL,
@@ -865,7 +862,14 @@ gpu_make_image :: proc (size: uv2, format: vk.Format, usage: vk.ImageUsageFlags,
     
     check(vk.BindImageMemory(device, result.image, result.memory, 0))
     
-    result.view = create_image_view(device, result.image, format, aspect_mask)
+    view_create_info := vk.ImageViewCreateInfo {
+        sType = .IMAGE_VIEW_CREATE_INFO,
+        image = result.image,
+        viewType = .D2,
+        format = format,
+        subresourceRange = { aspectMask = aspect_mask, levelCount = mip_levels, layerCount = 1 },
+    }
+    check(vk.CreateImageView(device, &view_create_info, nil, &result.view))
     
     return result
 }
@@ -910,20 +914,6 @@ select_memory_type_and_allocate :: proc (requirements: vk.MemoryRequirements, fl
     check(vk.AllocateMemory(device, &allocate_info, nil, &memory))
     
     return memory
-}
-
-create_image_view :: proc (device: vk.Device, image: vk.Image, format: vk.Format, aspect_mask: vk.ImageAspectFlags, level_count: u32 = 1) -> vk.ImageView {
-    result: vk.ImageView
-    
-    check(vk.CreateImageView(device, &vk.ImageViewCreateInfo {
-        sType = .IMAGE_VIEW_CREATE_INFO,
-        image = image,
-        viewType = .D2,
-        format = format,
-        subresourceRange = { aspectMask = aspect_mask, levelCount = level_count, layerCount = 1 },
-    }, nil, &result))
-    
-    return result
 }
 
 /* :ScratchBuffer:
