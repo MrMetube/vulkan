@@ -25,16 +25,15 @@ recompile_shader :: proc (input, output: string, allocator: Allocator) -> (Shade
     cmd: Cmd
     cmd.allocator = context.temp_allocator
     
-    append(&cmd, "slangc")
-    append(&cmd, "-target", "spirv",)
+    append(&cmd, "C:/tools/VulkanSDK/1.4.350.0/Bin/glslc.exe")
+    append(&cmd, "--target-env=vulkan1.4")
     append(&cmd, "-o", output)
     if ODIN_DEBUG {
-        append(&cmd, "-g1") // @note(viktor): embed shader source code for renderdoc
+        append(&cmd, "-g") // @note(viktor): embed shader source code for renderdoc
     }
     if Optimized {
-        append(&cmd, "-Omaximal")
+        append(&cmd, "-O")
     }
-    append(&cmd, "-fvk-invert-y")
     append(&cmd, input)
     
     result: Shader

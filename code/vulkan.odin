@@ -36,7 +36,7 @@ Swapchain_Info :: struct {
 Pipeline :: struct {
     pipeline: vk.Pipeline,
     layout:   vk.PipelineLayout,
-    shader:   Shader,
+    shader_stages: vk.ShaderStageFlags,
 }
 
 Shader :: struct {
@@ -395,6 +395,7 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
             
             synchronization2 = true,
             dynamicRendering = true,
+            maintenance4 = true, // @note(viktor): allows using layout(local_size...)
             
         pNext = &vk.PhysicalDeviceVulkan12Features {
             sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
@@ -550,45 +551,62 @@ end_transition_images :: proc (command_buffer: vk.CommandBuffer, src_stage_mask,
 
 ////////////////////////////////////////////////
 
-shader_source := "shader.slang"
-shader_output := "shader.spirv"
+shader_input_files := [?] string {
+    "meshlet.task",
+    "meshlet.mesh",
+    "meshlet.frag",
+}
+
+Shader_File :: struct {
+    input:  string, 
+    output: string,
+}
 
 should_recreate_pipeline :: proc (pipeline: Pipeline) -> bool {
     if pipeline.pipeline == 0 {
         return true
     }
     
-    if is_newer(shader_source, shader_output) {
-        return true
+    for input in shader_input_files {
+        output := fmt.tprintf("%v.spv", input)
+        if is_newer(input, output) {
+            return true
+        }
     }
     
     return false
 }
 
 create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, set_layouts: [] vk.DescriptorSetLayout, old: Pipeline = {}) -> Pipeline {
-    shader, ok := recompile_shader(shader_source, shader_output, context.temp_allocator)
-    if !ok {
-        if old.pipeline == 0 || old.layout == 0 {
-            assert(false, "Failed to create graphics pipeline")
-        }
-        return old
-    }
+    shaders: [len(shader_input_files)] Shader
     
-    shader_module_create_info := vk.ShaderModuleCreateInfo {
-        sType = .SHADER_MODULE_CREATE_INFO,
-        codeSize = len(shader.bytes),
-        pCode    = cast(^u32) &shader.bytes[0],
+    // @todo(viktor): make a Catalogue of Shaders and each frame, ask it to iterate us all changed, so that we can just recompile those
+    // I only want to declare the filepath once.
+    // It should then also cache the bytes in non-temporary storage so that unchanged files are able to be reused. (it could be its own allocator/ an allocator for all file stuff later on)
+    for input, index in shader_input_files {
+        output := fmt.tprintf("%v.spv", input)
+        shader, ok := recompile_shader(input, output, context.temp_allocator)
+        if !ok {
+            if old.pipeline == 0 || old.layout == 0 {
+            assert(false, "Failed to create graphics pipeline")
+            }
+            return old
+        }
+        shaders[index] = shader
     }
     
     ////////////////////////////////////////////////
     
-    // @study: is a pipeline cache still a good optimization?
+    // @speed is a pipeline cache still a good optimization?
     result: Pipeline
-    result.shader = shader
-        
+    for shader in shaders {
+        result.shader_stages += shader.stages
+    }
+    
+    // @correctness can we just define it for all stages, even if they don't need it?
     ranges := [?] vk.PushConstantRange {
         {
-            stageFlags = shader.stages,
+            stageFlags = result.shader_stages,
             size       = size_of(Push_Data),
         },
     }
@@ -604,13 +622,21 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, set_l
     check(vk.CreatePipelineLayout(device, &pipeline_layout_create_info, nil, &result.layout))
     
     shader_stages: [dynamic; 16] vk.PipelineShaderStageCreateInfo
-    for stage in shader.stages {
-        append(&shader_stages, vk.PipelineShaderStageCreateInfo{ 
-            sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
-            stage = { stage }, 
-            pName = "main", 
-            pNext = &shader_module_create_info,
-        })
+    module_infos: [dynamic; 16] vk.ShaderModuleCreateInfo
+    for shader in shaders {
+        for stage in shader.stages {
+            append(&module_infos, vk.ShaderModuleCreateInfo {
+                sType    = .SHADER_MODULE_CREATE_INFO,
+                codeSize = len(shader.bytes),
+                pCode    = cast(^u32) &shader.bytes[0],
+            })
+            append(&shader_stages, vk.PipelineShaderStageCreateInfo { 
+                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
+                stage = { stage }, 
+                pName = "main", 
+                pNext = &module_infos[len(module_infos) - 1],
+            })
+        }
     }
     
     dynamic_states := [] vk.DynamicState { .VIEWPORT, .SCISSOR }

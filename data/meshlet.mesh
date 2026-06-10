@@ -1,0 +1,169 @@
+#version 460
+
+#extension GL_EXT_mesh_shader : require
+#extension GL_EXT_shader_explicit_arithmetic_types: require
+#extension GL_ARB_shader_draw_parameters: require
+
+#include "common.h"
+
+#define MeshWidth 32
+
+////////////////////////////////////////////////
+
+// @volatile
+#define VertexLimit   64
+#define TriangleLimit 84
+
+// @volatile
+layout(push_constant) uniform Push_Data {
+    Draw_Globals globals;
+} push;
+
+// @volatile
+struct Vertex {
+    float px, py, pz, p_pad;
+    uint8_t  nx, ny, nz, n_pad;
+	float tu, tv;
+};
+
+
+layout(binding = 0) readonly buffer Vertices {
+	Vertex vertex_buffer[];
+};
+
+layout(binding = 1) readonly buffer Meshlets {
+	Meshlet meshlet_buffer[];
+};
+
+layout(binding = 2) readonly buffer MeshletData {
+	uint meshlet_data_buffer[];
+};
+
+layout(binding = 3) readonly buffer Draws {
+	Draw draw_buffer[];
+};
+
+taskPayloadSharedEXT Task_Result task_result;
+
+////////////////////////////////////////////////
+
+uint hash(uint a) {
+    a = (a + 0x7ed55d16) + (a << 12);
+    a = (a ^ 0xc761c23c) ^ (a >> 19);
+    a = (a + 0x165667b1) + (a << 5);
+    a = (a + 0xd3a2646c) ^ (a << 9);
+    a = (a + 0xfd7046c5) + (a << 3);
+    a = (a ^ 0xb55a4f09) ^ (a >> 16);
+    return a;
+}
+
+////////////////////////////////////////////////
+
+layout(local_size_x = MeshWidth, local_size_y = 1, local_size_z = 1) in;
+layout(triangles, max_vertices = VertexLimit, max_primitives = TriangleLimit) out;
+
+layout(location = 0) out Mesh_Result mesh_result[];
+
+void main() {
+    uint thread_index = gl_LocalInvocationID.x;
+	uint meshlet_index = task_result.indices[gl_WorkGroupID.x];
+    uint draw_index = task_result.draw_index;
+    
+    Draw_Globals globals = push.globals;
+    Draw draw = draw_buffer[draw_index];
+    
+    Meshlet meshlet;
+    
+    if (meshlet_index < globals.meshlet_count) {
+        meshlet = meshlet_buffer[meshlet_index];
+    }
+    
+    mat4 view = globals.view;
+    
+    // {
+    //     vec3 cone_axis   = vec3(meshlet.cone_axis[0], meshlet.cone_axis[1], meshlet.cone_axis[2]) / 127.0;
+    //     float cone_cutoff = float(meshlet.cone_cutoff) / 127.0;
+    //     vec3 center      = meshlet.center;
+    //     float radius     = meshlet.radius;
+        
+    //     cone_axis = rotate(draw.orientation, cone_axis);
+    //     center    = rotate(draw.orientation, center) * draw.scale + draw.p;
+    //     radius   *= draw.scale;
+        
+    //     vec3 camera_position = vec3(view[0].w, view[1].w, view[2].w);
+        
+    //     if (cone_cull(center, radius, cone_axis, cone_cutoff, camera_position)) {
+    //         SetMeshOutputsEXT(0, 0);
+    //         return;
+    //     }
+    // }
+    
+    uint vertex_count = meshlet.vertex_count;
+    uint triangle_count = meshlet.triangle_count;
+    
+    if (thread_index == 0) {
+        SetMeshOutputsEXT(vertex_count, triangle_count);
+    }
+    
+    uint vertex_offset = meshlet.data_offset;
+    uint index_offset  = vertex_offset + meshlet.vertex_count;
+        
+    for (uint i = thread_index; i < vertex_count; i += MeshWidth) {
+        uint vertex_index = meshlet_data_buffer[vertex_offset + i];
+        Vertex vertex = vertex_buffer[vertex_index];
+        
+        vec3 p = vec3(vertex.px, vertex.py, vertex.pz);
+        p = rotate(draw.orientation, p);
+        p *= draw.scale;
+        p += draw.p;
+        vec4 view_p = vec4(p, 1.0);
+        
+        vec3 n = vec3(vertex.nx, vertex.ny, vertex.nz) / 127.0 - 1.0;
+        vec2 t = vec2(vertex.tu, vertex.tv);
+        
+        Mesh_Result result;
+        view_p = globals.view * view_p;
+        
+        vec4 position = globals.projection * (globals.view * view_p);
+        result.normal = mat3(globals.view) * n;
+        result.uv     = t;
+        
+        for (int li = 0; li < 4; li++) {
+            result.light_vec[li] = globals.light_pos[li].xyz - view_p.xyz;
+        }
+        result.view_vec = -view_p.xyz;
+        
+        if (Debug) {
+            uint mhash = hash(meshlet_index);
+            result.debug_color = vec3(float(mhash & 255), float((mhash >> 8) & 255), float((mhash >> 16) & 255)) / 255.0;
+        }
+        
+        gl_MeshVerticesEXT[i].gl_Position = position;
+        mesh_result[i] = result;
+    }
+    
+    uint group_count    = (triangle_count * 3 + 3) / 4;
+    for (uint i = thread_index; i < group_count; i += MeshWidth) {
+        uint word_index = index_offset + (i * 3);
+        
+        uint u0 = meshlet_data_buffer[word_index + 0];
+        uint u1 = meshlet_data_buffer[word_index + 1];
+        uint u2 = meshlet_data_buffer[word_index + 2];
+        
+        uint triangle_index = i * 4;
+        
+        if (triangle_index + 0 < triangle_count) {
+            gl_PrimitiveTriangleIndicesEXT[triangle_index + 0] = uvec3((u0 >>  0) & 0xFF, (u0 >>  8) & 0xFF, (u0 >> 16) & 0xFF);
+        }
+        if (triangle_index + 1 < triangle_count) {
+            gl_PrimitiveTriangleIndicesEXT[triangle_index + 1] = uvec3((u0 >> 24) & 0xFF, (u1 >>  0) & 0xFF, (u1 >>  8) & 0xFF);
+        }
+        if (triangle_index + 2 < triangle_count) {
+            gl_PrimitiveTriangleIndicesEXT[triangle_index + 2] = uvec3((u1 >> 16) & 0xFF, (u1 >> 24) & 0xFF, (u2 >>  0) & 0xFF);
+        }
+        if (triangle_index + 3 < triangle_count) {
+            gl_PrimitiveTriangleIndicesEXT[triangle_index + 3] = uvec3((u2 >>  8) & 0xFF, (u2 >> 16) & 0xFF, (u2 >> 24) & 0xFF);
+        }
+    }
+    
+}

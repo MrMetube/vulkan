@@ -1,4 +1,2 @@
-- :TaskShader: working task shader with visibility/backface culling
-  - [Youtube link](https://www.youtube.com/watch?v=KckRq7Rm3Mw&list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&index=1&pp=iAQBsAgC)
 - do a depth prepass where we only render into the depthbuffer
   - then do a second pass, where depthtest is set to Equal, in which we compute the color

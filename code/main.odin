@@ -80,7 +80,7 @@ Meshlet :: struct #align(16) {
     cone_axis:   [3] i8,
     cone_cutoff: i8,
     
-    data_offset:    u32, // data_offset:][:vertexcount stores vertex indices, we store indices packed in 4b units after that
+    data_offset:    u32, // data_offset:][:vertexcount
     vertex_count:   u8,
     triangle_count: u8,
 }
@@ -265,19 +265,19 @@ main :: proc () {
                 binding = 1,
                 descriptorType = .STORAGE_BUFFER,
                 descriptorCount = 1,
-                stageFlags = { .MESH_EXT }, // :TaskShader: + { .TASK_EXT }
+                stageFlags = { .MESH_EXT, .TASK_EXT },
             },
             {
                 binding = 2,
                 descriptorType = .STORAGE_BUFFER,
                 descriptorCount = 1,
-                stageFlags = { .MESH_EXT }, // :TaskShader: + { .TASK_EXT }
+                stageFlags = { .MESH_EXT, .TASK_EXT },
             },
             {
                 binding = 3,
                 descriptorType = .STORAGE_BUFFER,
                 descriptorCount = 1,
-                stageFlags = { .MESH_EXT }, // :TaskShader: + { .TASK_EXT }
+                stageFlags = { .MESH_EXT, .TASK_EXT },
             },
         }
         
@@ -546,12 +546,13 @@ main :: proc () {
             a := f / aspect_w_h
             b := f
             c := near_z
+            // vulkan uses a inverted y-axis, so we invert it back to the regular y+ = up here
             // due to homogenous coordinates, z is effectively 1/z
             result := m4 {
-                a, 0,  0, 0,
-                0, b,  0, 0,
-                0, 0,  0, c,
-                0, 0, -1, 0, // -1 in the original blog post
+                a,  0,  0, 0,
+                0, -b,  0, 0,
+                0,  0,  0, c,
+                0,  0, -1, 0, // -1 in the original blog post
             }
             
             return result
@@ -577,8 +578,7 @@ main :: proc () {
             draw.orientation = la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX) * draw.orientation
             draw.command = {
                 // @volatile this division needs to match the TaskWidth
-                // :TaskShader: each one dispatches 32 so we need to divide this by 32 later on
-                groupCountX = mesh_info.meshlet_count,
+                groupCountX = (mesh_info.meshlet_count + 31) / 32,
                 groupCountY = 1,
                 groupCountZ = 1,
             }
@@ -649,7 +649,7 @@ main :: proc () {
         vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline.layout, 1, 1, &textures_descriptor_set, 0, nil)
         
         
-        vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader.stages, 0, size_of(Push_Data), &Push_Data { address = frame.globals_gpu })
+        vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader_stages, 0, size_of(Push_Data), &Push_Data { address = frame.globals_gpu })
         // @todo(viktor): this is deprecated, use vkCmdDrawMeshTasksIndirect2EXT
         vk.CmdDrawMeshTasksIndirectEXT(cb, draw_buffer.buffer, auto_cast offset_of(Draw{}.command), len(draws), size_of(Draw))
         

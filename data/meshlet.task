@@ -1,0 +1,84 @@
+#version 460
+
+#extension GL_EXT_mesh_shader : require
+#extension GL_EXT_shader_explicit_arithmetic_types: require
+#extension GL_ARB_shader_draw_parameters: require
+#extension GL_KHR_shader_subgroup_ballot: require
+
+#include "common.h"
+
+////////////////////////////////////////////////
+
+// @volatile
+layout(push_constant) uniform Push_Data {
+    Draw_Globals globals;
+} push;
+
+layout(binding = 1) readonly buffer Meshlets {
+	Meshlet meshlet_buffer[];
+};
+
+layout(binding = 3) readonly buffer Draws
+{
+	Draw draw_buffer[];
+};
+
+////////////////////////////////////////////////
+
+bool cone_cull(vec3 center, float radius, vec3 axis, float cutoff, vec3 camera) {
+    vec3 delta = center - camera;
+    return dot(delta, axis) > cutoff * length(delta) + radius;
+}
+
+////////////////////////////////////////////////
+
+layout(local_size_x = TaskWidth, local_size_y = 1, local_size_z = 1) in;
+
+taskPayloadSharedEXT Task_Result task_result;
+
+#define CULL true
+
+void main() {
+    uint meshlet_group_index = gl_WorkGroupID.x;
+    uint thread_index        = gl_LocalInvocationID.x;
+    
+    if (thread_index == 0) {
+        task_result.draw_index = gl_DrawID;
+    }
+        
+    uint meshlet_index = meshlet_group_index * TaskWidth + thread_index;
+    
+    Draw_Globals globals = push.globals;
+    Draw draw = draw_buffer[gl_DrawID];
+    
+    
+    if (CULL) {
+        Meshlet meshlet = meshlet_buffer[meshlet_index];
+        
+        vec3 cone_axis   = vec3(meshlet.cone_axis[0], meshlet.cone_axis[1], meshlet.cone_axis[2]) / 127.0;
+        float cone_cutoff = float(meshlet.cone_cutoff) / 127.0;
+        vec3 center      = meshlet.center;
+        float radius     = meshlet.radius;
+        
+        cone_axis = rotate(draw.orientation, cone_axis);
+        center    = rotate(draw.orientation, center) * draw.scale + draw.p;
+        radius   *= draw.scale;
+        
+        vec3 camera_position = vec3(globals.view[0].w, globals.view[1].w, globals.view[2].w);
+        
+        bool accept = !cone_cull(center, radius, cone_axis, cone_cutoff, camera_position);
+        
+        uvec4 ballot = subgroupBallot(accept);
+        uint index = subgroupBallotExclusiveBitCount(ballot); // how many threads, before this thread, had accept==true
+        if (accept) {
+            task_result.indices[index] = meshlet_index;
+        }
+        
+        uint count = subgroupBallotBitCount(ballot); // how many threads, in total, had accept==true
+        
+        EmitMeshTasksEXT(count, 1, 1);
+    } else {
+        task_result.indices[thread_index] = meshlet_index;
+        EmitMeshTasksEXT(TaskWidth, 1, 1);
+    }
+}
