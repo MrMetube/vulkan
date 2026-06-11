@@ -139,10 +139,10 @@ main :: proc () {
         
         optimize_mesh(&mesh, context.temp_allocator)
         
-        meshlet_count := build_meshlets(&mesh, context.temp_allocator)
+        build_meshlets(&mesh, context.temp_allocator)
         
         mesh_info.triangle_count = cast(u32) len(mesh.indices)
-        mesh_info.meshlet_count  = meshlet_count
+        mesh_info.meshlet_count  = cast(u32) len(mesh.meshlets)
         
         copy(vb_view, mesh.vertices)
         copy(mb_view, mesh.meshlets)

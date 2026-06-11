@@ -27,6 +27,7 @@ layout(buffer_reference, buffer_reference_align = 8) buffer Draw_Globals {
     mat4 view;
     mat4 projection;
     vec4 light_pos[4];
+    
     uint meshlet_count;
 };
 

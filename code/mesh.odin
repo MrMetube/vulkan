@@ -21,7 +21,7 @@ optimize_mesh :: proc (mesh: ^Mesh, allocator: Allocator) {
     mesh ^= result
 }
 
-build_meshlets :: proc (mesh: ^Mesh, allocator: Allocator) -> u32 {
+build_meshlets :: proc (mesh: ^Mesh, allocator: Allocator) {
     max_vertices  :: MaxVertices
     max_triangles :: MaxTriangles 
     cone_weight :: 0 // 0 when not culling, otherwise 0..1 
@@ -34,13 +34,11 @@ build_meshlets :: proc (mesh: ^Mesh, allocator: Allocator) -> u32 {
     
     actual_count := meshoptimizer.buildMeshlets(&meshlets[0], &vertices[0], &indices[0], &mesh.indices[0], len(mesh.indices), cast(^f32) &mesh.vertices[0], len(mesh.vertices), size_of(mesh.vertices[0]), max_vertices, max_triangles, cone_weight)
     
-    // :TaskShader: either round of the size, or in shader check the bounds
-    aligned_count := align(32, actual_count)
-    mesh.meshlets = make([] Meshlet, aligned_count, allocator)
+    mesh.meshlets = make([] Meshlet, actual_count, allocator)
     
     meshlet_data := make([dynamic] u32, allocator)
     
-    for &dest, index in mesh.meshlets[:actual_count] {
+    for &dest, index in mesh.meshlets {
         source := &meshlets[index]
         
         source_vertices := vertices[source.vertex_offset:]
@@ -75,6 +73,4 @@ build_meshlets :: proc (mesh: ^Mesh, allocator: Allocator) -> u32 {
     for &meshlet in mesh.meshlets {
         meshoptimizer.optimizeMeshlet(&mesh.meshlet_data[meshlet.data_offset], cast(^u8) &mesh.meshlet_data[meshlet.data_offset + auto_cast meshlet.vertex_count], auto_cast meshlet.triangle_count, auto_cast meshlet.vertex_count)
     }
-    
-    return cast(u32) actual_count
 }

@@ -52,21 +52,25 @@ void main() {
     Draw draw = draw_buffer[gl_DrawID];
     
     
+    uint count;
     if (CULL) {
         Meshlet meshlet = meshlet_buffer[meshlet_index];
         
-        vec3 cone_axis   = vec3(meshlet.cone_axis[0], meshlet.cone_axis[1], meshlet.cone_axis[2]) / 127.0;
-        float cone_cutoff = float(meshlet.cone_cutoff) / 127.0;
-        vec3 center      = meshlet.center;
-        float radius     = meshlet.radius;
-        
-        cone_axis = rotate(draw.orientation, cone_axis);
-        center    = rotate(draw.orientation, center) * draw.scale + draw.p;
-        radius   *= draw.scale;
-        
-        vec3 camera_position = vec3(globals.view[0].w, globals.view[1].w, globals.view[2].w);
-        
-        bool accept = !cone_cull(center, radius, cone_axis, cone_cutoff, camera_position);
+        bool accept = false;
+        if (meshlet_index < globals.meshlet_count) {
+            vec3 cone_axis   = vec3(meshlet.cone_axis[0], meshlet.cone_axis[1], meshlet.cone_axis[2]) / 127.0;
+            float cone_cutoff = float(meshlet.cone_cutoff) / 127.0;
+            vec3 center      = meshlet.center;
+            float radius     = meshlet.radius;
+            
+            cone_axis = rotate(draw.orientation, cone_axis);
+            center    = rotate(draw.orientation, center) * draw.scale + draw.p;
+            radius   *= draw.scale;
+            
+            vec3 camera_position = vec3(globals.view[0].w, globals.view[1].w, globals.view[2].w);
+            
+            accept = !cone_cull(center, radius, cone_axis, cone_cutoff, camera_position);
+        }
         
         uvec4 ballot = subgroupBallot(accept);
         uint index = subgroupBallotExclusiveBitCount(ballot); // how many threads, before this thread, had accept==true
@@ -74,11 +78,13 @@ void main() {
             task_result.indices[index] = meshlet_index;
         }
         
-        uint count = subgroupBallotBitCount(ballot); // how many threads, in total, had accept==true
+        count = subgroupBallotBitCount(ballot); // how many threads, in total, had accept==true
         
-        EmitMeshTasksEXT(count, 1, 1);
     } else {
         task_result.indices[thread_index] = meshlet_index;
-        EmitMeshTasksEXT(TaskWidth, 1, 1);
+        
+        count = min(TaskWidth, globals.meshlet_count - meshlet_group_index * TaskWidth);
     }
+    
+    EmitMeshTasksEXT(count, 1, 1);
 }
