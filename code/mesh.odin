@@ -4,16 +4,15 @@ package main
 import "lib:meshoptimizer"
 import "lib:tobj"
 
-load_mesh :: proc (geometry: ^Geometry, filepath: string, allocator: Allocator) -> bool {
-    // @todo(viktor): dont use allocator param, if we know its temporary
-    models, _, error := tobj.load_obj_filename(filepath, allocator = allocator)
+load_mesh :: proc (geometry: ^Geometry, filepath: string, _allocator: Allocator) -> bool {
+    models, _, error := tobj.load_obj_filename(filepath, allocator = context.temp_allocator)
     if error != nil {
         return false
     }
     
     model := models[0].mesh
     
-    mesh_vertices := make([] Vertex, len(model.vertices), allocator)
+    mesh_vertices := make([] Vertex, len(model.vertices), context.temp_allocator)
     
     has_uvs := len(model.texture_coords) != 0
     
@@ -37,14 +36,23 @@ load_mesh :: proc (geometry: ^Geometry, filepath: string, allocator: Allocator) 
     
     ////////////////////////////////////////////////
     // optimize mesh
+    
+    mesh := append_into(&geometry.meshes)
+    mesh.triangle_count = cast(u32) len(mesh_indices) / 3
+    mesh.vertex_offset  = cast(u32) len(geometry.vertices)
+    mesh.vertex_count   = cast(u32) len(mesh_vertices)
+    mesh.meshlet_offset = cast(u32) len(geometry.meshlets)
+    
     {
-        remap := make([] u32, len(mesh_indices), allocator)
-        defer delete(remap, allocator)
+        remap := make([] u32, len(mesh_indices), context.temp_allocator)
         
         vertex_count := meshoptimizer.generateVertexRemap(&remap[0], &mesh_indices[0], len(mesh_indices), &mesh_vertices[0], len(mesh_vertices), size_of(Vertex))
         
-        result_vertices := make([] Vertex, vertex_count, allocator)
-        result_indices  := make([] u32,    len(mesh_indices), allocator)
+        start := mesh.vertex_offset
+        resize(&geometry.vertices, start + auto_cast vertex_count)
+        
+        result_vertices := geometry.vertices[start:][:vertex_count]
+        result_indices  := make([] u32,    len(mesh_indices), context.temp_allocator)
         
         meshoptimizer.remapVertexBuffer(&result_vertices[0], &mesh_vertices[0], len(mesh_vertices), size_of(Vertex), &remap[0])
         meshoptimizer.remapIndexBuffer(&result_indices[0],   &mesh_indices[0],  len(mesh_indices), &remap[0])
@@ -52,19 +60,9 @@ load_mesh :: proc (geometry: ^Geometry, filepath: string, allocator: Allocator) 
         meshoptimizer.optimizeVertexCache(&result_indices[0], &result_indices[0], len(result_indices), len(result_vertices))
         meshoptimizer.optimizeVertexFetch(&result_vertices[0], &result_indices[0], len(result_indices), &result_vertices[0], len(result_vertices), size_of(Vertex)) 
         
-        delete(mesh_vertices, allocator)
-        
         mesh_vertices = result_vertices
         mesh_indices  = result_indices
     }
-    
-    mesh: Mesh
-    mesh.triangle_count = cast(u32) len(mesh_indices) / 3
-    mesh.vertex_offset  = cast(u32) len(geometry.vertices)
-    mesh.vertex_count   = cast(u32) len(mesh_vertices)
-    mesh.meshlet_offset = cast(u32) len(geometry.meshlets)
-    
-    append(&geometry.vertices, ..mesh_vertices)
     
     ////////////////////////////////////////////////
     // build meshlets
@@ -76,15 +74,14 @@ load_mesh :: proc (geometry: ^Geometry, filepath: string, allocator: Allocator) 
         
         max_count := meshoptimizer.buildMeshletsBound(auto_cast len(mesh_indices), max_vertices, max_triangles)
         
-        meshlets := make([] meshoptimizer.Meshlet, max_count, context.temp_allocator)
-        vertices := make([] u32, len(mesh_indices), context.temp_allocator)
-        indices  := make([] u8,  len(mesh_indices), context.temp_allocator)
+        meshlets := make([] meshoptimizer.Meshlet, max_count,         context.temp_allocator)
+        vertices := make([] u32,                   len(mesh_indices), context.temp_allocator)
+        indices  := make([] u8,                    len(mesh_indices), context.temp_allocator)
         
         actual_count := meshoptimizer.buildMeshlets(&meshlets[0], &vertices[0], &indices[0], &mesh_indices[0], len(mesh_indices), cast(^f32) &mesh_vertices[0], len(mesh_vertices), size_of(mesh_vertices[0]), max_vertices, max_triangles, cone_weight)
         
         for source in meshlets[:actual_count] {
-            append_nothing(&geometry.meshlets)
-            dest := &geometry.meshlets[len(geometry.meshlets)-1]
+            dest := append_into(&geometry.meshlets)
             
             source_vertices := vertices[source.vertex_offset:]
             source_indices  := indices[source.triangle_offset:]
@@ -97,12 +94,8 @@ load_mesh :: proc (geometry: ^Geometry, filepath: string, allocator: Allocator) 
             
             index_groups := slice_from_parts(u32, &source_indices[0], index_group_count)
             
-            for i in 0..<source.vertex_count {
-                append(&geometry.meshlet_data, source_vertices[i])
-            }
-            for i in 0..<index_group_count {
-                append(&geometry.meshlet_data, index_groups[i])
-            }
+            append(&geometry.meshlet_data, ..source_vertices[:source.vertex_count])
+            append(&geometry.meshlet_data, ..index_groups[:index_group_count])
             
             bounds := meshoptimizer.computeMeshletBounds(&source_vertices[0], &source_indices[0], cast(uint) source.triangle_count, cast(^f32) &mesh_vertices[0], len(mesh_vertices), size_of(mesh_vertices[0]))
             
@@ -120,8 +113,6 @@ load_mesh :: proc (geometry: ^Geometry, filepath: string, allocator: Allocator) 
         
         mesh.meshlet_count = cast(u32) actual_count
     }
-    
-    append(&geometry.meshes, mesh)
     
     return true
 }

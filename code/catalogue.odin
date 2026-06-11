@@ -71,10 +71,10 @@ catalogue_setup_files :: proc (iter: ^Catalogue_Iterator($T), extensions: ..stri
                 full_path = strings.clone(info.fullpath, catalogue.allocator),
                 full_name = strings.clone(info.name, catalogue.allocator),
             })
-            append_nothing(&catalogue.values)
             
-            value = &catalogue.values[len(catalogue.values)-1]
-            entry = catalogue.entries[len(catalogue.entries)-1]
+            value = append_into(&catalogue.values)
+            entry = last(catalogue.entries)^
+            
             return value, entry, true
         }
     }

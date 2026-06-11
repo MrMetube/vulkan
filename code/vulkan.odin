@@ -592,7 +592,7 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, set_l
                 sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
                 stage = { stage }, 
                 pName = "main", 
-                pNext = &module_infos[len(module_infos) - 1],
+                pNext = last(&module_infos),
             })
         }
     }
