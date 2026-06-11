@@ -45,17 +45,17 @@ Mesh :: struct {
 
 ////////////////////////////////////////////////
 
-// @volatile shader.slang
+// @volatile shaders
 MaxVertices  :: 64
 MaxTriangles :: 84
 
-// @volatile shader.slang
+// @volatile shaders
 // @note(viktor): this is technically only used for its layout and size, which we query from the compiler
 Push_Data :: struct {
     address: vk.DeviceAddress,
 }
 
-// @volatile shader.slang
+// @volatile shaders
 Draw_Globals :: struct {
     view:       m4,
     projection: m4,
@@ -64,7 +64,7 @@ Draw_Globals :: struct {
     meshlet_count: u32,
 }
 
-// @volatile shader.slang
+// @volatile shaders
 Draw :: struct {
     command: vk.DrawMeshTasksIndirectCommandEXT, pad: u32,
     
@@ -73,7 +73,7 @@ Draw :: struct {
     scale:       f32,
 }
 
-// @volatile shader.slang
+// @volatile shaders
 Meshlet :: struct #align(16) {
     center: v3,
     radius: f32,
@@ -85,7 +85,7 @@ Meshlet :: struct #align(16) {
     triangle_count: u8,
 }
 
-// @volatile shader.slang
+// @volatile shaders
 Vertex :: struct {
     p:  v3,      p_pad: f32,
     n:  [3] u8,  n_pad: u8,
@@ -250,7 +250,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    // @volatile needs to match the bindings in shader.slang
+    // @volatile needs to match the bindings in shaders
     StorageBufferCount :: 4
     data_descriptor_set_layout: vk.DescriptorSetLayout
     {
@@ -637,7 +637,7 @@ main :: proc () {
         
         vk.CmdBindPipeline(cb, .GRAPHICS, pipeline.pipeline)
         
-        // @volatile needs to match the bindings in shader.slang 
+        // @volatile needs to match the bindings in shaders 
         descriptor_update_data := [StorageBufferCount] DescriptorUpdateData {
             { buffer = { vertex_buffer.buffer,       0, auto_cast vk.WHOLE_SIZE }},
             { buffer = { meshlet_buffer.buffer,      0, auto_cast vk.WHOLE_SIZE }},
