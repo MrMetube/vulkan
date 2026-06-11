@@ -7,42 +7,7 @@ import "core:fmt"
 
 import vk "vendor:vulkan"
 
-import "lib:tobj"
 import "lib:ktx"
-
-load_mesh_from_obj :: proc (filepath: string, allocator: Allocator) -> Mesh {
-    models, _, error := tobj.load_obj_filename(filepath, allocator = allocator)
-    assert(error == nil)
-    model := models[0].mesh
-    
-    vertices := make([] Vertex, len(model.vertices), allocator)
-    
-    has_uvs := len(model.texture_coords) != 0
-    
-    for &v, index in vertices {
-        n := model.normals[index]
-        p := model.vertices[index]
-        uv: v2
-        if has_uvs {
-            uv = model.texture_coords[index] * { 1, -1 }
-        }
-        
-        v = Vertex {
-            p  = p,
-            n  = cast([3] u8) ((n + 1) * 127),
-            uv = uv,
-        }
-    }
-    
-    
-    result: Mesh
-    result.vertices = vertices
-    result.indices  = make_shallow_copy(model.indices[:], allocator)
-    
-    return result
-}
-
-////////////////////////////////////////////////
 
 Loaded_Texture :: struct {
     format: vk.Format,

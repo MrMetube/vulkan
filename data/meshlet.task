@@ -36,7 +36,7 @@ layout(local_size_x = TaskWidth, local_size_y = 1, local_size_z = 1) in;
 
 taskPayloadSharedEXT Task_Result task_result;
 
-#define CULL true
+#define CULL !true
 
 void main() {
     uint meshlet_group_index = gl_WorkGroupID.x;
@@ -46,18 +46,17 @@ void main() {
         task_result.draw_index = gl_DrawID;
     }
         
-    uint meshlet_index = meshlet_group_index * TaskWidth + thread_index;
-    
     Draw_Globals globals = push.globals;
     Draw draw = draw_buffer[gl_DrawID];
     
+    uint meshlet_index = meshlet_group_index * TaskWidth + thread_index + draw.meshlet_offset;
     
     uint count;
     if (CULL) {
         Meshlet meshlet = meshlet_buffer[meshlet_index];
         
         bool accept = false;
-        if (meshlet_index < globals.meshlet_count) {
+        if (meshlet_index < (draw.meshlet_count + draw.meshlet_offset)) {
             vec3 cone_axis   = vec3(meshlet.cone_axis[0], meshlet.cone_axis[1], meshlet.cone_axis[2]) / 127.0;
             float cone_cutoff = float(meshlet.cone_cutoff) / 127.0;
             vec3 center      = meshlet.center;
@@ -83,7 +82,7 @@ void main() {
     } else {
         task_result.indices[thread_index] = meshlet_index;
         
-        count = min(TaskWidth, globals.meshlet_count - meshlet_group_index * TaskWidth);
+        count = min(TaskWidth, draw.meshlet_count - (meshlet_group_index * TaskWidth + 0));
     }
     
     EmitMeshTasksEXT(count, 1, 1);

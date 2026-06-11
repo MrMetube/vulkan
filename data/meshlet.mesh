@@ -74,31 +74,11 @@ void main() {
     
     Meshlet meshlet;
     
-    if (meshlet_index < globals.meshlet_count) {
+    if (meshlet_index < (draw.meshlet_count + draw.meshlet_offset)) {
         meshlet = meshlet_buffer[meshlet_index];
     }
     
-    mat4 view = globals.view;
-    
-    // {
-    //     vec3 cone_axis   = vec3(meshlet.cone_axis[0], meshlet.cone_axis[1], meshlet.cone_axis[2]) / 127.0;
-    //     float cone_cutoff = float(meshlet.cone_cutoff) / 127.0;
-    //     vec3 center      = meshlet.center;
-    //     float radius     = meshlet.radius;
-        
-    //     cone_axis = rotate(draw.orientation, cone_axis);
-    //     center    = rotate(draw.orientation, center) * draw.scale + draw.p;
-    //     radius   *= draw.scale;
-        
-    //     vec3 camera_position = vec3(view[0].w, view[1].w, view[2].w);
-        
-    //     if (cone_cull(center, radius, cone_axis, cone_cutoff, camera_position)) {
-    //         SetMeshOutputsEXT(0, 0);
-    //         return;
-    //     }
-    // }
-    
-    uint vertex_count = meshlet.vertex_count;
+    uint vertex_count   = meshlet.vertex_count;
     uint triangle_count = meshlet.triangle_count;
     
     if (thread_index == 0) {
@@ -106,7 +86,7 @@ void main() {
     }
     
     uint vertex_offset = meshlet.data_offset;
-    uint index_offset  = vertex_offset + meshlet.vertex_count;
+    uint index_offset  = vertex_offset + vertex_count;
         
     for (uint i = thread_index; i < vertex_count; i += MeshWidth) {
         uint vertex_index = meshlet_data_buffer[vertex_offset + i];
@@ -142,7 +122,7 @@ void main() {
         mesh_result[i] = result;
     }
     
-    uint group_count    = (triangle_count * 3 + 3) / 4;
+    uint group_count = (triangle_count * 3 + 3) / 4;
     for (uint i = thread_index; i < group_count; i += MeshWidth) {
         uint word_index = index_offset + (i * 3);
         

@@ -35,12 +35,21 @@ DescriptorUpdateData :: struct #raw_union {
     image:  vk.DescriptorImageInfo,
 }
 
-Mesh :: struct {
-    vertices: [] Vertex,
-    indices:  [] u32,
+Geometry :: struct {
+    // @todo(viktor): all this data is not needed on the cpu, we could just directly upload it to the gpu buffers
+    vertices:     [dynamic] Vertex,
+    meshlets:     [dynamic] Meshlet,
+    meshlet_data: [dynamic] u32,
     
-    meshlets: [] Meshlet,
-    meshlet_data: [] u32,
+    meshes: [dynamic] Mesh,
+}
+
+Mesh :: struct {
+    meshlet_offset: u32,
+    meshlet_count:  u32,
+    
+    // @note(viktor): just for statistics, might become unused
+    triangle_count: u32,
 }
 
 ////////////////////////////////////////////////
@@ -60,13 +69,15 @@ Draw_Globals :: struct {
     view:       m4,
     projection: m4,
     light_pos:  [4] v4,
-    
-    meshlet_count: u32,
 }
 
 // @volatile shaders
 Draw :: struct {
     command: vk.DrawMeshTasksIndirectCommandEXT, pad: u32,
+    
+    meshlet_offest: u32,
+    meshlet_count:  u32,
+    _pad2: [2] u32,
     
     orientation: q32,
     p:           v3,
@@ -131,22 +142,23 @@ main :: proc () {
         meshlet_count:  u32,
     }
     
-    mesh_info: Mesh_Info
+    geometry: Geometry
     {
-        mesh := load_mesh_from_obj("tutorial/suzanne.obj", context.temp_allocator)
-        // mesh := load_mesh_from_obj("models/bunny.obj", context.temp_allocator)
-        // mesh := load_mesh_from_obj("models/lucy_280k.obj", context.temp_allocator)
+        paths := [?] string {
+            "tutorial/suzanne.obj",
+            "models/bunny.obj",
+            "models/lucy_280k.obj",
+        }
         
-        optimize_mesh(&mesh, context.temp_allocator)
+        for path in paths {
+            if !load_mesh(&geometry, path, context.temp_allocator) {
+                fmt.eprintfln("Failed to load mesh from file `%v`", path)
+            }
+        }
         
-        build_meshlets(&mesh, context.temp_allocator)
-        
-        mesh_info.triangle_count = cast(u32) len(mesh.indices)
-        mesh_info.meshlet_count  = cast(u32) len(mesh.meshlets)
-        
-        copy(vb_view, mesh.vertices)
-        copy(mb_view, mesh.meshlets)
-        copy(mdb_view, mesh.meshlet_data)
+        copy(vb_view,  geometry.vertices[:])
+        copy(mb_view,  geometry.meshlets[:])
+        copy(mdb_view, geometry.meshlet_data[:])
     }
     
     ////////////////////////////////////////////////
@@ -591,23 +603,32 @@ main :: proc () {
         draw_globals.view       = translate(1, cam_pos)
         
         
-        draw_globals.meshlet_count = mesh_info.meshlet_count
         frame.globals_cpu^ = draw_globals
         
+        triangles_this_frame: u32
+        
         entropy := seed_random_series(5175546)
-        @(static) draws: [18000] Draw
+        @(static) draws: [50] Draw
         color_wheel := color_wheel
         for &draw in draws {
-            p := random_bilateral(&entropy, v3) * {30, 20, 60}
-            p.z -= 70
+            p := random_bilateral(&entropy, v3) * {20, 15, 30}
+            p.z -= 30
             
             draw.p           = p
-            draw.scale       = linear_blend(cast(f32) .1, .8, square(random_unilateral(&entropy, f32)))
-            draw.orientation = la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
-            draw.orientation = la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX) * draw.orientation
+            draw.scale       = linear_blend(cast(f32) 1, 4, square(random_unilateral(&entropy, f32)))
+            rotation        := la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
+            global_rotation := la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX)
+            draw.orientation = rotation * global_rotation
+            
+            mesh := random_choice(&entropy, geometry.meshes[:])
+            draw.meshlet_offest = mesh.meshlet_offset
+            draw.meshlet_count  = mesh.meshlet_count
+            
+            triangles_this_frame += mesh.triangle_count
+            
             draw.command = {
                 // @volatile this division needs to match the TaskWidth
-                groupCountX = (mesh_info.meshlet_count + 31) / 32,
+                groupCountX = (mesh.meshlet_count + 31) / 32,
                 groupCountY = 1,
                 groupCountZ = 1,
             }
@@ -622,13 +643,13 @@ main :: proc () {
         view :: proc (seconds: f64) -> time.Duration {
             return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
         }
-        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, triangles: %v, meshlets: %v, %v triangles/s, %v models/s", 
+        
+        // @todo(viktor): just accumulate triangle count and meshlet count each frame in the draw loop
+        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, triangles: %v, %v triangles/s", 
             view(cpu_time.value), 
             view(gpu_time.value), 
-            view_magnitude(mesh_info.triangle_count), 
-            view_magnitude(mesh_info.meshlet_count), 
-            view_magnitude(cast(f64) mesh_info.triangle_count * len(draws) / cpu_time.value),
-            view_magnitude(cast(f64) len(draws) / cpu_time.value)
+            view_magnitude(triangles_this_frame), 
+            view_magnitude(cast(f64) triangles_this_frame / cpu_time.value),
         ))
         
         ////////////////////////////////////////////////
