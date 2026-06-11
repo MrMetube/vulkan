@@ -33,9 +33,10 @@ layout(buffer_reference, buffer_reference_align = 8) buffer Draw_Globals {
 struct Draw {
     uint command_data[3], pad;
     
+    uint vertex_offset;
+    uint vertex_count;
     uint meshlet_offset;
     uint meshlet_count;
-    uint pad2[2];
     
     vec4  orientation;
     vec3  p;

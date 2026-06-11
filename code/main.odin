@@ -45,6 +45,9 @@ Geometry :: struct {
 }
 
 Mesh :: struct {
+    vertex_offset: u32,
+    vertex_count:  u32,
+    
     meshlet_offset: u32,
     meshlet_count:  u32,
     
@@ -53,6 +56,9 @@ Mesh :: struct {
 }
 
 ////////////////////////////////////////////////
+
+// @volatile task shader
+TaskWidth :: 32
 
 // @volatile shaders
 MaxVertices  :: 64
@@ -75,9 +81,10 @@ Draw_Globals :: struct {
 Draw :: struct {
     command: vk.DrawMeshTasksIndirectCommandEXT, pad: u32,
     
-    meshlet_offest: u32,
+    vertex_offset:  u32,
+    vertex_count:   u32,
+    meshlet_offset: u32,
     meshlet_count:  u32,
-    _pad2: [2] u32,
     
     orientation: q32,
     p:           v3,
@@ -621,14 +628,16 @@ main :: proc () {
             draw.orientation = rotation * global_rotation
             
             mesh := random_choice(&entropy, geometry.meshes[:])
-            draw.meshlet_offest = mesh.meshlet_offset
+            
+            draw.vertex_offset  = mesh.vertex_offset
+            draw.vertex_count   = mesh.vertex_count
+            draw.meshlet_offset = mesh.meshlet_offset
             draw.meshlet_count  = mesh.meshlet_count
             
             triangles_this_frame += mesh.triangle_count
             
             draw.command = {
-                // @volatile this division needs to match the TaskWidth
-                groupCountX = (mesh.meshlet_count + 31) / 32,
+                groupCountX = (mesh.meshlet_count + TaskWidth-1) / TaskWidth,
                 groupCountY = 1,
                 groupCountZ = 1,
             }

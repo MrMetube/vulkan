@@ -58,12 +58,13 @@ load_mesh :: proc (geometry: ^Geometry, filepath: string, allocator: Allocator) 
         mesh_indices  = result_indices
     }
     
-    vertex_offset := cast(u32) len(geometry.vertices)
-    append(&geometry.vertices, ..mesh_vertices)
-    
     mesh: Mesh
     mesh.triangle_count = cast(u32) len(mesh_indices) / 3
+    mesh.vertex_offset  = cast(u32) len(geometry.vertices)
+    mesh.vertex_count   = cast(u32) len(mesh_vertices)
     mesh.meshlet_offset = cast(u32) len(geometry.meshlets)
+    
+    append(&geometry.vertices, ..mesh_vertices)
     
     ////////////////////////////////////////////////
     // build meshlets
@@ -97,7 +98,7 @@ load_mesh :: proc (geometry: ^Geometry, filepath: string, allocator: Allocator) 
             index_groups := slice_from_parts(u32, &source_indices[0], index_group_count)
             
             for i in 0..<source.vertex_count {
-                append(&geometry.meshlet_data, vertex_offset + source_vertices[i])
+                append(&geometry.meshlet_data, source_vertices[i])
             }
             for i in 0..<index_group_count {
                 append(&geometry.meshlet_data, index_groups[i])

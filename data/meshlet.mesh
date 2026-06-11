@@ -89,7 +89,7 @@ void main() {
     uint index_offset  = vertex_offset + vertex_count;
         
     for (uint i = thread_index; i < vertex_count; i += MeshWidth) {
-        uint vertex_index = meshlet_data_buffer[vertex_offset + i];
+        uint vertex_index = draw.vertex_offset + meshlet_data_buffer[vertex_offset + i];
         Vertex vertex = vertex_buffer[vertex_index];
         
         vec3 p = vec3(vertex.px, vertex.py, vertex.pz);
