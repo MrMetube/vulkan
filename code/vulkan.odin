@@ -40,6 +40,9 @@ Pipeline :: struct {
 }
 
 Shader :: struct {
+    input:  string, 
+    output: string,
+    
     stages: vk.ShaderStageFlags,
     bytes:  [] u8,
 }
@@ -551,52 +554,7 @@ end_transition_images :: proc (command_buffer: vk.CommandBuffer, src_stage_mask,
 
 ////////////////////////////////////////////////
 
-shader_input_files := [?] string {
-    "meshlet.task",
-    "meshlet.mesh",
-    "meshlet.frag",
-}
-
-Shader_File :: struct {
-    input:  string, 
-    output: string,
-}
-
-should_recreate_pipeline :: proc (pipeline: Pipeline) -> bool {
-    if pipeline.pipeline == 0 {
-        return true
-    }
-    
-    for input in shader_input_files {
-        output := fmt.tprintf("%v.spv", input)
-        if is_newer(input, output) {
-            return true
-        }
-    }
-    
-    return false
-}
-
-create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, set_layouts: [] vk.DescriptorSetLayout, old: Pipeline = {}) -> Pipeline {
-    shaders: [len(shader_input_files)] Shader
-    
-    // @todo(viktor): make a Catalogue of Shaders and each frame, ask it to iterate us all changed, so that we can just recompile those
-    // I only want to declare the filepath once.
-    // It should then also cache the bytes in non-temporary storage so that unchanged files are able to be reused. (it could be its own allocator/ an allocator for all file stuff later on)
-    for input, index in shader_input_files {
-        output := fmt.tprintf("%v.spv", input)
-        shader, ok := recompile_shader(input, output, context.temp_allocator)
-        if !ok {
-            if old.pipeline == 0 || old.layout == 0 {
-            assert(false, "Failed to create graphics pipeline")
-            }
-            return old
-        }
-        shaders[index] = shader
-    }
-    
-    ////////////////////////////////////////////////
-    
+create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, set_layouts: [] vk.DescriptorSetLayout, shaders: [] Shader, old: Pipeline = {}) -> Pipeline {
     // @speed is a pipeline cache still a good optimization?
     result: Pipeline
     for shader in shaders {
@@ -622,7 +580,7 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, set_l
     check(vk.CreatePipelineLayout(device, &pipeline_layout_create_info, nil, &result.layout))
     
     shader_stages: [dynamic; 16] vk.PipelineShaderStageCreateInfo
-    module_infos: [dynamic; 16] vk.ShaderModuleCreateInfo
+    module_infos:  [dynamic; 16] vk.ShaderModuleCreateInfo
     for shader in shaders {
         for stage in shader.stages {
             append(&module_infos, vk.ShaderModuleCreateInfo {

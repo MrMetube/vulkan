@@ -3,45 +3,26 @@ package main
 import "core:fmt"
 import "core:os"
 
-is_newer :: proc (a, b: string) -> bool {
-    a_info, a_err := os.stat(a, context.temp_allocator)
-    if a_err != nil {
-        fmt.eprintfln("Failed to check modification time of file '%v': %v", a, os.error_string(a_err)) 
-        return false
-    }
-    
-    b_info, b_err := os.stat(b, context.temp_allocator)
-    if b_err == .Not_Exist {
-        return true
-    } else if b_err != nil {
-        fmt.eprintfln("Failed to check modification time of file '%v': %v", b, os.error_string(b_err)) 
-        return true
-    }
-    
-    return a_info.modification_time._nsec > b_info.modification_time._nsec
-}
-
-recompile_shader :: proc (input, output: string, allocator: Allocator) -> (Shader, bool) {
+compile_shader :: proc (shader: ^Shader, allocator: Allocator) -> bool {
     cmd: Cmd
     cmd.allocator = context.temp_allocator
     
     append(&cmd, "C:/tools/VulkanSDK/1.4.350.0/Bin/glslc.exe")
     append(&cmd, "--target-env=vulkan1.4")
-    append(&cmd, "-o", output)
+    append(&cmd, "-o", shader.output)
     if ODIN_DEBUG {
         append(&cmd, "-g") // @note(viktor): embed shader source code for renderdoc
     }
     if Optimized {
         append(&cmd, "-O")
     }
-    append(&cmd, input)
+    append(&cmd, shader.input)
     
-    result: Shader
     stdout: string
     stderr: string
     if !run_command(&cmd, or_exit = false, stdout = &stdout, stderr = &stderr) {
         fmt.eprintfln("Failed to run command to compile shader '%v'")
-        return result, false
+        return false
     }
     
     if stdout != "" {
@@ -50,18 +31,20 @@ recompile_shader :: proc (input, output: string, allocator: Allocator) -> (Shade
     
     if stderr != "" {
         fmt.printfln("Hotreload error: %v", stderr)
-        return result, false
+        return false
     }
     
     
-    shader_bytes, err := os.read_entire_file(output, allocator)
+    shader_bytes, err := os.read_entire_file(shader.output, allocator)
     if err != nil {
-        fmt.printfln("Could not load the output file of '%v', which is '%v': %v", input, output, os.error_string(err))
-        return result, false
+        fmt.printfln("Could not load the output file of '%v', which is '%v': %v", shader.input, shader.output, os.error_string(err))
+        return false
     }
     
-    result.bytes = shader_bytes
+    delete(shader.bytes)
+    shader.bytes = shader_bytes
     
+    shader.stages = {}
     {
         shader_code := slice_from_parts(u32, raw_data(shader_bytes), len(shader_bytes) / 4)
         
@@ -77,10 +60,10 @@ recompile_shader :: proc (input, output: string, allocator: Allocator) -> (Shade
                 execution_model := code[1]
                 
                 #partial switch cast(SpvExecutionModel) execution_model {
-                case .Vertex:   result.stages += { .VERTEX }
-                case .Fragment: result.stages += { .FRAGMENT }
-                case .MeshEXT:  result.stages += { .MESH_EXT }
-                case .TaskEXT:  result.stages += { .TASK_EXT }
+                case .Vertex:   shader.stages += { .VERTEX }
+                case .Fragment: shader.stages += { .FRAGMENT }
+                case .MeshEXT:  shader.stages += { .MESH_EXT }
+                case .TaskEXT:  shader.stages += { .TASK_EXT }
                 }
             }
             
@@ -88,7 +71,7 @@ recompile_shader :: proc (input, output: string, allocator: Allocator) -> (Shade
         }
     }
     
-    return result, true
+    return true
 }
 
 // @note(viktor): copypastaed from https://github.com/KhronosGroup/SPIRV-Headers/blob/main/include/spirv/unified1/spirv.h

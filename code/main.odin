@@ -359,9 +359,31 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
+    // @todo(viktor): its own general purpose allocator?
+    shader_allocator := context.allocator
+    
+    shader_catalogue := catalogue_make(Shader, allocator = shader_allocator)
+    
+    setup_iter := catalogue_begin_setup(&shader_catalogue, ".")
+    for value, entry in catalogue_setup_files(&setup_iter, ".frag", ".mesh", ".task") {
+        shader := Shader {
+            input  = entry.full_path,
+            output = fmt.aprintf("%v.spv", entry.full_name, allocator = shader_allocator),
+        }
+        ok := compile_shader(&shader, shader_allocator)
+        if !ok {
+            fmt.eprintfln("Failed to load the shaders initially.")
+        }
+        
+        value^ = shader
+    }
+    catalogue_end_setup(&setup_iter)
+    
+    ////////////////////////////////////////////////
+    
     set_layouts := [] vk.DescriptorSetLayout { data_descriptor_set_layout, textures_descriptor_set_layout }
     
-    pipeline := create_graphics_pipeline(device, swapchain, set_layouts)
+    pipeline := create_graphics_pipeline(device, swapchain, set_layouts, shader_catalogue.values[:])
     
     vertex_descriptor_update_template := create_vertex_update_template(device, pipeline, StorageBufferCount)
     
@@ -482,8 +504,15 @@ main :: proc () {
             recreate_swapchain(ips, device, sdl_get_window_size(window), &swapchain)
         }
         
-        if should_recreate_pipeline(pipeline) {
-            pipeline = create_graphics_pipeline(device, swapchain, set_layouts, pipeline)
+        any_shader_was_changed: bool
+        for iter := catalogue_begin_changed(&shader_catalogue); shader in catalogue_changed_files(&iter) {
+            ok := compile_shader(shader, shader_allocator)
+            if !ok { continue }
+            any_shader_was_changed = true
+        }
+        
+        if any_shader_was_changed {
+            pipeline = create_graphics_pipeline(device, swapchain, set_layouts, shader_catalogue.values[:], pipeline)
             vertex_descriptor_update_template = create_vertex_update_template(device, pipeline, StorageBufferCount, vertex_descriptor_update_template)
         }
         
