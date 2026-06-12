@@ -37,6 +37,8 @@ Pipeline :: struct {
     pipeline: vk.Pipeline,
     layout:   vk.PipelineLayout,
     shader_stages: vk.ShaderStageFlags,
+    
+    vertex_descriptor_update_template: vk.DescriptorUpdateTemplate,
 }
 
 Shader :: struct {
@@ -554,14 +556,13 @@ end_transition_images :: proc (command_buffer: vk.CommandBuffer, src_stage_mask,
 
 ////////////////////////////////////////////////
 
-create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, set_layouts: [] vk.DescriptorSetLayout, shaders: [] Shader, old: Pipeline = {}) -> Pipeline {
+create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, set_layouts: [] vk.DescriptorSetLayout, shaders: [] Shader, storage_buffer_count: u32, old: Pipeline = {}) -> Pipeline {
     // @speed is a pipeline cache still a good optimization?
     result: Pipeline
     for shader in shaders {
         result.shader_stages += shader.stages
     }
     
-    // @correctness can we just define it for all stages, even if they don't need it?
     ranges := [?] vk.PushConstantRange {
         {
             stageFlags = result.shader_stages,
@@ -573,8 +574,11 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, set_l
         sType = .PIPELINE_LAYOUT_CREATE_INFO,
         setLayoutCount = cast(u32) len(set_layouts),
         pSetLayouts    = &set_layouts[0],
-        pushConstantRangeCount = len(ranges),
-        pPushConstantRanges    = &ranges[0],
+        pushConstantRangeCount = 1,
+        pPushConstantRanges    = &vk.PushConstantRange {
+            stageFlags = result.shader_stages,
+            size       = size_of(Push_Data),
+        },
     }
     
     check(vk.CreatePipelineLayout(device, &pipeline_layout_create_info, nil, &result.layout))
@@ -657,25 +661,7 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, set_l
     
     destroy_pipeline(device, old)
     
-    return result
-}
-
-destroy_pipeline :: proc (device: vk.Device, pipeline: Pipeline) {
-    if pipeline.layout != 0 {
-        vk.DestroyPipelineLayout(device, pipeline.layout, nil)
-    }
-    
-    if pipeline.pipeline != 0 {
-        vk.DestroyPipeline(device, pipeline.pipeline, nil)
-    }
-}
-
-create_vertex_update_template :: proc (device: vk.Device, pipeline: Pipeline, storage_buffer_count: u32, old: vk.DescriptorUpdateTemplate = 0) -> vk.DescriptorUpdateTemplate {
-    vk.DestroyDescriptorUpdateTemplate(device, old, nil)
-    
     // @todo(viktor): The information of which shader stage needs which storage buffer could be parsed from the compiled spirv file.
-    // But currently the single shader file contains multiple shader stages, so it would be non trivial to figure out which stage 
-    // makes use of a binding. Otherwise we could just maximally bind buffers, so that we atleast never miss a required buffer.
     update_template_entries: [dynamic; 128] vk.DescriptorUpdateTemplateEntry
     for index in 0..<storage_buffer_count {
         append(&update_template_entries, vk.DescriptorUpdateTemplateEntry {
@@ -690,15 +676,28 @@ create_vertex_update_template :: proc (device: vk.Device, pipeline: Pipeline, st
     create_info := vk.DescriptorUpdateTemplateCreateInfo {
         sType = .DESCRIPTOR_UPDATE_TEMPLATE_CREATE_INFO,
         pipelineBindPoint   = .GRAPHICS,
-        pipelineLayout      = pipeline.layout,
+        pipelineLayout      = result.layout,
         templateType        = .PUSH_DESCRIPTORS,
         descriptorUpdateEntryCount = cast(u32) len(update_template_entries),
         pDescriptorUpdateEntries   = &update_template_entries[0],
     }
     
-    result: vk.DescriptorUpdateTemplate
-    check(vk.CreateDescriptorUpdateTemplate(device, &create_info, nil, &result))
+    check(vk.CreateDescriptorUpdateTemplate(device, &create_info, nil, &result.vertex_descriptor_update_template))
+    
     return result
+}
+
+destroy_pipeline :: proc (device: vk.Device, pipeline: Pipeline) {
+    if pipeline.layout != 0 {
+        vk.DestroyPipelineLayout(device, pipeline.layout, nil)
+    }
+    
+    if pipeline.pipeline != 0 {
+        vk.DestroyPipeline(device, pipeline.pipeline, nil)
+    }
+    
+    vk.DestroyDescriptorUpdateTemplate(device, pipeline.vertex_descriptor_update_template, nil)
+    
 }
 
 ////////////////////////////////////////////////

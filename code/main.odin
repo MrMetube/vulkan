@@ -400,11 +400,10 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
+    // @cleanup this can be moved down
     set_layouts := [] vk.DescriptorSetLayout { data_descriptor_set_layout, textures_descriptor_set_layout }
     
-    pipeline := create_graphics_pipeline(device, swapchain, set_layouts, shader_catalogue.values[:])
-    
-    vertex_descriptor_update_template := create_vertex_update_template(device, pipeline, StorageBufferCount)
+    pipeline: Pipeline
     
     ////////////////////////////////////////////////
     
@@ -530,9 +529,9 @@ main :: proc () {
             any_shader_was_changed = true
         }
         
-        if any_shader_was_changed {
-            pipeline = create_graphics_pipeline(device, swapchain, set_layouts, shader_catalogue.values[:], pipeline)
-            vertex_descriptor_update_template = create_vertex_update_template(device, pipeline, StorageBufferCount, vertex_descriptor_update_template)
+        // @cleanup better way to detect an invalid pipeline
+        if any_shader_was_changed || absolute_frame_index == 0 {
+            pipeline = create_graphics_pipeline(device, swapchain, set_layouts, shader_catalogue.values[:], StorageBufferCount, pipeline)
         }
         
         ////////////////////////////////////////////////
@@ -775,7 +774,6 @@ main :: proc () {
     gpu_delete(draw_buffer)
     
     destroy_swapchain(device, &swapchain)
-    vk.DestroyDescriptorUpdateTemplate(device, vertex_descriptor_update_template, nil)
     destroy_pipeline(device, pipeline)
     
     for texture in textures {
