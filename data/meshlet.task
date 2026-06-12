@@ -14,14 +14,14 @@ layout(push_constant) uniform Push_Data {
     Draw_Globals globals;
 } push;
 
+layout(binding = 0) readonly buffer Draws {
+	Draw draw_buffer[];
+};
+
 layout(binding = 1) readonly buffer Meshlets {
 	Meshlet meshlet_buffer[];
 };
 
-layout(binding = 3) readonly buffer Draws
-{
-	Draw draw_buffer[];
-};
 
 ////////////////////////////////////////////////
 
@@ -42,14 +42,14 @@ void main() {
     uint meshlet_group_index = gl_WorkGroupID.x;
     uint thread_index        = gl_LocalInvocationID.x;
     
-    if (thread_index == 0) {
-        task_result.draw_index = gl_DrawID;
-    }
-        
     Draw_Globals globals = push.globals;
     Draw draw = draw_buffer[gl_DrawID];
     
     uint meshlet_index = meshlet_group_index * TaskWidth + thread_index + draw.meshlet_offset;
+    
+    if (thread_index == 0) {
+        task_result.draw_index = gl_DrawID;
+    }
     
     uint count;
     if (CULL) {

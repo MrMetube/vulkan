@@ -3,20 +3,31 @@ package main
 import "core:fmt"
 import "core:os"
 
-compile_shader :: proc (shader: ^Shader, allocator: Allocator) -> bool {
+compile_and_load_shader :: proc { compile_and_load_shader_pointer, compile_and_load_shader_value }
+
+compile_and_load_shader_value :: proc (input: string, allocator: Allocator, output_extension := ".spv") -> (Shader, bool) {
+    result: Shader
+    result.input = input
+    ok := compile_and_load_shader(&result, allocator, output_extension = output_extension)
+    return result, ok
+}
+
+compile_and_load_shader_pointer :: proc (old: ^Shader, allocator: Allocator, output_extension := ".spv") -> bool {
     cmd: Cmd
     cmd.allocator = context.temp_allocator
     
+    shader_output := fmt.tprintf("%v%v", old.input, output_extension)
+    
     append(&cmd, "C:/tools/VulkanSDK/1.4.350.0/Bin/glslc.exe")
     append(&cmd, "--target-env=vulkan1.4")
-    append(&cmd, "-o", shader.output)
+    append(&cmd, "-o", shader_output)
     if ODIN_DEBUG {
         append(&cmd, "-g") // @note(viktor): embed shader source code for renderdoc
     }
     if Optimized {
         append(&cmd, "-O")
     }
-    append(&cmd, shader.input)
+    append(&cmd, old.input)
     
     stdout: string
     stderr: string
@@ -34,17 +45,16 @@ compile_shader :: proc (shader: ^Shader, allocator: Allocator) -> bool {
         return false
     }
     
-    
-    shader_bytes, err := os.read_entire_file(shader.output, allocator)
+    shader_bytes, err := os.read_entire_file(shader_output, allocator)
     if err != nil {
-        fmt.printfln("Could not load the output file of '%v', which is '%v': %v", shader.input, shader.output, os.error_string(err))
+        fmt.printfln("Could not load the output file of '%v', which is '%v': %v", old.input, shader_output, os.error_string(err))
         return false
     }
     
-    delete(shader.bytes)
-    shader.bytes = shader_bytes
+    delete(old.bytes)
+    old.bytes = shader_bytes
     
-    shader.stages = {}
+    old.stages = {}
     {
         shader_code := slice_from_parts(u32, raw_data(shader_bytes), len(shader_bytes) / 4)
         
@@ -60,10 +70,11 @@ compile_shader :: proc (shader: ^Shader, allocator: Allocator) -> bool {
                 execution_model := code[1]
                 
                 #partial switch cast(SpvExecutionModel) execution_model {
-                case .Vertex:   shader.stages += { .VERTEX }
-                case .Fragment: shader.stages += { .FRAGMENT }
-                case .MeshEXT:  shader.stages += { .MESH_EXT }
-                case .TaskEXT:  shader.stages += { .TASK_EXT }
+                case .Vertex:     old.stages += { .VERTEX }
+                case .Fragment:   old.stages += { .FRAGMENT }
+                case .MeshEXT:    old.stages += { .MESH_EXT }
+                case .TaskEXT:    old.stages += { .TASK_EXT }
+                case .GLCompute:  old.stages += { .COMPUTE }
                 }
             }
             

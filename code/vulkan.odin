@@ -36,14 +36,13 @@ Swapchain_Info :: struct {
 Pipeline :: struct {
     pipeline: vk.Pipeline,
     layout:   vk.PipelineLayout,
+    update_template: vk.DescriptorUpdateTemplate,
+    // only used by the graphics pipeline
     shader_stages: vk.ShaderStageFlags,
-    
-    vertex_descriptor_update_template: vk.DescriptorUpdateTemplate,
 }
 
 Shader :: struct {
     input:  string, 
-    output: string,
     
     stages: vk.ShaderStageFlags,
     bytes:  [] u8,
@@ -511,21 +510,22 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
 ////////////////////////////////////////////////
 
 @(thread_local)
-transition_state: struct {
+barrier_state: struct {
     is_open:  bool,
-    barriers: [dynamic] vk.ImageMemoryBarrier2,
+    image_barriers: [dynamic] vk.ImageMemoryBarrier2,
+    buffer_barriers: [dynamic] vk.BufferMemoryBarrier2,
 }
 
-begin_transition_images :: proc () {
-    assert(!transition_state.is_open)
+begin_pipeline_barrier :: proc () {
+    assert(!barrier_state.is_open)
     
-    transition_state.is_open = true
+    barrier_state.is_open = true
 }
 
-append_image_memory_barrier_2 :: proc (image: vk.Image, src_access_mask: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_access_mask: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
-    assert(transition_state.is_open)
+add_image_barrier :: proc (image: vk.Image, src_access_mask: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_access_mask: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
+    assert(barrier_state.is_open)
     
-    append(&transition_state.barriers, vk.ImageMemoryBarrier2 {
+    append(&barrier_state.image_barriers, vk.ImageMemoryBarrier2 {
         sType = .IMAGE_MEMORY_BARRIER_2,
         srcAccessMask = src_access_mask,
         dstAccessMask = dst_access_mask,
@@ -536,41 +536,102 @@ append_image_memory_barrier_2 :: proc (image: vk.Image, src_access_mask: vk.Acce
     })
 }
 
-end_transition_images :: proc (command_buffer: vk.CommandBuffer, src_stage_mask, dst_stage_mask: vk.PipelineStageFlags2) {
-    assert(transition_state.is_open)
+add_memory_barrier :: proc (buffer: vk.Buffer, src_access_mask: vk.AccessFlags2, dst_access_mask: vk.AccessFlags2) {
+    assert(barrier_state.is_open)
     
-    for &it in transition_state.barriers {
+    append(&barrier_state.buffer_barriers, vk.BufferMemoryBarrier2 {
+        sType = .BUFFER_MEMORY_BARRIER_2,
+        srcAccessMask = src_access_mask,
+        dstAccessMask = dst_access_mask,
+        buffer = buffer,
+        size   = auto_cast vk.WHOLE_SIZE,
+    })
+}
+
+end_pipeline_barrier :: proc (command_buffer: vk.CommandBuffer, src_stage_mask, dst_stage_mask: vk.PipelineStageFlags2) {
+    assert(barrier_state.is_open)
+    
+    for &it in barrier_state.image_barriers {
+        it.srcStageMask = src_stage_mask
+        it.dstStageMask = dst_stage_mask
+    }
+    for &it in barrier_state.buffer_barriers {
         it.srcStageMask = src_stage_mask
         it.dstStageMask = dst_stage_mask
     }
     
     vk.CmdPipelineBarrier2(command_buffer, &vk.DependencyInfo {
         sType = .DEPENDENCY_INFO,
-        imageMemoryBarrierCount = auto_cast len(transition_state.barriers),
-        pImageMemoryBarriers    = raw_data(transition_state.barriers),
+        imageMemoryBarrierCount  = auto_cast len(barrier_state.image_barriers),
+        pImageMemoryBarriers     = raw_data(barrier_state.image_barriers),
+        bufferMemoryBarrierCount = auto_cast len(barrier_state.buffer_barriers),
+        pBufferMemoryBarriers    = raw_data(barrier_state.buffer_barriers),
     })
     
-    clear(&transition_state.barriers)
-    transition_state.is_open = false
+    clear(&barrier_state.image_barriers)
+    clear(&barrier_state.buffer_barriers)
+    barrier_state.is_open = false
 }
 
 ////////////////////////////////////////////////
 
-create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, set_layouts: [] vk.DescriptorSetLayout, shaders: [] Shader, storage_buffer_count: u32, old: Pipeline = {}) -> Pipeline {
-    // @speed is a pipeline cache still a good optimization?
+create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, shader: Shader, storage_buffer_count: u32, set_layout: vk.DescriptorSetLayout) -> Pipeline {
+    assert(.COMPUTE in shader.stages)
+    
+    set_layout := set_layout
+    
+    result: Pipeline
+    result.shader_stages += shader.stages
+    
+    layout_create_info := vk.PipelineLayoutCreateInfo {
+        sType = .PIPELINE_LAYOUT_CREATE_INFO,
+        
+        setLayoutCount = 1,
+        pSetLayouts = &set_layout,
+    }
+    check(vk.CreatePipelineLayout(device, &layout_create_info, nil, &result.layout))
+    
+    // @copypasta from create_graphics_pipeline
+    shader_stages: [dynamic; 16] vk.PipelineShaderStageCreateInfo
+    module_infos:  [dynamic; 16] vk.ShaderModuleCreateInfo
+    for stage in shader.stages {
+        append(&module_infos, vk.ShaderModuleCreateInfo {
+            sType    = .SHADER_MODULE_CREATE_INFO,
+            codeSize = len(shader.bytes),
+            pCode    = cast(^u32) &shader.bytes[0],
+        })
+        append(&shader_stages, vk.PipelineShaderStageCreateInfo { 
+            sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
+            stage = { stage }, 
+            pName = "main", 
+            pNext = last(&module_infos),
+        })
+    }
+    
+    
+    create_info := vk.ComputePipelineCreateInfo {
+        sType = .COMPUTE_PIPELINE_CREATE_INFO,
+        layout = result.layout,
+        stage  = shader_stages[0],
+    }
+    
+    check(vk.CreateComputePipelines(device, cache, 1, &create_info, nil, &result.pipeline))
+    
+    result.update_template = create_update_template(device, .COMPUTE, result.layout, storage_buffer_count)
+    
+    return result
+}
+
+create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, swapchain: Swapchain, set_layouts: [] vk.DescriptorSetLayout, shaders: [] Shader, storage_buffer_count: u32, old: Pipeline = {}) -> Pipeline {
+    check(vk.DeviceWaitIdle(device))
+    destroy_pipeline(device, old)
+    
     result: Pipeline
     for shader in shaders {
         result.shader_stages += shader.stages
     }
     
-    ranges := [?] vk.PushConstantRange {
-        {
-            stageFlags = result.shader_stages,
-            size       = size_of(Push_Data),
-        },
-    }
-    
-    pipeline_layout_create_info := vk.PipelineLayoutCreateInfo {
+    layout_create_info := vk.PipelineLayoutCreateInfo {
         sType = .PIPELINE_LAYOUT_CREATE_INFO,
         setLayoutCount = cast(u32) len(set_layouts),
         pSetLayouts    = &set_layouts[0],
@@ -581,7 +642,7 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, set_l
         },
     }
     
-    check(vk.CreatePipelineLayout(device, &pipeline_layout_create_info, nil, &result.layout))
+    check(vk.CreatePipelineLayout(device, &layout_create_info, nil, &result.layout))
     
     shader_stages: [dynamic; 16] vk.PipelineShaderStageCreateInfo
     module_infos:  [dynamic; 16] vk.ShaderModuleCreateInfo
@@ -605,7 +666,7 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, set_l
     
     swapchain_format := swapchain.format
     
-    pipeline_create_info := vk.GraphicsPipelineCreateInfo {
+    create_info := vk.GraphicsPipelineCreateInfo {
         sType = .GRAPHICS_PIPELINE_CREATE_INFO,
         pNext = &vk.PipelineRenderingCreateInfo {
             sType = .PIPELINE_RENDERING_CREATE_INFO,
@@ -615,7 +676,6 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, set_l
         },
         stageCount = auto_cast len(shader_stages),
         pStages    = &shader_stages[0],
-        pVertexInputState = &vk.PipelineVertexInputStateCreateInfo { sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO },
         pInputAssemblyState = &vk.PipelineInputAssemblyStateCreateInfo {
             sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
             topology = .TRIANGLE_LIST,
@@ -627,7 +687,7 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, set_l
         },
         pRasterizationState = &vk.PipelineRasterizationStateCreateInfo {
             sType = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-            cullMode = { .BACK },
+            cullMode  = { .BACK },
             lineWidth = 1,
         },
         pMultisampleState = &vk.PipelineMultisampleStateCreateInfo {
@@ -655,14 +715,16 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, set_l
         layout = result.layout,
     }
     
-    check(vk.CreateGraphicsPipelines(device, 0, 1,&pipeline_create_info, nil, &result.pipeline))
+    check(vk.CreateGraphicsPipelines(device, cache, 1,&create_info, nil, &result.pipeline))
     
-    check(vk.DeviceWaitIdle(device))
+    result.update_template = create_update_template(device, .GRAPHICS, result.layout, storage_buffer_count)
     
-    destroy_pipeline(device, old)
-    
+    return result
+}
+
+create_update_template :: proc (device: vk.Device, bind_point: vk. PipelineBindPoint, layout: vk.PipelineLayout, storage_buffer_count: u32) -> vk.DescriptorUpdateTemplate {
     // @todo(viktor): The information of which shader stage needs which storage buffer could be parsed from the compiled spirv file.
-    update_template_entries: [dynamic; 128] vk.DescriptorUpdateTemplateEntry
+    update_template_entries: [dynamic; 32] vk.DescriptorUpdateTemplateEntry
     for index in 0..<storage_buffer_count {
         append(&update_template_entries, vk.DescriptorUpdateTemplateEntry {
             dstBinding      = index,
@@ -673,16 +735,17 @@ create_graphics_pipeline :: proc (device: vk.Device, swapchain: Swapchain, set_l
         })
     }
         
-    create_info := vk.DescriptorUpdateTemplateCreateInfo {
+    update_template_create_info := vk.DescriptorUpdateTemplateCreateInfo {
         sType = .DESCRIPTOR_UPDATE_TEMPLATE_CREATE_INFO,
-        pipelineBindPoint   = .GRAPHICS,
-        pipelineLayout      = result.layout,
+        pipelineBindPoint   = bind_point,
+        pipelineLayout      = layout,
         templateType        = .PUSH_DESCRIPTORS,
         descriptorUpdateEntryCount = cast(u32) len(update_template_entries),
         pDescriptorUpdateEntries   = &update_template_entries[0],
     }
     
-    check(vk.CreateDescriptorUpdateTemplate(device, &create_info, nil, &result.vertex_descriptor_update_template))
+    result: vk.DescriptorUpdateTemplate
+    check(vk.CreateDescriptorUpdateTemplate(device, &update_template_create_info, nil, &result))
     
     return result
 }
@@ -696,7 +759,7 @@ destroy_pipeline :: proc (device: vk.Device, pipeline: Pipeline) {
         vk.DestroyPipeline(device, pipeline.pipeline, nil)
     }
     
-    vk.DestroyDescriptorUpdateTemplate(device, pipeline.vertex_descriptor_update_template, nil)
+    vk.DestroyDescriptorUpdateTemplate(device, pipeline.update_template, nil)
     
 }
 

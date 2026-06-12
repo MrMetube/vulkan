@@ -12,7 +12,7 @@ Catalogue :: struct ($T: typeid) {
 }
 
 Catalogue_Entry :: struct {
-    full_name: string,
+    name: string,
     full_path: string,
     read_time: time.Time,
 }
@@ -51,7 +51,7 @@ catalogue_begin_setup :: proc (catalogue: ^Catalogue($T), directory: string) -> 
 
 catalogue_setup_files :: proc (iter: ^Catalogue_Iterator($T), extensions: ..string) -> (value: ^T, entry: Catalogue_Entry, ok: bool) {
     for {
-        info, info_index, info_ok := os.read_directory_iterator(&iter.dir_iter)
+        info, _, info_ok := os.read_directory_iterator(&iter.dir_iter)
         if !info_ok {
             return value, entry, ok
         }
@@ -69,7 +69,7 @@ catalogue_setup_files :: proc (iter: ^Catalogue_Iterator($T), extensions: ..stri
             append(&iter.catalogue.entries, Catalogue_Entry {
                 read_time = info.modification_time,
                 full_path = strings.clone(info.fullpath, catalogue.allocator),
-                full_name = strings.clone(info.name, catalogue.allocator),
+                name      = strings.clone(info.name, catalogue.allocator),
             })
             
             value = append_into(&catalogue.values)

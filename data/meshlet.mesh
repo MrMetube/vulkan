@@ -27,8 +27,8 @@ struct Vertex {
 };
 
 
-layout(binding = 0) readonly buffer Vertices {
-	Vertex vertex_buffer[];
+layout(binding = 0) readonly buffer Draws {
+	Draw draw_buffer[];
 };
 
 layout(binding = 1) readonly buffer Meshlets {
@@ -39,9 +39,10 @@ layout(binding = 2) readonly buffer MeshletData {
 	uint meshlet_data_buffer[];
 };
 
-layout(binding = 3) readonly buffer Draws {
-	Draw draw_buffer[];
+layout(binding = 3) readonly buffer Vertices {
+	Vertex vertex_buffer[];
 };
+
 
 taskPayloadSharedEXT Task_Result task_result;
 

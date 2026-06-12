@@ -1,0 +1,27 @@
+#version 460
+
+#include "common.h"
+
+#define ComputeWidth 32
+
+layout(local_size_x = ComputeWidth, local_size_y = 1, local_size_z = 1) in;
+
+// @volatile
+layout(binding = 0) readonly buffer Draws {
+	Draw draw_buffer[];
+};
+
+// @volatile
+layout(binding = 1) writeonly buffer Draw_Commands {
+    Draw_Command draw_command_buffer[];
+};
+
+void main() {
+    uint group_index  = gl_WorkGroupID.x;
+    uint thread_index = gl_LocalInvocationID.x;
+    uint draw_index   = group_index * ComputeWidth + thread_index;
+    
+    draw_command_buffer[draw_index].groupCountX = (draw_buffer[draw_index].meshlet_count + TaskWidth-1) / TaskWidth;
+    draw_command_buffer[draw_index].groupCountY = 1;
+    draw_command_buffer[draw_index].groupCountZ = 1;
+}

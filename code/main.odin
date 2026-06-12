@@ -79,8 +79,6 @@ Draw_Globals :: struct {
 
 // @volatile shaders
 Draw :: struct {
-    command: vk.DrawMeshTasksIndirectCommandEXT, pad: u32,
-    
     vertex_offset:  u32,
     vertex_count:   u32,
     meshlet_offset: u32,
@@ -90,6 +88,10 @@ Draw :: struct {
     p:           v3,
     scale:       f32,
 }
+
+
+// @volatile shaders
+Draw_Command :: vk.DrawMeshTasksIndirectCommandEXT
 
 // @volatile shaders
 Meshlet :: struct #align(16) {
@@ -142,7 +144,8 @@ main :: proc () {
     vertex_buffer,       vb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Vertex,    256 * Megabyte / size_of(Vertex))
     meshlet_buffer,      mb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Meshlet,   256 * Megabyte / size_of(Meshlet))
     meshlet_data_buffer, mdb_view := gpu_make_buffer({ .STORAGE_BUFFER }, [] u32,       256 * Megabyte / size_of(u32))
-    draw_buffer,         db_view  := gpu_make_buffer({ .STORAGE_BUFFER, .INDIRECT_BUFFER }, [] Draw, 256 * Megabyte / size_of(Draw))
+    draw_buffer,         db_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Draw, 256 * Megabyte / size_of(Draw))
+    draw_command_buffer, dcb_view := gpu_make_buffer({ .STORAGE_BUFFER, .INDIRECT_BUFFER }, [] Draw_Command, 256 * Megabyte / size_of(Draw_Command))
     
     Mesh_Info :: struct {
         triangle_count: u32,
@@ -217,9 +220,9 @@ main :: proc () {
             }
             check(vk.BeginCommandBuffer(cb_once, &cb_once_begin_info))
             
-            begin_transition_images()
-                append_image_memory_barrier_2(texture.image, {}, .UNDEFINED, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
-            end_transition_images(cb_once, {}, { .TRANSFER })
+            begin_pipeline_barrier()
+                add_image_barrier(texture.image, {}, .UNDEFINED, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
+            end_pipeline_barrier(cb_once, {}, { .TRANSFER })
             
             copy_regions := make([dynamic] vk.BufferImageCopy, context.temp_allocator)
             for level in 0..<loaded_texture.mip_levels {
@@ -234,9 +237,9 @@ main :: proc () {
             
             vk.CmdCopyBufferToImage(cb_once, source_buffer.buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
             
-            begin_transition_images()
-                append_image_memory_barrier_2(texture.image, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
-            end_transition_images(cb_once, { .TRANSFER }, { .FRAGMENT_SHADER })
+            begin_pipeline_barrier()
+                add_image_barrier(texture.image, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
+            end_pipeline_barrier(cb_once, { .TRANSFER }, { .FRAGMENT_SHADER })
             
             check(vk.EndCommandBuffer(cb_once))
             
@@ -270,45 +273,77 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     // @volatile needs to match the bindings in shaders
-    StorageBufferCount :: 4
-    data_descriptor_set_layout: vk.DescriptorSetLayout
+    GraphicsStorageBufferCount :: 4
+    
+    graphics_descriptor_set_layout: vk.DescriptorSetLayout
     {
-        bindings := [StorageBufferCount] vk.DescriptorSetLayoutBinding {
-            {
+        bindings := [GraphicsStorageBufferCount] vk.DescriptorSetLayoutBinding {
+            { // draw
                 binding = 0,
                 descriptorType = .STORAGE_BUFFER,
                 descriptorCount = 1,
-                stageFlags = { .MESH_EXT },
+                stageFlags = { .MESH_EXT, .TASK_EXT },
             },
-            {
+            { // meshlet
                 binding = 1,
                 descriptorType = .STORAGE_BUFFER,
                 descriptorCount = 1,
                 stageFlags = { .MESH_EXT, .TASK_EXT },
             },
-            {
+            { // meshlet data
                 binding = 2,
                 descriptorType = .STORAGE_BUFFER,
                 descriptorCount = 1,
                 stageFlags = { .MESH_EXT, .TASK_EXT },
             },
-            {
+            { // vertex
                 binding = 3,
                 descriptorType = .STORAGE_BUFFER,
                 descriptorCount = 1,
-                stageFlags = { .MESH_EXT, .TASK_EXT },
+                stageFlags = { .MESH_EXT },
             },
         }
         
-        vertices_descriptor_layout_create_info := vk.DescriptorSetLayoutCreateInfo {
+        create_info := vk.DescriptorSetLayoutCreateInfo {
             sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             flags        = { .PUSH_DESCRIPTOR },
             bindingCount = len(bindings),
             pBindings    = &bindings[0],
         }
         
-        check(vk.CreateDescriptorSetLayout(device, &vertices_descriptor_layout_create_info, nil, &data_descriptor_set_layout))
-        defer_destroy(vk.DestroyDescriptorSetLayout, data_descriptor_set_layout)
+        check(vk.CreateDescriptorSetLayout(device, &create_info, nil, &graphics_descriptor_set_layout))
+        defer_destroy(vk.DestroyDescriptorSetLayout, graphics_descriptor_set_layout)
+    }
+    
+    // @volatile needs to match the bindings in shaders
+    ComputeStorageBufferCount :: 2
+    
+    compute_descriptor_set_layout: vk.DescriptorSetLayout
+    {
+        bindings := [ComputeStorageBufferCount] vk.DescriptorSetLayoutBinding {
+            { // draw
+                binding = 0,
+                descriptorType = .STORAGE_BUFFER,
+                descriptorCount = 1,
+                stageFlags = { .MESH_EXT, .TASK_EXT, .COMPUTE },
+            },
+            { // draw_command
+                binding = 1,
+                descriptorType = .STORAGE_BUFFER,
+                descriptorCount = 1,
+                stageFlags = { .TASK_EXT, .COMPUTE },
+            },
+        }
+        
+        create_info := vk.DescriptorSetLayoutCreateInfo {
+            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            flags        = { .PUSH_DESCRIPTOR },
+            bindingCount = len(bindings),
+            pBindings    = &bindings[0],
+        }
+        
+        check(vk.CreateDescriptorSetLayout(device, &create_info, nil, &compute_descriptor_set_layout))
+        defer_destroy(vk.DestroyDescriptorSetLayout, compute_descriptor_set_layout)
     }
     
     ////////////////////////////////////////////////
@@ -378,34 +413,24 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    // @todo(viktor): its own general purpose allocator?
+    // @todo(viktor): if we want to only reload specific shaders, we need a general purpose allocator.
     shader_allocator := context.allocator
     
     shader_catalogue := catalogue_make(Shader, allocator = shader_allocator)
     
     setup_iter := catalogue_begin_setup(&shader_catalogue, ".")
     for value, entry in catalogue_setup_files(&setup_iter, ".frag", ".mesh", ".task") {
-        shader := Shader {
-            input  = entry.full_path,
-            output = fmt.aprintf("%v.spv", entry.full_name, allocator = shader_allocator),
-        }
-        ok := compile_shader(&shader, shader_allocator)
-        if !ok {
-            fmt.eprintfln("Failed to load the shaders initially.")
-        }
+        shader, ok := compile_and_load_shader(entry.full_path, shader_allocator)
+        assert(ok, "Failed to initially load the shaders.")
         
         value^ = shader
     }
     catalogue_end_setup(&setup_iter)
     
-    ////////////////////////////////////////////////
+    draw_command_compute_shader, comp_ok := compile_and_load_shader("draw_command.comp", shader_allocator)
+    assert(comp_ok, "Failed to initially load the compute shader")
     
-    // @cleanup this can be moved down
-    set_layouts := [] vk.DescriptorSetLayout { data_descriptor_set_layout, textures_descriptor_set_layout }
-    
-    pipeline: Pipeline
-    
-    ////////////////////////////////////////////////
+    //////////////////////////////
     
     timeline_semaphore := create_semaphore(device, timeline_initial_value = MaxFramesInFlight)
     defer_destroy(vk.DestroySemaphore, timeline_semaphore)
@@ -423,6 +448,16 @@ main :: proc () {
         check(vk.CreateQueryPool(device, &create_info, nil, &query_pool))
         defer_destroy(vk.DestroyQueryPool, query_pool)
     }
+    
+    ////////////////////////////////////////////////
+    
+    // @speed is a pipeline cache still a good optimization?
+    pipeline_cache: vk.PipelineCache = 0
+    
+    pipeline: Pipeline
+    
+    // @todo(viktor): hot reloading
+    compute_pipeline := create_compute_pipeline(device, pipeline_cache, draw_command_compute_shader, ComputeStorageBufferCount, compute_descriptor_set_layout)
     
     ////////////////////////////////////////////////
     
@@ -524,14 +559,14 @@ main :: proc () {
         
         any_shader_was_changed: bool
         for iter := catalogue_begin_changed(&shader_catalogue); shader in catalogue_changed_files(&iter) {
-            ok := compile_shader(shader, shader_allocator)
+            ok := compile_and_load_shader(shader, shader_allocator)
             if !ok { continue }
             any_shader_was_changed = true
         }
         
         // @cleanup better way to detect an invalid pipeline
         if any_shader_was_changed || absolute_frame_index == 0 {
-            pipeline = create_graphics_pipeline(device, swapchain, set_layouts, shader_catalogue.values[:], StorageBufferCount, pipeline)
+            pipeline = create_graphics_pipeline(device, pipeline_cache, swapchain, { graphics_descriptor_set_layout, textures_descriptor_set_layout }, shader_catalogue.values[:], GraphicsStorageBufferCount, pipeline)
         }
         
         ////////////////////////////////////////////////
@@ -615,7 +650,6 @@ main :: proc () {
         
         entropy := seed_random_series(5175546)
         @(static) draws: [50] Draw
-        color_wheel := color_wheel
         for &draw in draws {
             p := random_bilateral(&entropy, v3) * {20, 15, 30}
             p.z -= 30
@@ -634,12 +668,6 @@ main :: proc () {
             draw.meshlet_count  = mesh.meshlet_count
             
             triangles_this_frame += mesh.triangle_count
-            
-            draw.command = {
-                groupCountX = (mesh.meshlet_count + TaskWidth-1) / TaskWidth,
-                groupCountY = 1,
-                groupCountZ = 1,
-            }
         }
         
         copy(db_view, draws[:])
@@ -673,14 +701,31 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        begin_transition_images()
-            append_image_memory_barrier_2(swapchain.color_buffer.image, {}, .UNDEFINED, { .COLOR_ATTACHMENT_WRITE },         .COLOR_ATTACHMENT_OPTIMAL)
-            append_image_memory_barrier_2(swapchain.depth_buffer.image, {}, .UNDEFINED, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .DEPTH_STENCIL_ATTACHMENT_OPTIMAL, { .DEPTH, .STENCIL })
-        end_transition_images(cb, { .BOTTOM_OF_PIPE }, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS })
+        // @volatile needs to match the bindings in shaders 
+        compute_descriptor_update := [ComputeStorageBufferCount] DescriptorUpdateData {
+            { buffer = { draw_buffer.buffer,         0, auto_cast vk.WHOLE_SIZE }},
+            { buffer = { draw_command_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
+        }
+        vk.CmdPushDescriptorSetWithTemplate(cb, compute_pipeline.update_template, compute_pipeline.layout, 0, &compute_descriptor_update[0])
         
-        begin_rendering(cb, swapchain, swapchain.color_buffer, image_index, {0.07, 0.07, 0.07, 1})
+        vk.CmdBindPipeline(cb, .COMPUTE, compute_pipeline.pipeline)
+        // @volatile the round up needs align with the ComputeWidth
+        vk.CmdDispatch(cb, len(draws) + 31 / 32,  1, 1)
+        
+        begin_pipeline_barrier()
+            add_memory_barrier(draw_command_buffer.buffer, { .SHADER_WRITE }, { .INDIRECT_COMMAND_READ })
+        end_pipeline_barrier(cb, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
         
         ////////////////////////////////////////////////
+        
+        begin_pipeline_barrier()
+            add_image_barrier(swapchain.color_buffer.image, {}, .UNDEFINED, { .COLOR_ATTACHMENT_WRITE },         .COLOR_ATTACHMENT_OPTIMAL)
+            add_image_barrier(swapchain.depth_buffer.image, {}, .UNDEFINED, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .DEPTH_STENCIL_ATTACHMENT_OPTIMAL, { .DEPTH, .STENCIL })
+        end_pipeline_barrier(cb, { .BOTTOM_OF_PIPE }, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS })
+        
+        ////////////////////////////////////////////////
+        
+        begin_rendering(cb, swapchain, swapchain.color_buffer, image_index, {0.07, 0.07, 0.07, 1})
         
         vk.CmdSetViewport(cb, 0, 1, &vk.Viewport {
             x      = 0,
@@ -696,29 +741,29 @@ main :: proc () {
         vk.CmdBindPipeline(cb, .GRAPHICS, pipeline.pipeline)
         
         // @volatile needs to match the bindings in shaders 
-        descriptor_update_data := [StorageBufferCount] DescriptorUpdateData {
-            { buffer = { vertex_buffer.buffer,       0, auto_cast vk.WHOLE_SIZE }},
+        graphics_descriptor_update := [GraphicsStorageBufferCount] DescriptorUpdateData {
+            { buffer = { draw_buffer.buffer,         0, auto_cast vk.WHOLE_SIZE }},
             { buffer = { meshlet_buffer.buffer,      0, auto_cast vk.WHOLE_SIZE }},
             { buffer = { meshlet_data_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
-            { buffer = { draw_buffer.buffer,         0, auto_cast vk.WHOLE_SIZE }},
+            { buffer = { vertex_buffer.buffer,       0, auto_cast vk.WHOLE_SIZE }},
         }
-        vk.CmdPushDescriptorSetWithTemplate(cb,  vertex_descriptor_update_template, pipeline.layout, 0, &descriptor_update_data[0])
+        vk.CmdPushDescriptorSetWithTemplate(cb, pipeline.update_template, pipeline.layout, 0, &graphics_descriptor_update[0])
         
         vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline.layout, 1, 1, &textures_descriptor_set, 0, nil)
         
         
         vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader_stages, 0, size_of(Push_Data), &Push_Data { address = frame.globals_gpu })
         // @todo(viktor): this is deprecated, use vkCmdDrawMeshTasksIndirect2EXT
-        vk.CmdDrawMeshTasksIndirectEXT(cb, draw_buffer.buffer, auto_cast offset_of(Draw{}.command), len(draws), size_of(Draw))
+        vk.CmdDrawMeshTasksIndirectEXT(cb, draw_command_buffer.buffer, 0, len(draws), size_of(Draw_Command))
         
         ////////////////////////////////////////////////
         
         vk.CmdEndRendering(cb)
         
-        begin_transition_images()
-            append_image_memory_barrier_2(swapchain.color_buffer.image, { .COLOR_ATTACHMENT_WRITE }, .COLOR_ATTACHMENT_OPTIMAL, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
-            append_image_memory_barrier_2(swapchain.images[image_index], {}, .UNDEFINED, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
-        end_transition_images(cb, { .COLOR_ATTACHMENT_OUTPUT }, { .TRANSFER })
+        begin_pipeline_barrier()
+            add_image_barrier(swapchain.color_buffer.image, { .COLOR_ATTACHMENT_WRITE }, .COLOR_ATTACHMENT_OPTIMAL, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
+            add_image_barrier(swapchain.images[image_index], {}, .UNDEFINED, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
+        end_pipeline_barrier(cb, { .COLOR_ATTACHMENT_OUTPUT }, { .TRANSFER })
         
         vk.CmdCopyImage(cb, swapchain.color_buffer.image, .TRANSFER_SRC_OPTIMAL, swapchain.images[image_index], .TRANSFER_DST_OPTIMAL, 1, &vk.ImageCopy {
             srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
@@ -726,9 +771,9 @@ main :: proc () {
             extent         = to_extent(swapchain.size, 1),
         })
         
-        begin_transition_images()
-            append_image_memory_barrier_2(swapchain.images[image_index], { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, {}, .PRESENT_SRC_KHR)
-        end_transition_images(cb, { .TRANSFER }, {})
+        begin_pipeline_barrier()
+            add_image_barrier(swapchain.images[image_index], { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, {}, .PRESENT_SRC_KHR)
+        end_pipeline_barrier(cb, { .TRANSFER }, {})
         
         ////////////////////////////////////////////////
         
@@ -772,9 +817,11 @@ main :: proc () {
     gpu_delete(meshlet_buffer)
     gpu_delete(meshlet_data_buffer)
     gpu_delete(draw_buffer)
+    gpu_delete(draw_command_buffer)
     
     destroy_swapchain(device, &swapchain)
     destroy_pipeline(device, pipeline)
+    destroy_pipeline(device, compute_pipeline)
     
     for texture in textures {
         gpu_delete(texture)
