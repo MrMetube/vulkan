@@ -652,7 +652,9 @@ translate :: proc (a: m4, t: v3) -> (result: m4) {
 
 ////////////////////////////////////////////////
 
-get_column :: proc (a: m4, column: u32) -> (result: v3) {
+get_column :: proc (a: m4, column: u32) -> v3 {
+    result: v3
+    
     result.x = a[0, column]
     result.y = a[1, column]
     result.z = a[2, column]
@@ -660,7 +662,20 @@ get_column :: proc (a: m4, column: u32) -> (result: v3) {
     return result
 }
 
-get_row :: proc (a: m4, row: u32) -> (result: v3) {
+get_column_v4 :: proc (a: m4, column: u32) -> v4 {
+    result: v4
+    
+    result.x = a[0, column]
+    result.y = a[1, column]
+    result.z = a[2, column]
+    result.w = a[3, column]
+    
+    return result
+}
+
+get_row :: proc (a: m4, row: u32) -> v3 {
+    result: v3
+    
     result.x = a[row, 0]
     result.y = a[row, 1]
     result.z = a[row, 2]
@@ -668,7 +683,20 @@ get_row :: proc (a: m4, row: u32) -> (result: v3) {
     return result
 }
 
-rows_3x3 :: proc (x, y, z: v3) -> (result: m4) {
+get_row_v4 :: proc (a: m4, row: u32) -> v4 {
+    result: v4
+    
+    result.x = a[row, 0]
+    result.y = a[row, 1]
+    result.z = a[row, 2]
+    result.w = a[row, 3]
+    
+    return result
+}
+
+rows_3x3 :: proc (x, y, z: v3) -> m4 {
+    result: m4
+    
     result = m4 {
         x.x, x.y, x.z, 0,
         y.x, y.y, y.z, 0,
@@ -678,7 +706,9 @@ rows_3x3 :: proc (x, y, z: v3) -> (result: m4) {
     return result
 }
 
-columns_3x3 :: proc (x, y, z: v3) -> (result: m4) {
+columns_3x3 :: proc (x, y, z: v3) -> m4 {
+    result: m4
+    
     result = m4 {
         x.x, y.x, z.x, 0,
         x.y, y.y, z.y, 0,

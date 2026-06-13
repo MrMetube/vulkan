@@ -63,7 +63,7 @@ void main() {
             float radius     = meshlet.radius;
             
             cone_axis = rotate(draw.orientation, cone_axis);
-            center    = rotate(draw.orientation, center) * draw.scale + draw.p;
+            center    = transform(draw.orientation, draw.scale, draw.p, center);
             radius   *= draw.scale;
             
             vec3 camera_position = vec3(globals.view[0].w, globals.view[1].w, globals.view[2].w);

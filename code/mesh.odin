@@ -67,52 +67,64 @@ load_mesh :: proc (geometry: ^Geometry, filepath: string, _allocator: Allocator)
     ////////////////////////////////////////////////
     // build meshlets
     
-    {
-        max_vertices  :: MaxVertices
-        max_triangles :: MaxTriangles 
-        cone_weight :: 0 // 0 when not culling, otherwise 0..1 
+    max_vertices  :: MaxVertices
+    max_triangles :: MaxTriangles 
+    cone_weight :: 0 // 0 when not culling, otherwise 0..1 
+    
+    max_count := meshoptimizer.buildMeshletsBound(auto_cast len(mesh_indices), max_vertices, max_triangles)
+    
+    meshlets := make([] meshoptimizer.Meshlet, max_count,         context.temp_allocator)
+    vertices := make([] u32,                   len(mesh_indices), context.temp_allocator)
+    indices  := make([] u8,                    len(mesh_indices), context.temp_allocator)
+    
+    actual_count := meshoptimizer.buildMeshlets(&meshlets[0], &vertices[0], &indices[0], &mesh_indices[0], len(mesh_indices), cast(^f32) &mesh_vertices[0], len(mesh_vertices), size_of(mesh_vertices[0]), max_vertices, max_triangles, cone_weight)
+    
+    for source in meshlets[:actual_count] {
+        dest := append_into(&geometry.meshlets)
         
-        max_count := meshoptimizer.buildMeshletsBound(auto_cast len(mesh_indices), max_vertices, max_triangles)
+        source_vertices := vertices[source.vertex_offset:]
+        source_indices  := indices[source.triangle_offset:]
         
-        meshlets := make([] meshoptimizer.Meshlet, max_count,         context.temp_allocator)
-        vertices := make([] u32,                   len(mesh_indices), context.temp_allocator)
-        indices  := make([] u8,                    len(mesh_indices), context.temp_allocator)
+        dest.data_offset = cast(u32) len(geometry.meshlet_data)
+        dest.triangle_count = safe_truncate(u8, source.triangle_count)
+        dest.vertex_count   = safe_truncate(u8, source.vertex_count)
         
-        actual_count := meshoptimizer.buildMeshlets(&meshlets[0], &vertices[0], &indices[0], &mesh_indices[0], len(mesh_indices), cast(^f32) &mesh_vertices[0], len(mesh_vertices), size_of(mesh_vertices[0]), max_vertices, max_triangles, cone_weight)
+        index_group_count := (source.triangle_count * 3 + 3) / 4
         
-        for source in meshlets[:actual_count] {
-            dest := append_into(&geometry.meshlets)
-            
-            source_vertices := vertices[source.vertex_offset:]
-            source_indices  := indices[source.triangle_offset:]
-            
-            dest.data_offset = cast(u32) len(geometry.meshlet_data)
-            dest.triangle_count = safe_truncate(u8, source.triangle_count)
-            dest.vertex_count   = safe_truncate(u8, source.vertex_count)
-            
-            index_group_count := (source.triangle_count * 3 + 3) / 4
-            
-            index_groups := slice_from_parts(u32, &source_indices[0], index_group_count)
-            
-            append(&geometry.meshlet_data, ..source_vertices[:source.vertex_count])
-            append(&geometry.meshlet_data, ..index_groups[:index_group_count])
-            
-            bounds := meshoptimizer.computeMeshletBounds(&source_vertices[0], &source_indices[0], cast(uint) source.triangle_count, cast(^f32) &mesh_vertices[0], len(mesh_vertices), size_of(mesh_vertices[0]))
-            
-            dest.center = bounds.center
-            dest.radius = bounds.radius
-            dest.cone_axis   = bounds.cone_axis_s8
-            dest.cone_cutoff = bounds.cone_cutoff_s8
-        }
+        index_groups := slice_from_parts(u32, &source_indices[0], index_group_count)
         
-        for &meshlet in geometry.meshlets[mesh.meshlet_offset:] {
-            meshlet_vertices  := &geometry.meshlet_data[meshlet.data_offset]
-            meshlet_triangles := &geometry.meshlet_data[meshlet.data_offset + auto_cast meshlet.vertex_count]
-            meshoptimizer.optimizeMeshlet(meshlet_vertices, cast(^u8) meshlet_triangles, auto_cast meshlet.triangle_count, auto_cast meshlet.vertex_count)
-        }
+        append(&geometry.meshlet_data, ..source_vertices[:source.vertex_count])
+        append(&geometry.meshlet_data, ..index_groups[:index_group_count])
         
-        mesh.meshlet_count = cast(u32) actual_count
+        bounds := meshoptimizer.computeMeshletBounds(&source_vertices[0], &source_indices[0], cast(uint) source.triangle_count, cast(^f32) &mesh_vertices[0], len(mesh_vertices), size_of(mesh_vertices[0]))
+        
+        dest.center = bounds.center
+        dest.radius = bounds.radius
+        dest.cone_axis   = bounds.cone_axis_s8
+        dest.cone_cutoff = bounds.cone_cutoff_s8
     }
+    
+    for &meshlet in geometry.meshlets[mesh.meshlet_offset:] {
+        meshlet_vertices  := &geometry.meshlet_data[meshlet.data_offset]
+        meshlet_triangles := &geometry.meshlet_data[meshlet.data_offset + auto_cast meshlet.vertex_count]
+        meshoptimizer.optimizeMeshlet(meshlet_vertices, cast(^u8) meshlet_triangles, auto_cast meshlet.triangle_count, auto_cast meshlet.vertex_count)
+    }
+    
+    mesh.meshlet_count = cast(u32) actual_count
+    
+    center: v3
+    for vertex in mesh_vertices {
+        center += vertex.p
+    }
+    center /= cast(f32) len(mesh_vertices)
+    
+    radius_squared: f32
+    for vertex in mesh_vertices {
+        radius_squared = max(radius_squared, length_squared(vertex.p - center))
+    }
+    
+    mesh.center = center
+    mesh.radius = square_root(radius_squared)
     
     return true
 }

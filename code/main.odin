@@ -22,12 +22,17 @@ MaxFramesInFlight :: 2
 
 // @todo(viktor): should vk.DeviceAddress be part of the buffer, so that it is all in one member
 Frame :: struct {
-    buffer:      Buffer,
-    globals_cpu: ^Draw_Globals,
-    globals_gpu: vk.DeviceAddress,
+    draw_globals: Push_Constant(Draw_Globals),
+    cull_globals: Push_Constant(Cull_Globals),
     
     command_buffer: vk.CommandBuffer,
     image_aquired:  vk.Semaphore,
+}
+
+Push_Constant :: struct ($T: typeid) {
+    buffer: Buffer,
+    cpu:    ^T,
+    gpu:    vk.DeviceAddress,
 }
 
 DescriptorUpdateData :: struct #raw_union {
@@ -45,6 +50,9 @@ Geometry :: struct {
 }
 
 Mesh :: struct {
+    center: v3,
+    radius: f32,
+    
     vertex_offset: u32,
     vertex_count:  u32,
     
@@ -65,9 +73,8 @@ MaxVertices  :: 64
 MaxTriangles :: 84
 
 // @volatile shaders
-// @note(viktor): this is technically only used for its layout and size, which we query from the compiler
-Push_Data :: struct {
-    address: vk.DeviceAddress,
+Cull_Globals :: struct {
+    frustum_planes: [6] v4,
 }
 
 // @volatile shaders
@@ -79,6 +86,9 @@ Draw_Globals :: struct {
 
 // @volatile shaders
 Draw :: struct {
+    center: v3,
+    radius: f32,
+    
     vertex_offset:  u32,
     vertex_count:   u32,
     meshlet_offset: u32,
@@ -169,16 +179,6 @@ main :: proc () {
         copy(vb_view,  geometry.vertices[:])
         copy(mb_view,  geometry.meshlets[:])
         copy(mdb_view, geometry.meshlet_data[:])
-    }
-    
-    ////////////////////////////////////////////////
-    
-    draw_globals: Draw_Globals
-    
-    for &pos, index in draw_globals.light_pos {
-        t := clamp_01_to_range(cast(f32) 0, cast(f32) len(draw_globals.light_pos), cast(f32) index)
-        pos.xyz = v3{0, -10, 10}
-        pos.xz += arm(t * Tau)
     }
     
     ////////////////////////////////////////////////
@@ -459,8 +459,16 @@ main :: proc () {
     pipeline:         Pipeline
     compute_pipeline: Pipeline
     
-    
     ////////////////////////////////////////////////
+    
+    draw_globals: Draw_Globals
+    cull_globals: Cull_Globals
+    
+    for &pos, index in draw_globals.light_pos {
+        t := clamp_01_to_range(cast(f32) 0, cast(f32) len(draw_globals.light_pos), cast(f32) index)
+        pos.xyz = v3{0, -10, 10}
+        pos.xz += arm(t * Tau)
+    }
     
     cam_pos := v3{ 0, 0, -6 }
     object_rotation: v3
@@ -487,7 +495,9 @@ main :: proc () {
         smooth.value = linear_blend(value, smooth.last_value, k)
         smooth.last_value = smooth.value
     }
-        
+    
+    cull_delta: f64
+    
     cpu_time: Smooth
     gpu_time: Smooth
     for !quit {
@@ -563,7 +573,7 @@ main :: proc () {
         any_shader_was_changed: bool
         for &shader in shaders {
             if watcher_modified(watchers, shader.source_watcher, shader.common_watcher) {
-                result, ok := compile_and_load_shader(shader.input, shader_allocator)
+                result, ok := compile_and_load_shader(shader.input, shader_allocator, old = &shader)
                 if !ok { continue }
                 
                 shader = result
@@ -573,7 +583,7 @@ main :: proc () {
         }
         compute_shader_was_changed: bool
         if watcher_modified(watchers, draw_command_compute_shader.source_watcher, draw_command_compute_shader.common_watcher) {
-            result, ok := compile_and_load_shader(draw_command_compute_shader.input, shader_allocator)
+            result, ok := compile_and_load_shader(draw_command_compute_shader.input, shader_allocator, old = &draw_command_compute_shader)
             if ok {
                 draw_command_compute_shader = result
                 watcher_set_up_to_date(watchers, draw_command_compute_shader.source_watcher, draw_command_compute_shader.common_watcher)
@@ -613,12 +623,11 @@ main :: proc () {
         
         // @note(viktor): QueuePool must be reset before use, but that would require a whole cmd begin-end.
         if absolute_frame_index > 1 {
-            query_results: [2] u64
+            query_results: [4] u64
             query_result := vk.GetQueryPoolResults(device, query_pool, 0, len(&query_results), cast(int) size_of_slice(query_results[:]), &query_results[0], size_of(query_results[0]), { ._64 } )
             
             if query_result != .NOT_READY && query_result != .ERROR_DEVICE_LOST {
                 check(query_result)
-                
                 
                 gpu_begin := cast(f64) query_results[0] * cast(f64) ips.device_properties.properties.limits.timestampPeriod * 1e-9
                 gpu_end   := cast(f64) query_results[1] * cast(f64) ips.device_properties.properties.limits.timestampPeriod * 1e-9
@@ -627,6 +636,10 @@ main :: proc () {
                 if gpu_delta >= 0 {
                     smooth_update(delta_time_64, &gpu_time, gpu_delta)
                 }
+                
+                cull_begin := cast(f64) query_results[2] * cast(f64) ips.device_properties.properties.limits.timestampPeriod * 1e-9
+                cull_end   := cast(f64) query_results[3] * cast(f64) ips.device_properties.properties.limits.timestampPeriod * 1e-9
+                cull_delta = cull_end - cull_begin
             }
         }
         
@@ -649,11 +662,11 @@ main :: proc () {
             a := f / aspect_w_h
             b := f
             c := near_z
-            // vulkan uses a inverted y-axis, so we invert it back to the regular y+ = up here
+            
             // due to homogenous coordinates, z is effectively 1/z
             result := m4 {
                 a,  0,  0, 0,
-                0, -b,  0, 0,
+                0,  b,  0, 0,
                 0,  0,  0, c,
                 0,  0, -1, 0, // -1 in the original blog post
             }
@@ -661,19 +674,33 @@ main :: proc () {
             return result
         }
         
-        draw_globals.projection = projection_reversed_z(70 * RadPerDeg, cast(f32) swapchain.size.x / cast(f32) swapchain.size.y, 0.01)
+        
+        projection := projection_reversed_z(70 * RadPerDeg, cast(f32) swapchain.size.x / cast(f32) swapchain.size.y, 0.01)
+        draw_globals.projection = projection
         draw_globals.view       = translate(1, cam_pos)
         
+        frame.draw_globals.cpu^ = draw_globals
         
-        frame.globals_cpu^ = draw_globals
+        // @todo(viktor): we also need to take the view matrix into account
+        draw_distance: f32 = 100
+        
+        cull_globals.frustum_planes[0] = get_column_v4(projection, 3) + get_column_v4(projection, 0) // x + w < 0
+        cull_globals.frustum_planes[1] = get_column_v4(projection, 3) - get_column_v4(projection, 0) // x - w > 0
+        cull_globals.frustum_planes[2] = get_column_v4(projection, 3) + get_column_v4(projection, 1) // y + w < 0
+        cull_globals.frustum_planes[3] = get_column_v4(projection, 3) - get_column_v4(projection, 1) // y - w > 0
+        cull_globals.frustum_planes[4] = get_column_v4(projection, 3) - get_column_v4(projection, 2) // z - w > 0 -- :ReversedZ:
+        cull_globals.frustum_planes[5] = v4{0, 0, -1, draw_distance}                                 // :ReversedZ: infinite far plane
+        
+        frame.cull_globals.cpu^ = cull_globals
+        
+        ////////////////////////////////////////////////
         
         triangles_this_frame: u32
         
         entropy := seed_random_series(5175546)
-        @(static) draws: [50] Draw
+        @(static) draws: [5000] Draw
         for &draw in draws {
-            p := random_bilateral(&entropy, v3) * {20, 15, 30}
-            p.z -= 30
+            p := random_bilateral(&entropy, v3) * {20, 15, 60}
             
             draw.p           = p
             draw.scale       = linear_blend(cast(f32) 1, 4, square(random_unilateral(&entropy, f32)))
@@ -682,6 +709,9 @@ main :: proc () {
             draw.orientation = rotation * global_rotation
             
             mesh := random_choice(&entropy, geometry.meshes[:])
+            
+            draw.center = mesh.center
+            draw.radius = mesh.radius
             
             draw.vertex_offset  = mesh.vertex_offset
             draw.vertex_count   = mesh.vertex_count
@@ -702,11 +732,12 @@ main :: proc () {
         }
         
         // @todo(viktor): just accumulate triangle count and meshlet count each frame in the draw loop
-        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, triangles: %v, %v triangles/s", 
+        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, cull time: %.3v, triangles: %v, %v triangles/s", 
             view(cpu_time.value), 
             view(gpu_time.value), 
+            view(cull_delta), 
             view_magnitude(triangles_this_frame), 
-            view_magnitude(cast(f64) triangles_this_frame / cpu_time.value),
+            view_magnitude(cast(f64) triangles_this_frame / gpu_time.value),
         ))
         
         ////////////////////////////////////////////////
@@ -722,6 +753,10 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
+        vk.CmdWriteTimestamp(cb, { .BOTTOM_OF_PIPE }, query_pool, 2)
+        
+        vk.CmdBindPipeline(cb, .COMPUTE, compute_pipeline.pipeline)
+        
         // @volatile needs to match the bindings in shaders 
         compute_descriptor_update := [ComputeStorageBufferCount] DescriptorUpdateData {
             { buffer = { draw_buffer.buffer,         0, auto_cast vk.WHOLE_SIZE }},
@@ -729,13 +764,16 @@ main :: proc () {
         }
         vk.CmdPushDescriptorSetWithTemplate(cb, compute_pipeline.update_template, compute_pipeline.layout, 0, &compute_descriptor_update[0])
         
-        vk.CmdBindPipeline(cb, .COMPUTE, compute_pipeline.pipeline)
+        vk.CmdPushConstants(cb, compute_pipeline.layout, compute_pipeline.shader_stages, 0, size_of(frame.cull_globals.gpu), &frame.cull_globals.gpu)
+        
         // @volatile the round up needs align with the ComputeWidth
         vk.CmdDispatch(cb, len(draws) + 31 / 32,  1, 1)
         
         begin_pipeline_barrier()
             add_memory_barrier(draw_command_buffer.buffer, { .SHADER_WRITE }, { .INDIRECT_COMMAND_READ })
         end_pipeline_barrier(cb, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
+        
+        vk.CmdWriteTimestamp(cb, { .BOTTOM_OF_PIPE }, query_pool, 3)
         
         ////////////////////////////////////////////////
         
@@ -773,7 +811,7 @@ main :: proc () {
         vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline.layout, 1, 1, &textures_descriptor_set, 0, nil)
         
         
-        vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader_stages, 0, size_of(Push_Data), &Push_Data { address = frame.globals_gpu })
+        vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader_stages, 0, size_of(frame.draw_globals.gpu), &frame.draw_globals.gpu)
         // @todo(viktor): this is deprecated, use vkCmdDrawMeshTasksIndirect2EXT
         vk.CmdDrawMeshTasksIndirectEXT(cb, draw_command_buffer.buffer, 0, len(draws), size_of(Draw_Command))
         
@@ -831,7 +869,8 @@ main :: proc () {
 	check(vk.DeviceWaitIdle(device))
     
     for frame in frames {
-        gpu_delete(frame.buffer)
+        gpu_delete(frame.draw_globals.buffer)
+        gpu_delete(frame.cull_globals.buffer)
     }
     
     gpu_delete(vertex_buffer)

@@ -466,14 +466,23 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
     
     frames := make([] Frame, MaxFramesInFlight, context.allocator)
     
+    // @waste there are a lot of buffers here, each of which is very small
     for &frame in frames {
-        frame.buffer, frame.globals_cpu = gpu_make_buffer_struct({ .SHADER_DEVICE_ADDRESS }, Draw_Globals)
+        frame.draw_globals.buffer, frame.draw_globals.cpu = gpu_make_buffer_struct({ .SHADER_DEVICE_ADDRESS }, Draw_Globals)
         
         device_address_info := vk.BufferDeviceAddressInfo {
             sType  = .BUFFER_DEVICE_ADDRESS_INFO,
-            buffer = frame.buffer.buffer,
+            buffer = frame.draw_globals.buffer.buffer,
         }
-        frame.globals_gpu = vk.GetBufferDeviceAddress(device, &device_address_info)
+        frame.draw_globals.gpu = vk.GetBufferDeviceAddress(device, &device_address_info)
+        
+        frame.cull_globals.buffer, frame.cull_globals.cpu = gpu_make_buffer_struct({ .SHADER_DEVICE_ADDRESS }, Cull_Globals)
+        
+        device_address_info = vk.BufferDeviceAddressInfo {
+            sType  = .BUFFER_DEVICE_ADDRESS_INFO,
+            buffer = frame.cull_globals.buffer.buffer,
+        }
+        frame.cull_globals.gpu = vk.GetBufferDeviceAddress(device, &device_address_info)
         
         frame.image_aquired = create_semaphore(device)
         defer_destroy(vk.DestroySemaphore, frame.image_aquired)
@@ -583,6 +592,28 @@ pipeline_is_valid :: proc (pipeline: Pipeline) -> bool {
     return result
 }
 
+create_pipeline_layout :: proc (device: vk.Device, stage_flags: vk.ShaderStageFlags, set_layouts: ..vk.DescriptorSetLayout, with_push_data_which_is_an_address := false) -> vk.PipelineLayout {
+    layout_create_info := vk.PipelineLayoutCreateInfo {
+        sType = .PIPELINE_LAYOUT_CREATE_INFO,
+        
+        setLayoutCount = cast(u32) len(set_layouts),
+        pSetLayouts    = &set_layouts[0],
+    }
+    
+    if with_push_data_which_is_an_address {
+        layout_create_info.pushConstantRangeCount = 1
+        layout_create_info.pPushConstantRanges = &vk.PushConstantRange {
+            stageFlags = stage_flags,
+            size       = size_of(vk.DeviceAddress),
+        }
+    }
+    
+    result: vk.PipelineLayout
+    check(vk.CreatePipelineLayout(device, &layout_create_info, nil, &result))
+    
+    return result
+}
+
 create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, shader: Shader, storage_buffer_count: u32, set_layout: vk.DescriptorSetLayout, old: Pipeline = {}) -> Pipeline {
     if pipeline_is_valid(old) {
         check(vk.DeviceWaitIdle(device))
@@ -591,18 +622,10 @@ create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sha
     
     assert(.COMPUTE in shader.stages)
     
-    set_layout := set_layout
-    
     result: Pipeline
     result.shader_stages += shader.stages
     
-    layout_create_info := vk.PipelineLayoutCreateInfo {
-        sType = .PIPELINE_LAYOUT_CREATE_INFO,
-        
-        setLayoutCount = 1,
-        pSetLayouts = &set_layout,
-    }
-    check(vk.CreatePipelineLayout(device, &layout_create_info, nil, &result.layout))
+    result.layout = create_pipeline_layout(device, result.shader_stages, set_layout, with_push_data_which_is_an_address = true)
     
     // @copypasta from create_graphics_pipeline
     shader_stages: [dynamic; 16] vk.PipelineShaderStageCreateInfo
@@ -646,18 +669,7 @@ create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sw
         result.shader_stages += shader.stages
     }
     
-    layout_create_info := vk.PipelineLayoutCreateInfo {
-        sType = .PIPELINE_LAYOUT_CREATE_INFO,
-        setLayoutCount = cast(u32) len(set_layouts),
-        pSetLayouts    = &set_layouts[0],
-        pushConstantRangeCount = 1,
-        pPushConstantRanges    = &vk.PushConstantRange {
-            stageFlags = result.shader_stages,
-            size       = size_of(Push_Data),
-        },
-    }
-    
-    check(vk.CreatePipelineLayout(device, &layout_create_info, nil, &result.layout))
+    result.layout = create_pipeline_layout(device, result.shader_stages, ..set_layouts, with_push_data_which_is_an_address = true)
     
     shader_stages: [dynamic; 16] vk.PipelineShaderStageCreateInfo
     module_infos:  [dynamic; 16] vk.ShaderModuleCreateInfo
@@ -869,7 +881,7 @@ gpu_make_buffer_slice :: proc (usage: vk.BufferUsageFlags, $S: typeid / [] $E, #
     return buffer, view
 }
 gpu_make_buffer_struct :: proc (usage: vk.BufferUsageFlags, $S: typeid) -> (Buffer, ^S) {
-    size   := size_of(E)
+    size   := size_of(S)
     buffer, pointer := gpu_make_buffer_size(usage, size)
     data := cast(^S) pointer
     return buffer, data

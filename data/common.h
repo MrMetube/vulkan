@@ -31,6 +31,9 @@ layout(buffer_reference, buffer_reference_align = 8) buffer Draw_Globals {
 
 // @volatile
 struct Draw {
+    vec3 center;
+    float radius;
+    
     uint vertex_offset;
     uint vertex_count;
     uint meshlet_offset;
@@ -64,4 +67,8 @@ struct Meshlet {
 
 vec3 rotate (vec4 q, vec3 v) {
     return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
+
+vec3 transform(vec4 orientation, float scale, vec3 offset, vec3 p) {
+    return rotate(orientation, p) * scale + offset;
 }

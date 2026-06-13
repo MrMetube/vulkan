@@ -119,7 +119,8 @@ void main() {
             result.debug_color = vec3(float(mhash & 255), float((mhash >> 8) & 255), float((mhash >> 16) & 255)) / 255.0;
         }
         
-        gl_MeshVerticesEXT[i].gl_Position = position;
+        // @note(viktor): vulkan uses a inverted y-axis, so we invert it back to the regular y+ = up here
+        gl_MeshVerticesEXT[i].gl_Position = position * vec4(1, -1, 1, 1);
         mesh_result[i] = result;
     }
     

@@ -45,10 +45,11 @@ View_Magnitude_Formatter :: proc (info: ^fmt.Info, arg: any, verb: rune) -> bool
     value: f64
     symbol: rune
     switch {
-    case view.value > 1000_000_000: symbol, value = 'G', cast(f64) view.value / 1000_000_000
-    case view.value > 1000_000:     symbol, value = 'M', cast(f64) view.value / 1000_000
-    case view.value > 1000:         symbol, value = 'k', cast(f64) view.value / 1000
-    case:                           symbol, value = ' ', cast(f64) view.value
+    case view.value > 1000_000_000_000: symbol, value = 'T', cast(f64) view.value / 1000_000_000_000
+    case view.value > 1000_000_000:     symbol, value = 'G', cast(f64) view.value / 1000_000_000
+    case view.value > 1000_000:         symbol, value = 'M', cast(f64) view.value / 1000_000
+    case view.value > 1000:             symbol, value = 'k', cast(f64) view.value / 1000
+    case:                               symbol, value = ' ', cast(f64) view.value
     }
     
     info.prec = view.precision

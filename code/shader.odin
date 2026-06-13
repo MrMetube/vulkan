@@ -31,6 +31,9 @@ compile_and_load_shader :: proc (input: string, bytes_allocator: Allocator, outp
     append(&cmd, input)
     
     result: Shader
+    if old != nil {
+        result = old^
+    }
     result.input = input
     
     stdout: string
