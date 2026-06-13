@@ -46,6 +46,9 @@ Shader :: struct {
     
     stages: vk.ShaderStageFlags,
     bytes:  [] u8,
+    
+    source_watcher: Watcher_Id,
+    common_watcher: Watcher_Id,
 }
 
 Image :: struct {
@@ -575,7 +578,17 @@ end_pipeline_barrier :: proc (command_buffer: vk.CommandBuffer, src_stage_mask, 
 
 ////////////////////////////////////////////////
 
-create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, shader: Shader, storage_buffer_count: u32, set_layout: vk.DescriptorSetLayout) -> Pipeline {
+pipeline_is_valid :: proc (pipeline: Pipeline) -> bool {
+    result := pipeline.pipeline != 0
+    return result
+}
+
+create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, shader: Shader, storage_buffer_count: u32, set_layout: vk.DescriptorSetLayout, old: Pipeline = {}) -> Pipeline {
+    if pipeline_is_valid(old) {
+        check(vk.DeviceWaitIdle(device))
+        destroy_pipeline(device, old)
+    }
+    
     assert(.COMPUTE in shader.stages)
     
     set_layout := set_layout
@@ -623,8 +636,10 @@ create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sha
 }
 
 create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, swapchain: Swapchain, set_layouts: [] vk.DescriptorSetLayout, shaders: [] Shader, storage_buffer_count: u32, old: Pipeline = {}) -> Pipeline {
-    check(vk.DeviceWaitIdle(device))
-    destroy_pipeline(device, old)
+    if pipeline_is_valid(old) {
+        check(vk.DeviceWaitIdle(device))
+        destroy_pipeline(device, old)
+    }
     
     result: Pipeline
     for shader in shaders {

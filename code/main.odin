@@ -416,21 +416,23 @@ main :: proc () {
     // @todo(viktor): if we want to only reload specific shaders, we need a general purpose allocator.
     shader_allocator := context.allocator
     
-    shader_catalogue := catalogue_make(Shader, allocator = shader_allocator)
+    shader_files := make([dynamic] string, context.temp_allocator)
+    get_all_files_with_extension(&shader_files, ".", shader_allocator, ".frag", ".mesh", ".task")
     
-    setup_iter := catalogue_begin_setup(&shader_catalogue, ".")
-    for value, entry in catalogue_setup_files(&setup_iter, ".frag", ".mesh", ".task") {
-        shader, ok := compile_and_load_shader(entry.full_path, shader_allocator)
-        assert(ok, "Failed to initially load the shaders.")
-        
-        value^ = shader
+    watcher_allocator := context.allocator
+    watchers := make([dynamic] Watcher, watcher_allocator)
+    
+    common_watcher_id := watchers_make(&watchers, "common.h")
+    
+    shaders: [dynamic] Shader
+    for file in shader_files {
+        shader := init_shader_and_watchers(&watchers, common_watcher_id, file, shader_allocator)
+        append(&shaders, shader)
     }
-    catalogue_end_setup(&setup_iter)
     
-    draw_command_compute_shader, comp_ok := compile_and_load_shader("draw_command.comp", shader_allocator)
-    assert(comp_ok, "Failed to initially load the compute shader")
+    draw_command_compute_shader := init_shader_and_watchers(&watchers, common_watcher_id, "draw_command.comp", shader_allocator)
     
-    //////////////////////////////
+    ////////////////////////////////////////////////
     
     timeline_semaphore := create_semaphore(device, timeline_initial_value = MaxFramesInFlight)
     defer_destroy(vk.DestroySemaphore, timeline_semaphore)
@@ -454,10 +456,9 @@ main :: proc () {
     // @speed is a pipeline cache still a good optimization?
     pipeline_cache: vk.PipelineCache = 0
     
-    pipeline: Pipeline
+    pipeline:         Pipeline
+    compute_pipeline: Pipeline
     
-    // @todo(viktor): hot reloading
-    compute_pipeline := create_compute_pipeline(device, pipeline_cache, draw_command_compute_shader, ComputeStorageBufferCount, compute_descriptor_set_layout)
     
     ////////////////////////////////////////////////
     
@@ -557,16 +558,36 @@ main :: proc () {
             recreate_swapchain(ips, device, sdl_get_window_size(window), &swapchain)
         }
         
+        watchers_check_for_modification(watchers)
+        
         any_shader_was_changed: bool
-        for iter := catalogue_begin_changed(&shader_catalogue); shader in catalogue_changed_files(&iter) {
-            ok := compile_and_load_shader(shader, shader_allocator)
-            if !ok { continue }
-            any_shader_was_changed = true
+        for &shader in shaders {
+            if watcher_modified(watchers, shader.source_watcher, shader.common_watcher) {
+                result, ok := compile_and_load_shader(shader.input, shader_allocator)
+                if !ok { continue }
+                
+                shader = result
+                any_shader_was_changed = true
+                watcher_set_up_to_date(watchers, shader.source_watcher, shader.common_watcher)
+            }
+        }
+        compute_shader_was_changed: bool
+        if watcher_modified(watchers, draw_command_compute_shader.source_watcher, draw_command_compute_shader.common_watcher) {
+            result, ok := compile_and_load_shader(draw_command_compute_shader.input, shader_allocator)
+            if ok {
+                draw_command_compute_shader = result
+                watcher_set_up_to_date(watchers, draw_command_compute_shader.source_watcher, draw_command_compute_shader.common_watcher)
+                
+                compute_shader_was_changed = true
+            }
         }
         
-        // @cleanup better way to detect an invalid pipeline
-        if any_shader_was_changed || absolute_frame_index == 0 {
-            pipeline = create_graphics_pipeline(device, pipeline_cache, swapchain, { graphics_descriptor_set_layout, textures_descriptor_set_layout }, shader_catalogue.values[:], GraphicsStorageBufferCount, pipeline)
+        if compute_shader_was_changed || !pipeline_is_valid(compute_pipeline) {
+            compute_pipeline = create_compute_pipeline(device, pipeline_cache, draw_command_compute_shader, ComputeStorageBufferCount, compute_descriptor_set_layout, compute_pipeline)
+        }
+        
+        if any_shader_was_changed || !pipeline_is_valid(pipeline) {
+            pipeline = create_graphics_pipeline(device, pipeline_cache, swapchain, { graphics_descriptor_set_layout, textures_descriptor_set_layout }, shaders[:], GraphicsStorageBufferCount, pipeline)
         }
         
         ////////////////////////////////////////////////

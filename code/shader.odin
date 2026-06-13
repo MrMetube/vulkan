@@ -3,20 +3,21 @@ package main
 import "core:fmt"
 import "core:os"
 
-compile_and_load_shader :: proc { compile_and_load_shader_pointer, compile_and_load_shader_value }
-
-compile_and_load_shader_value :: proc (input: string, allocator: Allocator, output_extension := ".spv") -> (Shader, bool) {
-    result: Shader
-    result.input = input
-    ok := compile_and_load_shader(&result, allocator, output_extension = output_extension)
-    return result, ok
+init_shader_and_watchers :: proc (watchers: ^[dynamic] Watcher, common_watcher: Watcher_Id, input: string, bytes_allocator: Allocator, output_extension := ".spv") -> Shader {
+    result, ok := compile_and_load_shader(input, bytes_allocator)
+    if !ok {
+        assert(false, fmt.tprintf("Failed to initially load the shader `%v`", input))
+    }
+    result.source_watcher = watchers_make(watchers, result.input)
+    result.common_watcher = common_watcher
+    return result
 }
 
-compile_and_load_shader_pointer :: proc (old: ^Shader, allocator: Allocator, output_extension := ".spv") -> bool {
+compile_and_load_shader :: proc (input: string, bytes_allocator: Allocator, output_extension := ".spv", old: ^Shader = nil) -> (Shader, bool) {
     cmd: Cmd
     cmd.allocator = context.temp_allocator
     
-    shader_output := fmt.tprintf("%v%v", old.input, output_extension)
+    shader_output := fmt.tprintf("%v%v", input, output_extension)
     
     append(&cmd, "C:/tools/VulkanSDK/1.4.350.0/Bin/glslc.exe")
     append(&cmd, "--target-env=vulkan1.4")
@@ -27,13 +28,16 @@ compile_and_load_shader_pointer :: proc (old: ^Shader, allocator: Allocator, out
     if Optimized {
         append(&cmd, "-O")
     }
-    append(&cmd, old.input)
+    append(&cmd, input)
+    
+    result: Shader
+    result.input = input
     
     stdout: string
     stderr: string
     if !run_command(&cmd, or_exit = false, stdout = &stdout, stderr = &stderr) {
         fmt.eprintfln("Failed to run command to compile shader '%v'")
-        return false
+        return result, false
     }
     
     if stdout != "" {
@@ -42,19 +46,21 @@ compile_and_load_shader_pointer :: proc (old: ^Shader, allocator: Allocator, out
     
     if stderr != "" {
         fmt.printfln("Hotreload error: %v", stderr)
-        return false
+        return result, false
     }
     
-    shader_bytes, err := os.read_entire_file(shader_output, allocator)
+    shader_bytes, err := os.read_entire_file(shader_output, bytes_allocator)
     if err != nil {
-        fmt.printfln("Could not load the output file of '%v', which is '%v': %v", old.input, shader_output, os.error_string(err))
-        return false
+        fmt.printfln("Could not load the output file of '%v', which is '%v': %v", result.input, shader_output, os.error_string(err))
+        return result, false
     }
     
-    delete(old.bytes)
-    old.bytes = shader_bytes
+    if old != nil {
+        delete(old.bytes)
+    }
     
-    old.stages = {}
+    result.bytes = shader_bytes
+    
     {
         shader_code := slice_from_parts(u32, raw_data(shader_bytes), len(shader_bytes) / 4)
         
@@ -70,11 +76,11 @@ compile_and_load_shader_pointer :: proc (old: ^Shader, allocator: Allocator, out
                 execution_model := code[1]
                 
                 #partial switch cast(SpvExecutionModel) execution_model {
-                case .Vertex:     old.stages += { .VERTEX }
-                case .Fragment:   old.stages += { .FRAGMENT }
-                case .MeshEXT:    old.stages += { .MESH_EXT }
-                case .TaskEXT:    old.stages += { .TASK_EXT }
-                case .GLCompute:  old.stages += { .COMPUTE }
+                case .Vertex:     result.stages += { .VERTEX }
+                case .Fragment:   result.stages += { .FRAGMENT }
+                case .MeshEXT:    result.stages += { .MESH_EXT }
+                case .TaskEXT:    result.stages += { .TASK_EXT }
+                case .GLCompute:  result.stages += { .COMPUTE }
                 }
             }
             
@@ -82,10 +88,12 @@ compile_and_load_shader_pointer :: proc (old: ^Shader, allocator: Allocator, out
         }
     }
     
-    return true
+    return result, true
 }
 
-// @note(viktor): copypastaed from https://github.com/KhronosGroup/SPIRV-Headers/blob/main/include/spirv/unified1/spirv.h
+////////////////////////////////////////////////
+// @note(viktor): copy-pasted from https://github.com/KhronosGroup/SPIRV-Headers/blob/main/include/spirv/unified1/spirv.h
+
 @(private="file")
 SpvMagicNumber :: 0x07230203
 
