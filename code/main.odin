@@ -228,7 +228,7 @@ main :: proc () {
             for level in 0..<loaded_texture.mip_levels {
                 mip_offset: uint = loaded_texture.mip_offsets[level]
                 
-                append(&copy_regions, vk.BufferImageCopy{
+                append(&copy_regions, vk.BufferImageCopy {
                     bufferOffset = auto_cast mip_offset,
                     imageSubresource = { aspectMask = { .COLOR }, mipLevel = level, layerCount = 1 },
                     imageExtent = { width = loaded_texture.width >> level, height = loaded_texture.height >> level, depth = 1 },
@@ -251,7 +251,7 @@ main :: proc () {
             
             check(vk.QueueSubmit(queue, 1, &once_submit_info, fence_once))
             
-            check(vk.WaitForFences(device, 1, &fence_once, true, max(u64)))
+            check(vk.WaitForFences(device, 1, &fence_once, waitAll = true, timeout = MaxTimeout))
             
             sampler_create_info := vk.SamplerCreateInfo {
                 sType = .SAMPLER_CREATE_INFO,
@@ -462,7 +462,6 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     draw_globals: Draw_Globals
-    cull_globals: Cull_Globals
     
     for &pos, index in draw_globals.light_pos {
         t := clamp_01_to_range(cast(f32) 0, cast(f32) len(draw_globals.light_pos), cast(f32) index)
@@ -474,8 +473,6 @@ main :: proc () {
     object_rotation: v3
     quit: bool
     last_time := time.tick_now()
-    
-    Timeout :: max(u64)
     
     absolute_frame_index: u64
     image_index: u32
@@ -612,7 +609,7 @@ main :: proc () {
             pSemaphores    = &timeline_semaphore,
             pValues        = &wait_value,
         }
-        wait_result := vk.WaitSemaphores(device, &wait_info, Timeout)
+        wait_result := vk.WaitSemaphores(device, &wait_info, MaxTimeout)
         if wait_result == .TIMEOUT {
             should_recreate_swapchain = true
             continue
@@ -648,7 +645,7 @@ main :: proc () {
         frame := frames[absolute_frame_index % MaxFramesInFlight]
         absolute_frame_index += 1
         
-        acquire_result := vk.AcquireNextImageKHR(device, swapchain.swapchain, Timeout, frame.image_aquired, {}, &image_index)
+        acquire_result := vk.AcquireNextImageKHR(device, swapchain.swapchain, MaxTimeout, frame.image_aquired, {}, &image_index)
         if acquire_result == .ERROR_OUT_OF_DATE_KHR || acquire_result == .SUBOPTIMAL_KHR {
             should_recreate_swapchain = true
             continue
@@ -674,15 +671,14 @@ main :: proc () {
             return result
         }
         
-        
         projection := projection_reversed_z(70 * RadPerDeg, cast(f32) swapchain.size.x / cast(f32) swapchain.size.y, 0.01)
         draw_globals.projection = projection
         draw_globals.view       = translate(1, cam_pos)
         
-        frame.draw_globals.cpu^ = draw_globals
-        
         // @todo(viktor): we also need to take the view matrix into account
         draw_distance: f32 = 100
+        
+        cull_globals: Cull_Globals
         
         cull_globals.frustum_planes[0] = get_column_v4(projection, 3) + get_column_v4(projection, 0) // x + w < 0
         cull_globals.frustum_planes[1] = get_column_v4(projection, 3) - get_column_v4(projection, 0) // x - w > 0
@@ -691,6 +687,8 @@ main :: proc () {
         cull_globals.frustum_planes[4] = get_column_v4(projection, 3) - get_column_v4(projection, 2) // z - w > 0 -- :ReversedZ:
         cull_globals.frustum_planes[5] = v4{0, 0, -1, draw_distance}                                 // :ReversedZ: infinite far plane
         
+        
+        frame.draw_globals.cpu^ = draw_globals
         frame.cull_globals.cpu^ = cull_globals
         
         ////////////////////////////////////////////////

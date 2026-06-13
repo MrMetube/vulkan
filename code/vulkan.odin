@@ -118,15 +118,17 @@ create_instance_physical_device_and_surface :: proc (window: ^sdl.Window, get_in
         
         when !Optimized {
             validation_layers := [] cstring { "VK_LAYER_KHRONOS_validation" }
-            instance_create_info.enabledLayerCount   = auto_cast len(validation_layers)
+                instance_create_info.enabledLayerCount   = auto_cast len(validation_layers)7
             instance_create_info.ppEnabledLayerNames = raw_data(validation_layers)
             
             instance_create_info.pNext = &vk.DebugUtilsMessengerCreateInfoEXT {
                 sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
                 messageSeverity = { .VERBOSE, .WARNING, .ERROR },
-                messageType = { .VALIDATION, .PERFORMANCE },
+                messageType     = { .VALIDATION, .PERFORMANCE },
                 pfnUserCallback = vulkan_debug_utils_callback,
             }
+        } else {
+            unused(vulkan_debug_utils_callback)
         }
         
         check(vk.CreateInstance(&instance_create_info, nil, &ips.instance))
@@ -593,23 +595,23 @@ pipeline_is_valid :: proc (pipeline: Pipeline) -> bool {
 }
 
 create_pipeline_layout :: proc (device: vk.Device, stage_flags: vk.ShaderStageFlags, set_layouts: ..vk.DescriptorSetLayout, with_push_data_which_is_an_address := false) -> vk.PipelineLayout {
-    layout_create_info := vk.PipelineLayoutCreateInfo {
-        sType = .PIPELINE_LAYOUT_CREATE_INFO,
-        
-        setLayoutCount = cast(u32) len(set_layouts),
-        pSetLayouts    = &set_layouts[0],
+    info := vk.PipelineLayoutCreateInfo { sType = .PIPELINE_LAYOUT_CREATE_INFO }
+    
+    if len(set_layouts) > 0 {
+        info.setLayoutCount = cast(u32) len(set_layouts)
+        info.pSetLayouts    = &set_layouts[0]
     }
     
     if with_push_data_which_is_an_address {
-        layout_create_info.pushConstantRangeCount = 1
-        layout_create_info.pPushConstantRanges = &vk.PushConstantRange {
+        info.pushConstantRangeCount = 1
+        info.pPushConstantRanges = &vk.PushConstantRange {
             stageFlags = stage_flags,
             size       = size_of(vk.DeviceAddress),
         }
     }
     
     result: vk.PipelineLayout
-    check(vk.CreatePipelineLayout(device, &layout_create_info, nil, &result))
+    check(vk.CreatePipelineLayout(device, &info, nil, &result))
     
     return result
 }
@@ -1057,6 +1059,8 @@ gpu_delete_image :: proc (image: Image) {
 }
 
 ////////////////////////////////////////////////
+
+MaxTimeout :: max(u64)
 
 create_semaphore :: proc (device: vk.Device, flags: vk.SemaphoreCreateFlags = {}, timeline_initial_value: Maybe(u64) = nil) -> vk.Semaphore {
     create_info := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO, flags = flags }
