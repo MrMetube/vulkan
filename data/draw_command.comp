@@ -41,9 +41,6 @@ void main() {
         vec4 plane = push.globals.frustum_planes[i];
         visible = visible && (dot(plane, vec4(center, 1)) > -radius);
     }
-    // int i = 5;
-    // vec4 plane = push.globals.frustum_planes[i];
-    // visible = visible && (dot(plane, vec4(center, 1)) > -radius);
     
     draw_command_buffer[draw_index].groupCountX = visible ? (draw.meshlet_count + TaskWidth-1) / TaskWidth : 0;
     draw_command_buffer[draw_index].groupCountY = 1;

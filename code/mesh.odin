@@ -69,7 +69,7 @@ load_mesh :: proc (geometry: ^Geometry, filepath: string, _allocator: Allocator)
     
     max_vertices  :: MaxVertices
     max_triangles :: MaxTriangles 
-    cone_weight :: 0 // 0 when not culling, otherwise 0..1 
+    cone_weight :: 0.5 // 0 when not culling, otherwise 0..1 
     
     max_count := meshoptimizer.buildMeshletsBound(auto_cast len(mesh_indices), max_vertices, max_triangles)
     

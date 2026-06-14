@@ -27,7 +27,7 @@ layout(binding = 1) readonly buffer Meshlets {
 
 bool cone_cull(vec3 center, float radius, vec3 axis, float cutoff, vec3 camera) {
     vec3 delta = center - camera;
-    return dot(delta, axis) > cutoff * length(delta) + radius;
+    return dot(delta, axis) >= cutoff * length(delta) + radius;
 }
 
 ////////////////////////////////////////////////
@@ -36,7 +36,7 @@ layout(local_size_x = TaskWidth, local_size_y = 1, local_size_z = 1) in;
 
 taskPayloadSharedEXT Task_Result task_result;
 
-#define CULL !true
+#define CULL true
 
 void main() {
     uint meshlet_group_index = gl_WorkGroupID.x;
