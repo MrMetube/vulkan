@@ -397,13 +397,13 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
             
             // @todo(viktor): check if this would help the texture upload hostImageCopy
             // hostImageCopy = true,
-            // @note(viktor): scalarBlockLayout - struct members are padded like c/c++ would, I assume it makes simple memcopy possible
+            // @note(viktor): scalarBlockLayout - struct members are padded like c/c++ would
             
         pNext = &vk.PhysicalDeviceVulkan13Features {
             sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
             
             synchronization2 = true,
-            dynamicRendering = true,
+            dynamicRendering = true, // @note(viktor): required since 1.3
             maintenance4 = true, // @note(viktor): allows using layout(local_size...)
             
         pNext = &vk.PhysicalDeviceVulkan12Features {
@@ -423,9 +423,9 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
         pNext = &vk.PhysicalDeviceVulkan11Features {
             sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
             
-            storageBuffer16BitAccess = true,
+            storageBuffer16BitAccess           = true,
             uniformAndStorageBuffer16BitAccess = true,
-            shaderDrawParameters = true,
+            shaderDrawParameters               = true,
             
         pNext = &vk.PhysicalDeviceMeshShaderFeaturesEXT {
             sType = .PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,

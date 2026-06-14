@@ -32,3 +32,8 @@ While it is possible to use a mix of these in the same application, they cannot 
 ### Buffer Commands: Superseded by device address commands
 
 Most commands that previously took buffer objects, including all command buffer commands, have now been superseded by equivalent commands or structures that use [VkDeviceAddressRangeKHR](https://docs.vulkan.org/spec/latest/chapters/fundamentals.html#VkDeviceAddressRangeKHR) structures to specify the address range directly. Some of these need a little additional information from the application in the form of VkAddressCommandFlagBitsKHR, which previously would have been retrieved from the buffer object itself.
+
+## Guide 
+- [dynamic state](https://github.com/KhronosGroup/Vulkan-Guide/blob/main/chapters/dynamic_state_map.adoc)
+- [synchronization2](https://github.com/KhronosGroup/Vulkan-Guide/blob/main/chapters/extensions/VK_KHR_synchronization2.adoc)
+- [device generated commands](https://docs.vulkan.org/features/latest/features/proposals/VK_EXT_device_generated_commands.html)
