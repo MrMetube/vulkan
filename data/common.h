@@ -46,6 +46,8 @@ struct Draw {
 
 // @volatile
 struct Draw_Command {
+    uint draw_id;
+    
     uint groupCountX;
     uint groupCountY;
     uint groupCountZ;

@@ -374,6 +374,7 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
     device_extensions := [] cstring { 
         vk.KHR_SWAPCHAIN_EXTENSION_NAME,
         vk.EXT_MESH_SHADER_EXTENSION_NAME,
+        vk.KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME,
     }
     
     device_create_info := vk.DeviceCreateInfo {
@@ -419,6 +420,9 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
             shaderInt8    = true,
             uniformAndStorageBuffer8BitAccess = true,
             storageBuffer8BitAccess           = true,
+            
+            // @study is this still an improvement, now that there is draw_indirect_command_ext and not just .._nv?
+            drawIndirectCount = true, // @note(viktor): let the culling shader specify the amount of draw commands, so that we don't dispatch empty commands
             
         pNext = &vk.PhysicalDeviceVulkan11Features {
             sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,

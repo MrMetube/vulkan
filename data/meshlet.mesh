@@ -66,9 +66,9 @@ layout(triangles, max_vertices = VertexLimit, max_primitives = TriangleLimit) ou
 layout(location = 0) out Mesh_Result mesh_result[];
 
 void main() {
-    uint thread_index = gl_LocalInvocationID.x;
+    uint thread_index  = gl_LocalInvocationID.x;
 	uint meshlet_index = task_result.indices[gl_WorkGroupID.x];
-    uint draw_index = task_result.draw_index;
+    uint draw_index    = task_result.draw_index;
     
     Draw_Globals globals = push.globals;
     Draw draw = draw_buffer[draw_index];

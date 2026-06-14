@@ -20,7 +20,6 @@ MaxFramesInFlight :: 2
 
 ////////////////////////////////////////////////
 
-// @todo(viktor): should vk.DeviceAddress be part of the buffer, so that it is all in one member
 Frame :: struct {
     draw_globals: Push_Constant(Draw_Globals),
     cull_globals: Push_Constant(Cull_Globals),
@@ -29,6 +28,7 @@ Frame :: struct {
     image_aquired:  vk.Semaphore,
 }
 
+// @todo(viktor): should vk.DeviceAddress be part of the buffer, so that it is all in one member
 Push_Constant :: struct ($T: typeid) {
     buffer: Buffer,
     cpu:    ^T,
@@ -101,7 +101,10 @@ Draw :: struct {
 
 
 // @volatile shaders
-Draw_Command :: vk.DrawMeshTasksIndirectCommandEXT
+Draw_Command :: struct {
+    draw_id: u32,
+    command: vk.DrawMeshTasksIndirectCommandEXT,
+}
 
 // @volatile shaders
 Meshlet :: struct #align(16) {
@@ -144,23 +147,22 @@ main :: proc () {
     
     swapchain: Swapchain
     
-    swapchain.format    = get_swapchain_format(ips)
+    swapchain.format              = get_swapchain_format(ips)
     swapchain.depth_buffer.format = get_depth_buffer_format(ips)
     
     recreate_swapchain(ips, device, sdl_get_window_size(window), &swapchain)
     
     ////////////////////////////////////////////////
     
+    // @todo(viktor): currently all are allocated to be host visible, so that we can simplify copying into them.
+    // Rethink if any of these should be copied to device_local memory
     vertex_buffer,       vb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Vertex,    256 * Megabyte / size_of(Vertex))
     meshlet_buffer,      mb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Meshlet,   256 * Megabyte / size_of(Meshlet))
     meshlet_data_buffer, mdb_view := gpu_make_buffer({ .STORAGE_BUFFER }, [] u32,       256 * Megabyte / size_of(u32))
-    draw_buffer,         db_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Draw, 256 * Megabyte / size_of(Draw))
+    draw_buffer,         db_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Draw,      256 * Megabyte / size_of(Draw))
+    // @todo(viktor): this buffer is never seen by the cpu, its filled by compute and used by task+mesh shader
     draw_command_buffer, dcb_view := gpu_make_buffer({ .STORAGE_BUFFER, .INDIRECT_BUFFER }, [] Draw_Command, 256 * Megabyte / size_of(Draw_Command))
-    
-    Mesh_Info :: struct {
-        triangle_count: u32,
-        meshlet_count:  u32,
-    }
+    draw_command_count_buffer, dccb_view := gpu_make_buffer_struct({ .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER }, u32)
     
     geometry: Geometry
     {
@@ -273,34 +275,40 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     // @volatile needs to match the bindings in shaders
-    GraphicsStorageBufferCount :: 4
+    GraphicsStorageBufferCount :: 5
     
     graphics_descriptor_set_layout: vk.DescriptorSetLayout
     {
         bindings := [GraphicsStorageBufferCount] vk.DescriptorSetLayoutBinding {
             { // draw
                 binding = 0,
-                descriptorType = .STORAGE_BUFFER,
+                descriptorType  = .STORAGE_BUFFER,
                 descriptorCount = 1,
-                stageFlags = { .MESH_EXT, .TASK_EXT },
+                stageFlags      = { .MESH_EXT, .TASK_EXT },
             },
             { // meshlet
                 binding = 1,
-                descriptorType = .STORAGE_BUFFER,
+                descriptorType  = .STORAGE_BUFFER,
                 descriptorCount = 1,
-                stageFlags = { .MESH_EXT, .TASK_EXT },
+                stageFlags      = { .MESH_EXT, .TASK_EXT },
             },
             { // meshlet data
                 binding = 2,
-                descriptorType = .STORAGE_BUFFER,
+                descriptorType  = .STORAGE_BUFFER,
                 descriptorCount = 1,
-                stageFlags = { .MESH_EXT, .TASK_EXT },
+                stageFlags      = { .MESH_EXT, .TASK_EXT },
             },
             { // vertex
                 binding = 3,
-                descriptorType = .STORAGE_BUFFER,
+                descriptorType  = .STORAGE_BUFFER,
                 descriptorCount = 1,
-                stageFlags = { .MESH_EXT },
+                stageFlags      = { .MESH_EXT },
+            },
+            { // draw_command
+                binding = 4,
+                descriptorType  = .STORAGE_BUFFER,
+                descriptorCount = 1,
+                stageFlags      = { .TASK_EXT },
             },
         }
         
@@ -316,22 +324,28 @@ main :: proc () {
     }
     
     // @volatile needs to match the bindings in shaders
-    ComputeStorageBufferCount :: 2
+    ComputeStorageBufferCount :: 3
     
     compute_descriptor_set_layout: vk.DescriptorSetLayout
     {
         bindings := [ComputeStorageBufferCount] vk.DescriptorSetLayoutBinding {
             { // draw
                 binding = 0,
-                descriptorType = .STORAGE_BUFFER,
+                descriptorType  = .STORAGE_BUFFER,
                 descriptorCount = 1,
-                stageFlags = { .MESH_EXT, .TASK_EXT, .COMPUTE },
+                stageFlags      = { .MESH_EXT, .TASK_EXT, .COMPUTE },
             },
             { // draw_command
                 binding = 1,
-                descriptorType = .STORAGE_BUFFER,
+                descriptorType  = .STORAGE_BUFFER,
                 descriptorCount = 1,
-                stageFlags = { .TASK_EXT, .COMPUTE },
+                stageFlags      = { .TASK_EXT, .COMPUTE },
+            },
+            { // draw_command_count
+                binding = 2,
+                descriptorType  = .STORAGE_BUFFER,
+                descriptorCount = 1,
+                stageFlags      = { .TASK_EXT, .COMPUTE },
             },
         }
         
@@ -430,7 +444,7 @@ main :: proc () {
         append(&shaders, shader)
     }
     
-    draw_command_compute_shader := init_shader_and_watchers(&watchers, common_watcher_id, "draw_command.comp", shader_allocator)
+    draw_command_compute_shader := init_shader_and_watchers(&watchers, common_watcher_id, "draw_cull.comp", shader_allocator)
     
     ////////////////////////////////////////////////
     
@@ -483,10 +497,10 @@ main :: proc () {
         value:      f64,
         last_value: f64,
     }
-
+    
     smooth_update :: proc (frame_time: f64, smooth: ^Smooth, value: f64) {
         // @speed We could precompute ks if needed as it only depends on h and frame time, not the smooth itself.
-        h :: 5.0 // = the amount of time it takes for the filter to converge to 90% of a fixed input value
+        h :: 3.0 // = the amount of time it takes for the filter to converge to 90% of a fixed input value
         k := power(power(cast(f64) .1, 1 / h), frame_time)
         
         smooth.value = linear_blend(value, smooth.last_value, k)
@@ -504,8 +518,8 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         // @todo(viktor): we currently include the time sdl.PollEvents and therefore windows window events take, which can just block us.
-        current_time := time.tick_now()
-        delta_tick := time.tick_diff(last_time, current_time)
+        current_time  := time.tick_now()
+        delta_tick    := time.tick_diff(last_time, current_time)
         delta_time_64 := time.duration_seconds(delta_tick)
         delta_time := cast(f32) delta_time_64
         last_time = current_time
@@ -573,21 +587,23 @@ main :: proc () {
         any_shader_was_changed: bool
         for &shader in shaders {
             if watcher_modified(watchers, shader.source_watcher, shader.common_watcher) {
-                result, ok := compile_and_load_shader(shader.input, shader_allocator, old = &shader)
-                if !ok { continue }
-                
-                shader = result
-                any_shader_was_changed = true
                 watcher_set_up_to_date(watchers, shader.source_watcher, shader.common_watcher)
+                
+                result, ok := compile_and_load_shader(shader.input, shader_allocator, old = &shader)
+                if ok {
+                    shader = result
+                    any_shader_was_changed = true
+                }
             }
         }
+        
         compute_shader_was_changed: bool
         if watcher_modified(watchers, draw_command_compute_shader.source_watcher, draw_command_compute_shader.common_watcher) {
+            watcher_set_up_to_date(watchers, draw_command_compute_shader.source_watcher, draw_command_compute_shader.common_watcher)
+            
             result, ok := compile_and_load_shader(draw_command_compute_shader.input, shader_allocator, old = &draw_command_compute_shader)
             if ok {
                 draw_command_compute_shader = result
-                watcher_set_up_to_date(watchers, draw_command_compute_shader.source_watcher, draw_command_compute_shader.common_watcher)
-                
                 compute_shader_was_changed = true
             }
         }
@@ -743,7 +759,7 @@ main :: proc () {
             view(gpu_time.value), 
             view(cull_delta), 
             view_magnitude(triangles_this_frame), 
-            view_magnitude(cast(f64) triangles_this_frame / gpu_time.value),
+            view_magnitude(cast(u64) (cast(f64) triangles_this_frame / gpu_time.value)),
             culling_enabled ? "on" : "off",
         ))
         
@@ -762,19 +778,27 @@ main :: proc () {
         
         vk.CmdWriteTimestamp(cb, { .BOTTOM_OF_PIPE }, query_pool, 2)
         
+        vk.CmdFillBuffer(cb, draw_command_count_buffer.buffer, 0, size_of(dccb_view^), 0)
+        
+        begin_pipeline_barrier()
+            add_memory_barrier(draw_command_count_buffer.buffer, { .TRANSFER_WRITE }, { .SHADER_WRITE, .SHADER_READ })
+        end_pipeline_barrier(cb, { .TRANSFER }, { .COMPUTE_SHADER })
+        
         vk.CmdBindPipeline(cb, .COMPUTE, compute_pipeline.pipeline)
         
         // @volatile needs to match the bindings in shaders 
         compute_descriptor_update := [ComputeStorageBufferCount] DescriptorUpdateData {
-            { buffer = { draw_buffer.buffer,         0, auto_cast vk.WHOLE_SIZE }},
-            { buffer = { draw_command_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
+            { buffer = { draw_buffer.buffer,               0, auto_cast vk.WHOLE_SIZE }},
+            { buffer = { draw_command_buffer.buffer,       0, auto_cast vk.WHOLE_SIZE }},
+            { buffer = { draw_command_count_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
         }
         vk.CmdPushDescriptorSetWithTemplate(cb, compute_pipeline.update_template, compute_pipeline.layout, 0, &compute_descriptor_update[0])
         
         vk.CmdPushConstants(cb, compute_pipeline.layout, compute_pipeline.shader_stages, 0, size_of(frame.cull_globals.gpu), &frame.cull_globals.gpu)
         
         // @volatile the round up needs align with the ComputeWidth
-        vk.CmdDispatch(cb, len(draws) + 31 / 32,  1, 1)
+        draw_count := cast(u32) len(draws) + 31 / 32
+        vk.CmdDispatch(cb, draw_count, 1, 1)
         
         begin_pipeline_barrier()
             add_memory_barrier(draw_command_buffer.buffer, { .SHADER_WRITE }, { .INDIRECT_COMMAND_READ })
@@ -812,6 +836,7 @@ main :: proc () {
             { buffer = { meshlet_buffer.buffer,      0, auto_cast vk.WHOLE_SIZE }},
             { buffer = { meshlet_data_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
             { buffer = { vertex_buffer.buffer,       0, auto_cast vk.WHOLE_SIZE }},
+            { buffer = { draw_command_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
         }
         vk.CmdPushDescriptorSetWithTemplate(cb, pipeline.update_template, pipeline.layout, 0, &graphics_descriptor_update[0])
         
@@ -819,9 +844,8 @@ main :: proc () {
         
         
         vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader_stages, 0, size_of(frame.draw_globals.gpu), &frame.draw_globals.gpu)
-        // @todo(viktor): this is deprecated, use vkCmdDrawMeshTasksIndirect2EXT
-        vk.CmdDrawMeshTasksIndirectEXT(cb, draw_command_buffer.buffer, 0, len(draws), size_of(Draw_Command))
-        
+        // @todo(viktor): this is deprecated, use https://docs.vulkan.org/spec/latest/chapters/drawing.html#vkCmdDrawMeshTasksIndirectCount2EXT
+        vk.CmdDrawMeshTasksIndirectCountEXT(cb, draw_command_buffer.buffer, auto_cast offset_of(Draw_Command, command), draw_command_count_buffer.buffer, 0, len(draws), size_of(Draw_Command))
         ////////////////////////////////////////////////
         
         vk.CmdEndRendering(cb)
@@ -885,6 +909,7 @@ main :: proc () {
     gpu_delete(meshlet_data_buffer)
     gpu_delete(draw_buffer)
     gpu_delete(draw_command_buffer)
+    gpu_delete(draw_command_count_buffer)
     
     destroy_swapchain(device, &swapchain)
     destroy_pipeline(device, pipeline)

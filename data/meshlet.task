@@ -22,6 +22,10 @@ layout(binding = 1) readonly buffer Meshlets {
 	Meshlet meshlet_buffer[];
 };
 
+layout(binding = 4) readonly buffer Draw_Commands {
+    Draw_Command draw_command_buffer[];
+};
+
 
 ////////////////////////////////////////////////
 
@@ -41,14 +45,15 @@ taskPayloadSharedEXT Task_Result task_result;
 void main() {
     uint meshlet_group_index = gl_WorkGroupID.x;
     uint thread_index        = gl_LocalInvocationID.x;
+    uint draw_index          = draw_command_buffer[gl_DrawID].draw_id;
     
     Draw_Globals globals = push.globals;
-    Draw draw = draw_buffer[gl_DrawID];
+    Draw draw = draw_buffer[draw_index];
     
     uint meshlet_index = meshlet_group_index * TaskWidth + thread_index + draw.meshlet_offset;
     
     if (thread_index == 0) {
-        task_result.draw_index = gl_DrawID;
+        task_result.draw_index = draw_index;
     }
     
     uint count;
@@ -72,13 +77,12 @@ void main() {
         }
         
         uvec4 ballot = subgroupBallot(accept);
-        uint index = subgroupBallotExclusiveBitCount(ballot); // how many threads, before this thread, had accept==true
+        uint index   = subgroupBallotExclusiveBitCount(ballot); // how many threads, before this thread, had accept==true
+        count        = subgroupBallotBitCount(ballot);          // how many threads, in total, had accept==true
+        
         if (accept) {
             task_result.indices[index] = meshlet_index;
         }
-        
-        count = subgroupBallotBitCount(ballot); // how many threads, in total, had accept==true
-        
     } else {
         task_result.indices[thread_index] = meshlet_index;
         
