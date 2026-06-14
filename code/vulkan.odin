@@ -118,7 +118,7 @@ create_instance_physical_device_and_surface :: proc (window: ^sdl.Window, get_in
         
         when !Optimized {
             validation_layers := [] cstring { "VK_LAYER_KHRONOS_validation" }
-                instance_create_info.enabledLayerCount   = auto_cast len(validation_layers)7
+                instance_create_info.enabledLayerCount   = auto_cast len(validation_layers)
             instance_create_info.ppEnabledLayerNames = raw_data(validation_layers)
             
             instance_create_info.pNext = &vk.DebugUtilsMessengerCreateInfoEXT {

@@ -494,6 +494,7 @@ main :: proc () {
     }
     
     cull_delta: f64
+    culling_enabled: bool
     
     cpu_time: Smooth
     gpu_time: Smooth
@@ -532,6 +533,8 @@ main :: proc () {
             case .KEY_DOWN:
                 if event.key.key == sdl.K_SPACE {
                     space_down = true
+                } else if event.key.key == sdl.K_C {
+                    culling_enabled = !culling_enabled
                 }
             case .KEY_UP:
                 if event.key.key == sdl.K_SPACE {
@@ -680,13 +683,18 @@ main :: proc () {
         
         cull_globals: Cull_Globals
         
-        cull_globals.frustum_planes[0] = get_column_v4(projection, 3) + get_column_v4(projection, 0) // x + w < 0
-        cull_globals.frustum_planes[1] = get_column_v4(projection, 3) - get_column_v4(projection, 0) // x - w > 0
-        cull_globals.frustum_planes[2] = get_column_v4(projection, 3) + get_column_v4(projection, 1) // y + w < 0
-        cull_globals.frustum_planes[3] = get_column_v4(projection, 3) - get_column_v4(projection, 1) // y - w > 0
-        cull_globals.frustum_planes[4] = get_column_v4(projection, 3) - get_column_v4(projection, 2) // z - w > 0 -- :ReversedZ:
-        cull_globals.frustum_planes[5] = v4{0, 0, -1, draw_distance}                                 // :ReversedZ: infinite far plane
-        
+        if culling_enabled {
+            cull_globals.frustum_planes[0] = get_column_v4(projection, 3) + get_column_v4(projection, 0) // x + w < 0
+            cull_globals.frustum_planes[1] = get_column_v4(projection, 3) - get_column_v4(projection, 0) // x - w > 0
+            cull_globals.frustum_planes[2] = get_column_v4(projection, 3) + get_column_v4(projection, 1) // y + w < 0
+            cull_globals.frustum_planes[3] = get_column_v4(projection, 3) - get_column_v4(projection, 1) // y - w > 0
+            cull_globals.frustum_planes[4] = get_column_v4(projection, 3) - get_column_v4(projection, 2) // z - w > 0 -- :ReversedZ:
+            cull_globals.frustum_planes[5] = v4{0, 0, -1, draw_distance}                                 // :ReversedZ: infinite far plane
+            
+            for &plane in cull_globals.frustum_planes {
+                plane /= length(plane.xyz)
+            }
+        }
         
         frame.draw_globals.cpu^ = draw_globals
         frame.cull_globals.cpu^ = cull_globals
@@ -696,7 +704,7 @@ main :: proc () {
         triangles_this_frame: u32
         
         entropy := seed_random_series(5175546)
-        @(static) draws: [5000] Draw
+        @(static) draws: [500] Draw
         for &draw in draws {
             p := random_bilateral(&entropy, v3) * {20, 15, 60}
             
@@ -730,12 +738,13 @@ main :: proc () {
         }
         
         // @todo(viktor): just accumulate triangle count and meshlet count each frame in the draw loop
-        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, cull time: %.3v, triangles: %v, %v triangles/s", 
+        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, cull time: %.3v, triangles: %v, %v triangles/s, culling %v", 
             view(cpu_time.value), 
             view(gpu_time.value), 
             view(cull_delta), 
             view_magnitude(triangles_this_frame), 
             view_magnitude(cast(f64) triangles_this_frame / gpu_time.value),
+            culling_enabled ? "on" : "off",
         ))
         
         ////////////////////////////////////////////////
