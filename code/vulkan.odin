@@ -61,8 +61,9 @@ Image :: struct {
 }
 
 Buffer :: struct {
-    buffer: vk.Buffer,
-    memory: vk.DeviceMemory,
+    buffer:  vk.Buffer,
+    memory:  vk.DeviceMemory,
+    address: vk.DeviceAddress,
 }
 
 ////////////////////////////////////////////////
@@ -384,8 +385,9 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
             sType = .PHYSICAL_DEVICE_FEATURES_2,
             
             features = {
-                samplerAnisotropy = true, // @note(viktor): since 1.4 this is required
+                samplerAnisotropy = true,
                 shaderInt16       = true,
+                shaderInt64       = true,
                 multiDrawIndirect = true, // @study check availablity in general nowadays
             },
             
@@ -396,16 +398,12 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
             pushDescriptor = true, // @note(viktor): remove the need for CmdBindVertexBuffers
             dynamicRenderingLocalRead = true, // @note(viktor): allows rendering to an image and then copying into the swapchain image, whilst using dynamic_rendering
             
-            // @todo(viktor): check if this would help the texture upload hostImageCopy
-            // hostImageCopy = true,
-            // @note(viktor): scalarBlockLayout - struct members are padded like c/c++ would
-            
         pNext = &vk.PhysicalDeviceVulkan13Features {
             sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
             
             synchronization2 = true,
-            dynamicRendering = true, // @note(viktor): required since 1.3
-            maintenance4 = true, // @note(viktor): allows using layout(local_size...)
+            dynamicRendering = true,
+            maintenance4 = true,     // @note(viktor): allows using layout(local_size...)
             
         pNext = &vk.PhysicalDeviceVulkan12Features {
             sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
@@ -413,17 +411,19 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
             shaderSampledImageArrayNonUniformIndexing = true,
             descriptorBindingVariableDescriptorCount  = true,
             runtimeDescriptorArray                    = true,
-            bufferDeviceAddress                       = true,
             timelineSemaphore                         = true,
+            
+            bufferDeviceAddress = true,
             
             shaderFloat16 = true,
             shaderInt8    = true,
             uniformAndStorageBuffer8BitAccess = true,
             storageBuffer8BitAccess           = true,
             
-            // @study is this still an improvement, now that there is draw_indirect_command_ext and not just .._nv?
             drawIndirectCount = true, // @note(viktor): let the culling shader specify the amount of draw commands, so that we don't dispatch empty commands
             
+            scalarBlockLayout   = true, // @study did this not become required in 1.4?
+            samplerFilterMinmax = true,
         pNext = &vk.PhysicalDeviceVulkan11Features {
             sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
             
@@ -911,12 +911,25 @@ gpu_make_buffer_size :: proc (usage: vk.BufferUsageFlags, #any_int size: vk.Devi
     
     flags := vk.MemoryPropertyFlags { .HOST_VISIBLE, .HOST_COHERENT }
     
-    result.memory = select_memory_type_and_allocate(requirements, flags, add_device_address_flag = .SHADER_DEVICE_ADDRESS in usage)
+    uses_address := .SHADER_DEVICE_ADDRESS in usage
+    
+    result.memory = select_memory_type_and_allocate(requirements, flags, add_device_address_flag = uses_address)
     
     check(vk.BindBufferMemory(device, result.buffer, result.memory, 0))
     
     pointer: pmm
     vk.MapMemory(device, result.memory, 0, size, {}, &pointer)
+    
+    if uses_address {
+        adress_create_info := vk.BufferDeviceAddressInfo {
+            sType = .BUFFER_DEVICE_ADDRESS_INFO,
+            buffer = result.buffer,
+        }
+        
+        result.address = vk.GetBufferDeviceAddress(device, &adress_create_info)
+        
+        assert(result.address != 0)
+    }
     
     return result, pointer
 }
@@ -952,9 +965,9 @@ gpu_make_image :: proc (size: uv2, format: vk.Format, usage: vk.ImageUsageFlags,
     
     view_create_info := vk.ImageViewCreateInfo {
         sType = .IMAGE_VIEW_CREATE_INFO,
-        image = result.image,
+        image    = result.image,
         viewType = .D2,
-        format = format,
+        format   = format,
         subresourceRange = { aspectMask = aspect_mask, levelCount = mip_levels, layerCount = 1 },
     }
     check(vk.CreateImageView(device, &view_create_info, nil, &result.view))
@@ -985,7 +998,7 @@ select_memory_type_and_allocate :: proc (requirements: vk.MemoryRequirements, fl
     
     allocate_info := vk.MemoryAllocateInfo {
         sType = .MEMORY_ALLOCATE_INFO,
-        allocationSize = requirements.size,
+        allocationSize  = requirements.size,
         memoryTypeIndex = selected_memory_type_index,
     }
     
@@ -997,7 +1010,6 @@ select_memory_type_and_allocate :: proc (requirements: vk.MemoryRequirements, fl
         allocate_info.pNext = &info_for_device_address
     }
     
-
     memory: vk.DeviceMemory
     check(vk.AllocateMemory(device, &allocate_info, nil, &memory))
     

@@ -75,6 +75,7 @@ MaxTriangles :: 84
 // @volatile shaders
 Cull_Globals :: struct {
     frustum_planes: [6] v4,
+    draw_pointer:   vk.DeviceAddress,
 }
 
 // @volatile shaders
@@ -159,7 +160,7 @@ main :: proc () {
     vertex_buffer,       vb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Vertex,    256 * Megabyte / size_of(Vertex))
     meshlet_buffer,      mb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Meshlet,   256 * Megabyte / size_of(Meshlet))
     meshlet_data_buffer, mdb_view := gpu_make_buffer({ .STORAGE_BUFFER }, [] u32,       256 * Megabyte / size_of(u32))
-    draw_buffer,         db_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Draw,      256 * Megabyte / size_of(Draw))
+    draw_buffer,         db_view  := gpu_make_buffer({ .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS }, [] Draw,      256 * Megabyte / size_of(Draw))
     // @todo(viktor): this buffer is never seen by the cpu, its filled by compute and used by task+mesh shader
     draw_command_buffer, dcb_view := gpu_make_buffer({ .STORAGE_BUFFER, .INDIRECT_BUFFER }, [] Draw_Command, 256 * Megabyte / size_of(Draw_Command))
     draw_command_count_buffer, dccb_view := gpu_make_buffer_struct({ .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER }, u32)
@@ -324,25 +325,19 @@ main :: proc () {
     }
     
     // @volatile needs to match the bindings in shaders
-    ComputeStorageBufferCount :: 3
+    ComputeStorageBufferCount :: 2
     
     compute_descriptor_set_layout: vk.DescriptorSetLayout
     {
         bindings := [ComputeStorageBufferCount] vk.DescriptorSetLayoutBinding {
-            { // draw
-                binding = 0,
-                descriptorType  = .STORAGE_BUFFER,
-                descriptorCount = 1,
-                stageFlags      = { .MESH_EXT, .TASK_EXT, .COMPUTE },
-            },
             { // draw_command
-                binding = 1,
+                binding = 0,
                 descriptorType  = .STORAGE_BUFFER,
                 descriptorCount = 1,
                 stageFlags      = { .TASK_EXT, .COMPUTE },
             },
             { // draw_command_count
-                binding = 2,
+                binding = 1,
                 descriptorType  = .STORAGE_BUFFER,
                 descriptorCount = 1,
                 stageFlags      = { .TASK_EXT, .COMPUTE },
@@ -507,8 +502,7 @@ main :: proc () {
         smooth.last_value = smooth.value
     }
     
-    cull_delta: f64
-    culling_enabled: bool
+    culling_enabled: bool = true
     
     cpu_time: Smooth
     gpu_time: Smooth
@@ -637,6 +631,7 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
+        cull_delta: f64
         // @note(viktor): QueuePool must be reset before use, but that would require a whole cmd begin-end.
         if absolute_frame_index > 1 {
             query_results: [4] u64
@@ -788,12 +783,13 @@ main :: proc () {
         
         // @volatile needs to match the bindings in shaders 
         compute_descriptor_update := [ComputeStorageBufferCount] DescriptorUpdateData {
-            { buffer = { draw_buffer.buffer,               0, auto_cast vk.WHOLE_SIZE }},
             { buffer = { draw_command_buffer.buffer,       0, auto_cast vk.WHOLE_SIZE }},
             { buffer = { draw_command_count_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
         }
         vk.CmdPushDescriptorSetWithTemplate(cb, compute_pipeline.update_template, compute_pipeline.layout, 0, &compute_descriptor_update[0])
         
+        // @volatile shaders
+        frame.cull_globals.cpu.draw_pointer = draw_buffer.address
         vk.CmdPushConstants(cb, compute_pipeline.layout, compute_pipeline.shader_stages, 0, size_of(frame.cull_globals.gpu), &frame.cull_globals.gpu)
         
         // @volatile the round up needs align with the ComputeWidth

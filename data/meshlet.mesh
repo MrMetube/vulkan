@@ -17,7 +17,7 @@
 // @volatile
 layout(push_constant) uniform Push_Data {
     Draw_Globals globals;
-} push;
+};
 
 // @volatile
 struct Vertex {
@@ -70,7 +70,6 @@ void main() {
 	uint meshlet_index = task_result.indices[gl_WorkGroupID.x];
     uint draw_index    = task_result.draw_index;
     
-    Draw_Globals globals = push.globals;
     Draw draw = draw_buffer[draw_index];
     
     Meshlet meshlet;

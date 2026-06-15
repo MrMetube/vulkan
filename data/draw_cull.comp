@@ -1,5 +1,7 @@
 #version 460
 
+#extension GL_EXT_buffer_reference: require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64: require
 #extension GL_KHR_shader_subgroup_ballot: require
 
 #include "common.h"
@@ -8,28 +10,28 @@
 
 layout(local_size_x = ComputeWidth, local_size_y = 1, local_size_z = 1) in;
 
-// @volatile
-layout(buffer_reference, buffer_reference_align = 8) buffer Culling_Globals {
-    vec4 frustum_planes[6];
-};
-
-// @volatile
-layout(push_constant) uniform Push_Data {
-    Culling_Globals globals;
-} push;
-
-// @volatile
-layout(binding = 0) readonly buffer Draws {
+layout(buffer_reference, buffer_reference_align = 8) buffer Draw_Buffer {
 	Draw draw_buffer[];
 };
 
 // @volatile
-layout(binding = 1) writeonly buffer Draw_Commands {
+layout(buffer_reference, buffer_reference_align = 8) buffer Cull_Globals {
+    vec4 frustum_planes[6];
+	uint64_t draw_pointer;
+};
+
+// @volatile
+layout(push_constant) uniform Push_Data {
+    Cull_Globals globals;
+};
+
+// @volatile
+layout(binding = 0) writeonly buffer Draw_Commands {
     Draw_Command draw_command_buffer[];
 };
 
 // @volatile
-layout(binding = 2) buffer Draw_Count {
+layout(binding = 1) buffer Draw_Count {
     uint draw_command_count;
 };
 
@@ -40,14 +42,16 @@ void main() {
     uint thread_index = gl_LocalInvocationID.x;
     uint draw_index   = group_index * ComputeWidth + thread_index;
     
-    Draw draw = draw_buffer[draw_index];
+    Draw_Buffer draw_pointer = Draw_Buffer(globals.draw_pointer);
+    
+    Draw draw = draw_pointer.draw_buffer[draw_index];
     
     vec3  center = transform(draw.orientation, draw.scale, draw.p, draw.center);
     float radius = draw.radius * draw.scale;
     
     bool visible = true;
     for (int i = 0; i < 6; i++) {
-        vec4 plane = push.globals.frustum_planes[i];
+        vec4 plane = globals.frustum_planes[i];
         visible = visible && (dot(plane, vec4(center, 1)) > -radius);
     }
     

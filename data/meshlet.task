@@ -12,7 +12,7 @@
 // @volatile
 layout(push_constant) uniform Push_Data {
     Draw_Globals globals;
-} push;
+};
 
 layout(binding = 0) readonly buffer Draws {
 	Draw draw_buffer[];
@@ -47,7 +47,6 @@ void main() {
     uint thread_index        = gl_LocalInvocationID.x;
     uint draw_index          = draw_command_buffer[gl_DrawID].draw_id;
     
-    Draw_Globals globals = push.globals;
     Draw draw = draw_buffer[draw_index];
     
     uint meshlet_index = meshlet_group_index * TaskWidth + thread_index + draw.meshlet_offset;
