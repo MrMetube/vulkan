@@ -1,6 +1,7 @@
 #version 460
 
 #extension GL_EXT_buffer_reference: require
+#extension GL_EXT_buffer_reference2: require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64: require
 #extension GL_KHR_shader_subgroup_ballot: require
 
@@ -10,29 +11,21 @@
 
 layout(local_size_x = ComputeWidth, local_size_y = 1, local_size_z = 1) in;
 
-layout(buffer_reference, buffer_reference_align = 8) buffer Draw_Buffer {
-	Draw draw_buffer[];
-};
+layout(buffer_reference, buffer_reference_align = 16) buffer Draw_p         { Draw         v; };
+layout(buffer_reference, buffer_reference_align = 16) buffer Draw_Command_p { Draw_Command v; };
+layout(buffer_reference, buffer_reference_align = 4)  buffer uint_p         { uint         v; };
 
 // @volatile
 layout(buffer_reference, buffer_reference_align = 8) buffer Cull_Globals {
     vec4 frustum_planes[6];
-	uint64_t draw_pointer;
+	Draw_p               draw_array;
+	Draw_Command_p       draw_command_array;
+	uint_p draw_command_count;
 };
 
 // @volatile
 layout(push_constant) uniform Push_Data {
     Cull_Globals globals;
-};
-
-// @volatile
-layout(binding = 0) writeonly buffer Draw_Commands {
-    Draw_Command draw_command_buffer[];
-};
-
-// @volatile
-layout(binding = 1) buffer Draw_Count {
-    uint draw_command_count;
 };
 
 // @note(viktor): the ballot code assumes that the subgroup size is 32, which needs to be revised for non NVidia archs.
@@ -42,12 +35,12 @@ void main() {
     uint thread_index = gl_LocalInvocationID.x;
     uint draw_index   = group_index * ComputeWidth + thread_index;
     
-    Draw_Buffer draw_pointer = Draw_Buffer(globals.draw_pointer);
     
-    Draw draw = draw_pointer.draw_buffer[draw_index];
+    Draw_p draw               = globals.draw_array[draw_index];
+    uint_p draw_command_count = globals.draw_command_count;
     
-    vec3  center = transform(draw.orientation, draw.scale, draw.p, draw.center);
-    float radius = draw.radius * draw.scale;
+    vec3  center = transform(draw.v.orientation, draw.v.scale, draw.v.p, draw.v.center);
+    float radius = draw.v.radius * draw.v.scale;
     
     bool visible = true;
     for (int i = 0; i < 6; i++) {
@@ -63,7 +56,7 @@ void main() {
     
     uint draw_command_group_index = 0;
     if (thread_index == 0) {
-        draw_command_group_index = atomicAdd(draw_command_count, count);
+        draw_command_group_index = atomicAdd(draw_command_count.v, count);
     }
     
     uint draw_command_index = subgroupBroadcastFirst(draw_command_group_index) + index;
@@ -73,10 +66,11 @@ void main() {
     // The meshes were not drawn for about one frame and then it was stable again for a while. This repeated
     // indefinitly.
     if (visible) {
-        draw_command_buffer[draw_command_index].draw_id = draw_index;
+        Draw_Command_p draw_command = globals.draw_command_array[draw_command_index];
+        draw_command.v.draw_id = draw_index;
         
-        draw_command_buffer[draw_command_index].groupCountX = (draw.meshlet_count + TaskWidth-1) / TaskWidth;
-        draw_command_buffer[draw_command_index].groupCountY = 1;
-        draw_command_buffer[draw_command_index].groupCountZ = 1;
+        draw_command.v.groupCountX = (draw.v.meshlet_count + TaskWidth-1) / TaskWidth;
+        draw_command.v.groupCountY = 1;
+        draw_command.v.groupCountZ = 1;
     }
 }

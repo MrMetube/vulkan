@@ -11,8 +11,8 @@
 ////////////////////////////////////////////////
 
 // @volatile
-#define VertexLimit   64
-#define TriangleLimit 84
+#define MaxVertices  64
+#define MaxTriangles 84
 
 // @volatile
 layout(push_constant) uniform Push_Data {
@@ -61,7 +61,7 @@ uint hash(uint a) {
 ////////////////////////////////////////////////
 
 layout(local_size_x = MeshWidth, local_size_y = 1, local_size_z = 1) in;
-layout(triangles, max_vertices = VertexLimit, max_primitives = TriangleLimit) out;
+layout(triangles, max_vertices = MaxVertices, max_primitives = MaxTriangles) out;
 
 layout(location = 0) out Mesh_Result mesh_result[];
 

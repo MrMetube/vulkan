@@ -474,7 +474,7 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
     
     // @waste there are a lot of buffers here, each of which is very small
     for &frame in frames {
-        frame.draw_globals.buffer, frame.draw_globals.cpu = gpu_make_buffer_struct({ .SHADER_DEVICE_ADDRESS }, Draw_Globals)
+        frame.draw_globals.buffer, frame.draw_globals.cpu = gpu_make_buffer_type(Draw_Globals, { .SHADER_DEVICE_ADDRESS })
         
         device_address_info := vk.BufferDeviceAddressInfo {
             sType  = .BUFFER_DEVICE_ADDRESS_INFO,
@@ -482,7 +482,7 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
         }
         frame.draw_globals.gpu = vk.GetBufferDeviceAddress(device, &device_address_info)
         
-        frame.cull_globals.buffer, frame.cull_globals.cpu = gpu_make_buffer_struct({ .SHADER_DEVICE_ADDRESS }, Cull_Globals)
+        frame.cull_globals.buffer, frame.cull_globals.cpu = gpu_make_buffer_type(Cull_Globals, { .SHADER_DEVICE_ADDRESS })
         
         device_address_info = vk.BufferDeviceAddressInfo {
             sType  = .BUFFER_DEVICE_ADDRESS_INFO,
@@ -756,6 +756,9 @@ create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sw
 }
 
 create_update_template :: proc (device: vk.Device, bind_point: vk. PipelineBindPoint, layout: vk.PipelineLayout, storage_buffer_count: u32) -> vk.DescriptorUpdateTemplate {
+    // @cleanup
+    if storage_buffer_count == 0 { return 0 }
+    
     // @todo(viktor): The information of which shader stage needs which storage buffer could be parsed from the compiled spirv file.
     update_template_entries: [dynamic; 32] vk.DescriptorUpdateTemplateEntry
     for index in 0..<storage_buffer_count {
@@ -880,19 +883,19 @@ init_gpu_allocator :: proc (ips: IPS, device: vk.Device) {
 }
 
 gpu_make_buffer :: proc { gpu_make_buffer_slice, gpu_make_buffer_size }
-gpu_make_buffer_slice :: proc (usage: vk.BufferUsageFlags, $S: typeid / [] $E, #any_int len: umm) -> (Buffer, S) {
+gpu_make_buffer_slice :: proc ($S: typeid / [] $E, #any_int len: umm, usage: vk.BufferUsageFlags) -> (Buffer, S) {
     size   := size_of(E) * len
-    buffer, pointer := gpu_make_buffer_size(usage, size)
+    buffer, pointer := gpu_make_buffer_size(size, usage)
     view   := slice_from_parts(E, pointer, len)
     return buffer, view
 }
-gpu_make_buffer_struct :: proc (usage: vk.BufferUsageFlags, $S: typeid) -> (Buffer, ^S) {
+gpu_make_buffer_type :: proc ($S: typeid, usage: vk.BufferUsageFlags) -> (Buffer, ^S) {
     size   := size_of(S)
-    buffer, pointer := gpu_make_buffer_size(usage, size)
+    buffer, pointer := gpu_make_buffer_size(size, usage)
     data := cast(^S) pointer
     return buffer, data
 }
-gpu_make_buffer_size :: proc (usage: vk.BufferUsageFlags, #any_int size: vk.DeviceSize) -> (Buffer, pmm) {
+gpu_make_buffer_size :: proc (#any_int size: vk.DeviceSize, usage: vk.BufferUsageFlags) -> (Buffer, pmm) {
     assert(gpu_allocator_state.initialized)
     
     device := gpu_allocator_state.device

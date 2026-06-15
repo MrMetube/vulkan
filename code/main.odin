@@ -65,27 +65,29 @@ Mesh :: struct {
 
 ////////////////////////////////////////////////
 
-// @volatile task shader
+// @shader meshlet.task
 TaskWidth :: 32
 
-// @volatile shaders
+// @shader meshlet.mesh
 MaxVertices  :: 64
 MaxTriangles :: 84
 
-// @volatile shaders
+// @shader cull.comp
 Cull_Globals :: struct {
     frustum_planes: [6] v4,
-    draw_pointer:   vk.DeviceAddress,
+    draw:               vk.DeviceAddress,
+    draw_command:       vk.DeviceAddress,
+    draw_command_count: vk.DeviceAddress,
 }
 
-// @volatile shaders
+// @shader
 Draw_Globals :: struct {
     view:       m4,
     projection: m4,
     light_pos:  [4] v4,
 }
 
-// @volatile shaders
+// @shader
 Draw :: struct {
     center: v3,
     radius: f32,
@@ -100,14 +102,13 @@ Draw :: struct {
     scale:       f32,
 }
 
-
-// @volatile shaders
+// @shader
 Draw_Command :: struct {
     draw_id: u32,
     command: vk.DrawMeshTasksIndirectCommandEXT,
 }
 
-// @volatile shaders
+// @shader
 Meshlet :: struct #align(16) {
     center: v3,
     radius: f32,
@@ -119,7 +120,7 @@ Meshlet :: struct #align(16) {
     triangle_count: u8,
 }
 
-// @volatile shaders
+// @shader
 Vertex :: struct {
     p:  v3,      p_pad: f32,
     n:  [3] u8,  n_pad: u8,
@@ -157,13 +158,13 @@ main :: proc () {
     
     // @todo(viktor): currently all are allocated to be host visible, so that we can simplify copying into them.
     // Rethink if any of these should be copied to device_local memory
-    vertex_buffer,       vb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Vertex,    256 * Megabyte / size_of(Vertex))
-    meshlet_buffer,      mb_view  := gpu_make_buffer({ .STORAGE_BUFFER }, [] Meshlet,   256 * Megabyte / size_of(Meshlet))
-    meshlet_data_buffer, mdb_view := gpu_make_buffer({ .STORAGE_BUFFER }, [] u32,       256 * Megabyte / size_of(u32))
-    draw_buffer,         db_view  := gpu_make_buffer({ .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS }, [] Draw,      256 * Megabyte / size_of(Draw))
+    vertex_buffer,       vb_view  := gpu_make_buffer([] Vertex,    256 * Megabyte / size_of(Vertex),  { .STORAGE_BUFFER })
+    meshlet_buffer,      mb_view  := gpu_make_buffer([] Meshlet,   256 * Megabyte / size_of(Meshlet), { .STORAGE_BUFFER })
+    meshlet_data_buffer, mdb_view := gpu_make_buffer([] u32,       256 * Megabyte / size_of(u32),     { .STORAGE_BUFFER })
+    draw_buffer,         db_view  := gpu_make_buffer([] Draw,      256 * Megabyte / size_of(Draw),    { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
     // @todo(viktor): this buffer is never seen by the cpu, its filled by compute and used by task+mesh shader
-    draw_command_buffer, dcb_view := gpu_make_buffer({ .STORAGE_BUFFER, .INDIRECT_BUFFER }, [] Draw_Command, 256 * Megabyte / size_of(Draw_Command))
-    draw_command_count_buffer, dccb_view := gpu_make_buffer_struct({ .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER }, u32)
+    draw_command_buffer, dcb_view := gpu_make_buffer([] Draw_Command, 256 * Megabyte / size_of(Draw_Command), { .STORAGE_BUFFER, .INDIRECT_BUFFER, .SHADER_DEVICE_ADDRESS })
+    draw_command_count_buffer, dccb_view := gpu_make_buffer_type(u32, { .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER, .SHADER_DEVICE_ADDRESS })
     
     geometry: Geometry
     {
@@ -199,7 +200,7 @@ main :: proc () {
             
             texture = gpu_make_image({loaded_texture.width, loaded_texture.height}, loaded_texture.format, { .TRANSFER_DST, .SAMPLED }, { .COLOR }, mip_levels = loaded_texture.mip_levels)
             
-            source_buffer, source_buffer_data := gpu_make_buffer({ .TRANSFER_SRC }, [] u8, len(loaded_texture.data))
+            source_buffer, source_buffer_data := gpu_make_buffer_slice([] u8, len(loaded_texture.data), { .TRANSFER_SRC })
             defer gpu_delete(source_buffer)
             
             copy(source_buffer_data, loaded_texture.data)
@@ -275,7 +276,8 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    // @volatile needs to match the bindings in shaders
+    // @todo put all buffer addresses into the push constant and remove these bindings
+    // @shader needs to match the bindings in shaders
     GraphicsStorageBufferCount :: 5
     
     graphics_descriptor_set_layout: vk.DescriptorSetLayout
@@ -324,31 +326,19 @@ main :: proc () {
         defer_destroy(vk.DestroyDescriptorSetLayout, graphics_descriptor_set_layout)
     }
     
-    // @volatile needs to match the bindings in shaders
-    ComputeStorageBufferCount :: 2
+    // @shader cull.comp
+    ComputeStorageBufferCount :: 0
     
     compute_descriptor_set_layout: vk.DescriptorSetLayout
     {
         bindings := [ComputeStorageBufferCount] vk.DescriptorSetLayoutBinding {
-            { // draw_command
-                binding = 0,
-                descriptorType  = .STORAGE_BUFFER,
-                descriptorCount = 1,
-                stageFlags      = { .TASK_EXT, .COMPUTE },
-            },
-            { // draw_command_count
-                binding = 1,
-                descriptorType  = .STORAGE_BUFFER,
-                descriptorCount = 1,
-                stageFlags      = { .TASK_EXT, .COMPUTE },
-            },
         }
         
         create_info := vk.DescriptorSetLayoutCreateInfo {
             sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             flags        = { .PUSH_DESCRIPTOR },
             bindingCount = len(bindings),
-            pBindings    = &bindings[0],
+            pBindings    = raw_data(bindings[:]),
         }
         
         check(vk.CreateDescriptorSetLayout(device, &create_info, nil, &compute_descriptor_set_layout))
@@ -705,6 +695,10 @@ main :: proc () {
             for &plane in cull_globals.frustum_planes {
                 plane /= length(plane.xyz)
             }
+            
+            cull_globals.draw               = draw_buffer.address
+            cull_globals.draw_command       = draw_command_buffer.address
+            cull_globals.draw_command_count = draw_command_count_buffer.address
         }
         
         frame.draw_globals.cpu^ = draw_globals
@@ -781,15 +775,12 @@ main :: proc () {
         
         vk.CmdBindPipeline(cb, .COMPUTE, compute_pipeline.pipeline)
         
-        // @volatile needs to match the bindings in shaders 
-        compute_descriptor_update := [ComputeStorageBufferCount] DescriptorUpdateData {
-            { buffer = { draw_command_buffer.buffer,       0, auto_cast vk.WHOLE_SIZE }},
-            { buffer = { draw_command_count_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
+        if ComputeStorageBufferCount != 0 {
+            // @shader cull.comp
+            compute_descriptor_update := [ComputeStorageBufferCount] DescriptorUpdateData {}
+            vk.CmdPushDescriptorSetWithTemplate(cb, compute_pipeline.update_template, compute_pipeline.layout, 0, raw_data(compute_descriptor_update[:]))
         }
-        vk.CmdPushDescriptorSetWithTemplate(cb, compute_pipeline.update_template, compute_pipeline.layout, 0, &compute_descriptor_update[0])
         
-        // @volatile shaders
-        frame.cull_globals.cpu.draw_pointer = draw_buffer.address
         vk.CmdPushConstants(cb, compute_pipeline.layout, compute_pipeline.shader_stages, 0, size_of(frame.cull_globals.gpu), &frame.cull_globals.gpu)
         
         // @volatile the round up needs align with the ComputeWidth
@@ -826,7 +817,7 @@ main :: proc () {
         
         vk.CmdBindPipeline(cb, .GRAPHICS, pipeline.pipeline)
         
-        // @volatile needs to match the bindings in shaders 
+        // @shader meshlet pipeline
         graphics_descriptor_update := [GraphicsStorageBufferCount] DescriptorUpdateData {
             { buffer = { draw_buffer.buffer,         0, auto_cast vk.WHOLE_SIZE }},
             { buffer = { meshlet_buffer.buffer,      0, auto_cast vk.WHOLE_SIZE }},
