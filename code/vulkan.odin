@@ -44,8 +44,14 @@ Pipeline :: struct {
 Shader :: struct {
     input:  string, 
     
-    stages: vk.ShaderStageFlags,
+    stage: vk.ShaderStageFlag,
     bytes:  [] u8,
+    
+    // @todo(viktor): these are unused right now, but should be used in pipeline creation and usage to make it less volatile
+    resource_mask:      bit_set[cast(u32) 0..<32],
+    resource_types:     [32] vk.DescriptorType,
+    use_push_constants: bool,
+    local_size:         [3] u32,
     
     source_watcher: Watcher_Id,
     common_watcher: Watcher_Id,
@@ -403,7 +409,7 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
             
             synchronization2 = true,
             dynamicRendering = true,
-            maintenance4 = true,     // @note(viktor): allows using layout(local_size...)
+            maintenance4     = true, // @note(viktor): allows using layout(local_size...)
             
         pNext = &vk.PhysicalDeviceVulkan12Features {
             sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
@@ -424,6 +430,7 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
             
             scalarBlockLayout   = true, // @study did this not become required in 1.4?
             samplerFilterMinmax = true,
+            
         pNext = &vk.PhysicalDeviceVulkan11Features {
             sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
             
@@ -626,35 +633,26 @@ create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sha
         destroy_pipeline(device, old)
     }
     
-    assert(.COMPUTE in shader.stages)
+    assert(shader.stage == .COMPUTE)
     
     result: Pipeline
-    result.shader_stages += shader.stages
+    result.shader_stages += { shader.stage }
     
     result.layout = create_pipeline_layout(device, result.shader_stages, set_layout, with_push_data_which_is_an_address = true)
-    
-    // @copypasta from create_graphics_pipeline
-    shader_stages: [dynamic; 16] vk.PipelineShaderStageCreateInfo
-    module_infos:  [dynamic; 16] vk.ShaderModuleCreateInfo
-    for stage in shader.stages {
-        append(&module_infos, vk.ShaderModuleCreateInfo {
-            sType    = .SHADER_MODULE_CREATE_INFO,
-            codeSize = len(shader.bytes),
-            pCode    = cast(^u32) &shader.bytes[0],
-        })
-        append(&shader_stages, vk.PipelineShaderStageCreateInfo { 
-            sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
-            stage = { stage }, 
-            pName = "main", 
-            pNext = last(&module_infos),
-        })
-    }
-    
     
     create_info := vk.ComputePipelineCreateInfo {
         sType = .COMPUTE_PIPELINE_CREATE_INFO,
         layout = result.layout,
-        stage  = shader_stages[0],
+        stage  = { 
+            sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
+            stage = { shader.stage }, 
+            pName = "main", 
+            pNext = &vk.ShaderModuleCreateInfo {
+                sType    = .SHADER_MODULE_CREATE_INFO,
+                codeSize = len(shader.bytes),
+                pCode    = cast(^u32) &shader.bytes[0],
+            },
+        },
     }
     
     check(vk.CreateComputePipelines(device, cache, 1, &create_info, nil, &result.pipeline))
@@ -672,7 +670,7 @@ create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sw
     
     result: Pipeline
     for shader in shaders {
-        result.shader_stages += shader.stages
+        result.shader_stages += { shader.stage }
     }
     
     result.layout = create_pipeline_layout(device, result.shader_stages, ..set_layouts, with_push_data_which_is_an_address = true)
@@ -680,19 +678,17 @@ create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sw
     shader_stages: [dynamic; 16] vk.PipelineShaderStageCreateInfo
     module_infos:  [dynamic; 16] vk.ShaderModuleCreateInfo
     for shader in shaders {
-        for stage in shader.stages {
-            append(&module_infos, vk.ShaderModuleCreateInfo {
-                sType    = .SHADER_MODULE_CREATE_INFO,
-                codeSize = len(shader.bytes),
-                pCode    = cast(^u32) &shader.bytes[0],
-            })
-            append(&shader_stages, vk.PipelineShaderStageCreateInfo { 
-                sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
-                stage = { stage }, 
-                pName = "main", 
-                pNext = last(&module_infos),
-            })
-        }
+        append(&module_infos, vk.ShaderModuleCreateInfo {
+            sType    = .SHADER_MODULE_CREATE_INFO,
+            codeSize = len(shader.bytes),
+            pCode    = cast(^u32) &shader.bytes[0],
+        })
+        append(&shader_stages, vk.PipelineShaderStageCreateInfo { 
+            sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
+            stage = { shader.stage }, 
+            pName = "main", 
+            pNext = last(&module_infos),
+        })
     }
     
     dynamic_states := [] vk.DynamicState { .VIEWPORT, .SCISSOR }

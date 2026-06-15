@@ -68,26 +68,138 @@ compile_and_load_shader :: proc (input: string, bytes_allocator: Allocator, outp
         shader_code := slice_from_parts(u32, raw_data(shader_bytes), len(shader_bytes) / 4)
         
         assert(shader_code[0] == SpvMagicNumber)
+        id_bound := shader_code[3]
+        
+        Id :: struct {
+            opcode:   SpvOp,
+            type_id:  u32,
+            
+            set: u32,
+            binding: u32,
+            
+            constant: u32,
+            storage_class: SpvStorageClass,
+        }
+        ids := make([] Id, id_bound, context.temp_allocator)
+        
         code     := shader_code[5:]
         
+        local_size: [3] i32 = -1
+        
         for len(code) != 0 {
-            opcode     := cast(u16) ((code[0] >>  0) & 0xFFFF)
+            opcode     := cast(SpvOp) cast(u16) ((code[0] >>  0) & 0xFFFF)
             word_count := cast(u16) ((code[0] >> 16) & 0xFFFF)
             
-            #partial switch cast(SpvOp) opcode {
+            #partial switch opcode {
             case .EntryPoint:
-                execution_model := code[1]
+                execution_model := cast(SpvExecutionModel) code[1]
                 
-                #partial switch cast(SpvExecutionModel) execution_model {
-                case .Vertex:     result.stages += { .VERTEX }
-                case .Fragment:   result.stages += { .FRAGMENT }
-                case .MeshEXT:    result.stages += { .MESH_EXT }
-                case .TaskEXT:    result.stages += { .TASK_EXT }
-                case .GLCompute:  result.stages += { .COMPUTE }
+                #partial switch execution_model {
+                case .Vertex:     result.stage = .VERTEX
+                case .Fragment:   result.stage = .FRAGMENT
+                case .MeshEXT:    result.stage = .MESH_EXT
+                case .TaskEXT:    result.stage = .TASK_EXT
+                case .GLCompute:  result.stage = .COMPUTE
+                }
+            
+            case .ExecutionMode:
+                mode := cast(SpvExecutionMode) code[2]
+                #partial switch mode {
+                case .LocalSize:
+                    result.local_size.x = code[3]
+                    result.local_size.y = code[4]
+                    result.local_size.z = code[5]
+                }
+                
+            case .ExecutionModeId:
+                mode := cast(SpvExecutionMode) code[2]
+                #partial switch mode {
+                case .LocalSizeId:
+                    local_size.x = cast(i32) code[3]
+                    local_size.y = cast(i32) code[4]
+                    local_size.z = cast(i32) code[5]
+                }
+                
+            case .Constant:
+                id := code[2]
+                assert(ids[id].opcode == {})
+                
+                ids[id] = { 
+                    opcode   = opcode,
+                    type_id  = code[1],
+                    constant = code[3], 
+                }
+                    
+            case .Variable:
+                id := code[2]
+                assert(ids[id].opcode == {})
+                
+                ids[id] = { 
+                    opcode        = opcode,
+                    type_id       = code[1],
+                    storage_class = cast(SpvStorageClass) code[3], 
+                }
+                
+            case .TypePointer:
+                id := code[1]
+                assert(ids[id].opcode == {})
+                
+                ids[id] = { 
+                    opcode        = opcode,
+                    type_id       = code[3],
+                    storage_class = cast(SpvStorageClass) code[2], 
                 }
             }
             
             code = code[word_count:]
+        }
+        
+        // @todo(viktor): process extracted ids
+        
+        for id in ids {
+            if id.opcode == .Variable && (id.storage_class == .Uniform || id.storage_class == .UniformConstant || id.storage_class == .StorageBuffer ) {
+                assert(id.set == 0)
+                assert(id.binding < 32)
+                assert(ids[id.type_id].opcode == .TypePointer)
+                
+                assert(id.binding not_in result.resource_mask)
+                
+                type_kind := ids[ids[id.type_id].type_id].opcode
+                
+                #partial switch type_kind {
+                case .TypeStruct:       
+                    result.resource_types[id.binding] = .STORAGE_BUFFER
+                    result.resource_mask += { id.binding }
+                    
+                case .TypeImage:        
+                    result.resource_types[id.binding] = .STORAGE_IMAGE
+                    result.resource_mask += { id.binding }
+                    
+                case .TypeSampler:      
+                    result.resource_types[id.binding] = .SAMPLER
+                    result.resource_mask += { id.binding }
+                    
+                case .TypeSampledImage: 
+                    result.resource_types[id.binding] = .COMBINED_IMAGE_SAMPLER
+                    result.resource_mask += { id.binding }
+                    
+                }
+            }
+            
+            if id.opcode == .Variable && id.storage_class == .PushConstant {
+                result.use_push_constants = true
+            }
+        }
+        
+        if result.stage == .COMPUTE {
+            for it in 0..<3 {
+                if local_size[it] >= 0 {
+                    assert(ids[local_size[it]].opcode == .Constant)
+                    result.local_size[it] = ids[local_size[it]].constant
+                }
+            }
+            
+            assert(result.local_size != 0)
         }
     }
     
@@ -101,7 +213,116 @@ compile_and_load_shader :: proc (input: string, bytes_allocator: Allocator, outp
 SpvMagicNumber :: 0x07230203
 
 @(private="file")
-SpvExecutionModel :: enum { 
+SpvExecutionMode :: enum  u32 {
+    Invocations = 0,
+    SpacingEqual = 1,
+    SpacingFractionalEven = 2,
+    SpacingFractionalOdd = 3,
+    VertexOrderCw = 4,
+    VertexOrderCcw = 5,
+    PixelCenterInteger = 6,
+    OriginUpperLeft = 7,
+    OriginLowerLeft = 8,
+    EarlyFragmentTests = 9,
+    PointMode = 10,
+    Xfb = 11,
+    DepthReplacing = 12,
+    DepthGreater = 14,
+    DepthLess = 15,
+    DepthUnchanged = 16,
+    LocalSize = 17,
+    LocalSizeHint = 18,
+    InputPoints = 19,
+    InputLines = 20,
+    InputLinesAdjacency = 21,
+    Triangles = 22,
+    InputTrianglesAdjacency = 23,
+    Quads = 24,
+    Isolines = 25,
+    OutputVertices = 26,
+    OutputPoints = 27,
+    OutputLineStrip = 28,
+    OutputTriangleStrip = 29,
+    VecTypeHint = 30,
+    ContractionOff = 31,
+    Initializer = 33,
+    Finalizer = 34,
+    SubgroupSize = 35,
+    SubgroupsPerWorkgroup = 36,
+    SubgroupsPerWorkgroupId = 37,
+    LocalSizeId = 38,
+    LocalSizeHintId = 39,
+    NonCoherentColorAttachmentReadEXT = 4169,
+    NonCoherentDepthAttachmentReadEXT = 4170,
+    NonCoherentStencilAttachmentReadEXT = 4171,
+    SubgroupUniformControlFlowKHR = 4421,
+    PostDepthCoverage = 4446,
+    DenormPreserve = 4459,
+    DenormFlushToZero = 4460,
+    SignedZeroInfNanPreserve = 4461,
+    RoundingModeRTE = 4462,
+    RoundingModeRTZ = 4463,
+    NonCoherentTileAttachmentReadQCOM = 4489,
+    TileShadingRateQCOM = 4490,
+    EarlyAndLateFragmentTestsAMD = 5017,
+    StencilRefReplacingEXT = 5027,
+    CoalescingAMDX = 5069,
+    IsApiEntryAMDX = 5070,
+    MaxNodeRecursionAMDX = 5071,
+    StaticNumWorkgroupsAMDX = 5072,
+    ShaderIndexAMDX = 5073,
+    MaxNumWorkgroupsAMDX = 5077,
+    StencilRefUnchangedFrontAMD = 5079,
+    StencilRefGreaterFrontAMD = 5080,
+    StencilRefLessFrontAMD = 5081,
+    StencilRefUnchangedBackAMD = 5082,
+    StencilRefGreaterBackAMD = 5083,
+    StencilRefLessBackAMD = 5084,
+    QuadDerivativesKHR = 5088,
+    RequireFullQuadsKHR = 5089,
+    SharesInputWithAMDX = 5102,
+    ArithmeticPoisonKHR = 5157,
+    OutputLinesEXT = 5269,
+    OutputLinesNV = 5269,
+    OutputPrimitivesEXT = 5270,
+    OutputPrimitivesNV = 5270,
+    DerivativeGroupQuadsKHR = 5289,
+    DerivativeGroupQuadsNV = 5289,
+    DerivativeGroupLinearKHR = 5290,
+    DerivativeGroupLinearNV = 5290,
+    OutputTrianglesEXT = 5298,
+    OutputTrianglesNV = 5298,
+    PixelInterlockOrderedEXT = 5366,
+    PixelInterlockUnorderedEXT = 5367,
+    SampleInterlockOrderedEXT = 5368,
+    SampleInterlockUnorderedEXT = 5369,
+    ShadingRateInterlockOrderedEXT = 5370,
+    ShadingRateInterlockUnorderedEXT = 5371,
+    Shader64BitIndexingEXT = 5427,
+    SharedLocalMemorySizeINTEL = 5618,
+    RoundingModeRTPINTEL = 5620,
+    RoundingModeRTNINTEL = 5621,
+    FloatingPointModeALTINTEL = 5622,
+    FloatingPointModeIEEEINTEL = 5623,
+    MaxWorkgroupSizeINTEL = 5893,
+    MaxWorkDimINTEL = 5894,
+    NoGlobalOffsetINTEL = 5895,
+    NumSIMDWorkitemsINTEL = 5896,
+    SchedulerTargetFmaxMhzINTEL = 5903,
+    MaximallyReconvergesKHR = 6023,
+    FPFastMathDefault = 6028,
+    OpacityMicromapIdKHR = 6031,
+    StreamingInterfaceINTEL = 6154,
+    RegisterMapInterfaceINTEL = 6160,
+    NamedBarrierCountINTEL = 6417,
+    MaximumRegistersINTEL = 6461,
+    MaximumRegistersIdINTEL = 6462,
+    NamedMaximumRegistersINTEL = 6463,
+    Max = 0x7fffffff,
+}
+
+@(private="file")
+SpvExecutionModel :: enum u32 { 
     Vertex = 0,
     TessellationControl = 1,
     TessellationEvaluation = 2,
@@ -125,6 +346,49 @@ SpvExecutionModel :: enum {
     CallableNV = 5318,
     TaskEXT = 5364,
     MeshEXT = 5365,
+    Max = 0x7fffffff,
+}
+
+@(private="file")
+SpvStorageClass :: enum u32 {
+    UniformConstant = 0,
+    Input = 1,
+    Uniform = 2,
+    Output = 3,
+    Workgroup = 4,
+    CrossWorkgroup = 5,
+    Private = 6,
+    Function = 7,
+    Generic = 8,
+    PushConstant = 9,
+    AtomicCounter = 10,
+    Image = 11,
+    StorageBuffer = 12,
+    TileImageEXT = 4172,
+    TileAttachmentQCOM = 4491,
+    NodePayloadAMDX = 5068,
+    CallableDataKHR = 5328,
+    CallableDataNV = 5328,
+    IncomingCallableDataKHR = 5329,
+    IncomingCallableDataNV = 5329,
+    RayPayloadKHR = 5338,
+    RayPayloadNV = 5338,
+    HitAttributeKHR = 5339,
+    HitAttributeNV = 5339,
+    IncomingRayPayloadKHR = 5342,
+    IncomingRayPayloadNV = 5342,
+    ShaderRecordBufferKHR = 5343,
+    ShaderRecordBufferNV = 5343,
+    PhysicalStorageBuffer = 5349,
+    PhysicalStorageBufferEXT = 5349,
+    HitObjectAttributeNV = 5385,
+    TaskPayloadWorkgroupEXT = 5402,
+    HitObjectAttributeEXT = 5411,
+    CodeSectionINTEL = 5605,
+    DeviceOnlyALTERA = 5936,
+    DeviceOnlyINTEL = 5936,
+    HostOnlyALTERA = 5937,
+    HostOnlyINTEL = 5937,
     Max = 0x7fffffff,
 }
 

@@ -18,9 +18,9 @@ layout(buffer_reference, buffer_reference_align = 4)  buffer uint_p         { ui
 // @volatile
 layout(buffer_reference, buffer_reference_align = 8) buffer Cull_Globals {
     vec4 frustum_planes[6];
-	Draw_p               draw_array;
-	Draw_Command_p       draw_command_array;
-	uint_p draw_command_count;
+	Draw_p         draw_array;
+	Draw_Command_p draw_command_array;
+	uint_p         draw_command_count;
 };
 
 // @volatile
