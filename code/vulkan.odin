@@ -103,10 +103,10 @@ create_instance_physical_device_and_surface :: proc (window: ^sdl.Window, get_in
         instance_extension_count: u32
         instance_extensions_raw := sdl.Vulkan_GetInstanceExtensions(&instance_extension_count)
         
-        instance_extensions := make([dynamic] cstring, 0, instance_extension_count, context.temp_allocator)
-        for i in 0..<instance_extension_count {
-            append(&instance_extensions, instance_extensions_raw[i])
-        }
+        instance_extensions: [dynamic; 128] cstring
+        assert(instance_extension_count <= cap(instance_extensions))
+        
+        append(&instance_extensions, ..instance_extensions_raw[:instance_extension_count])
         
         when !Optimized {
             append(&instance_extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
@@ -120,22 +120,43 @@ create_instance_physical_device_and_surface :: proc (window: ^sdl.Window, get_in
                 apiVersion = vk.API_VERSION_1_4,
             },
             enabledExtensionCount   = auto_cast len(instance_extensions),
-            ppEnabledExtensionNames = raw_data(instance_extensions),
+            ppEnabledExtensionNames = &instance_extensions[0],
         }
         
         when !Optimized {
             validation_layers := [] cstring { "VK_LAYER_KHRONOS_validation" }
-                instance_create_info.enabledLayerCount   = auto_cast len(validation_layers)
+            instance_create_info.enabledLayerCount   = auto_cast len(validation_layers)
             instance_create_info.ppEnabledLayerNames = raw_data(validation_layers)
+            
+            vulkan_debug_utils_callback :: proc "system" (messageSeverity: vk.DebugUtilsMessageSeverityFlagsEXT, messageTypes: vk.DebugUtilsMessageTypeFlagsEXT, pCallbackData: ^vk.DebugUtilsMessengerCallbackDataEXT, pUserData: rawptr) -> b32 {
+                context = runtime.default_context()
+                if .WARNING in messageSeverity || .ERROR in messageSeverity {
+                    fmt.printfln("Validation Layer: %v", pCallbackData.pMessage)
+                }
+                return false
+            }
+            
+            enabled := [?] vk.ValidationFeatureEnableEXT {
+                // @study what are these and would they be useful in debug mode
+                // GPU_ASSISTED
+                // GPU_ASSISTED_RESERVE_BINDING_SLOT
+                // BEST_PRACTICES
+                // DEBUG_PRINTF
+                .SYNCHRONIZATION_VALIDATION
+            }
             
             instance_create_info.pNext = &vk.DebugUtilsMessengerCreateInfoEXT {
                 sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
                 messageSeverity = { .VERBOSE, .WARNING, .ERROR },
                 messageType     = { .VALIDATION, .PERFORMANCE },
                 pfnUserCallback = vulkan_debug_utils_callback,
+                
+                pNext = &vk.ValidationFeaturesEXT {
+                    sType = .VALIDATION_FEATURES_EXT,
+                    enabledValidationFeatureCount = len(enabled),
+                    pEnabledValidationFeatures = &enabled[0],
+                }
             }
-        } else {
-            unused(vulkan_debug_utils_callback)
         }
         
         check(vk.CreateInstance(&instance_create_info, nil, &ips.instance))
@@ -220,130 +241,6 @@ choose_physical_device :: proc (ips: IPS) -> vk.PhysicalDevice {
     result := discrete != nil ? discrete : fallback
     
     return result
-}
-
-////////////////////////////////////////////////
-
-vulkan_debug_utils_callback :: proc "system" (messageSeverity: vk.DebugUtilsMessageSeverityFlagsEXT, messageTypes: vk.DebugUtilsMessageTypeFlagsEXT, pCallbackData: ^vk.DebugUtilsMessengerCallbackDataEXT, pUserData: rawptr) -> b32 {
-    context = runtime.default_context()
-    if .WARNING in messageSeverity || .ERROR in messageSeverity {
-        fmt.printfln("Validation Layer: %v", pCallbackData.pMessage)
-    }
-    return false
-}
-
-get_swapchain_format :: proc (ips: IPS) -> vk.Format {
-    format_count: u32
-    // @study: GetPhysicalDeviceSurfaceFormats2KHR: would this help?
-    check(vk.GetPhysicalDeviceSurfaceFormatsKHR(ips.physical_device, ips.surface, &format_count, nil))
-    formats := make([] vk.SurfaceFormatKHR, format_count, context.temp_allocator)
-    check(vk.GetPhysicalDeviceSurfaceFormatsKHR(ips.physical_device, ips.surface, &format_count, raw_data(formats)))
-    
-    if len(formats) == 1 && formats[0].format == .UNDEFINED {
-        return .R8G8B8A8_SRGB
-    }
-    
-    for format in formats {
-        if format.format == .R8G8B8A8_SRGB || format.format == .B8G8R8A8_SRGB {
-            return format.format
-        }
-    }
-    
-    return formats[0].format
-}
-
-get_depth_buffer_format :: proc (ips: IPS) -> vk.Format {
-    result: vk.Format
-    
-    // @todo(viktor): in niagara it is claimed, that we should "just use D32_SFLOAT" for depth buffer "these days"
-    depth_format_list := [] vk.Format { .D32_SFLOAT_S8_UINT, .D24_UNORM_S8_UINT }
-    for it in depth_format_list {
-        format_properties := vk.FormatProperties2 { sType = .FORMAT_PROPERTIES_2 }
-        vk.GetPhysicalDeviceFormatProperties2(ips.physical_device, it, &format_properties)
-        
-        if .DEPTH_STENCIL_ATTACHMENT in format_properties.formatProperties.optimalTilingFeatures {
-            result = it
-            break
-        }
-    }
-    
-    return result
-}
-
-recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, old_swapchain: ^Swapchain) {
-    // @cleanup this should not have changed so we could cache it in IPS
-    surface_capabilities: vk.SurfaceCapabilitiesKHR
-    check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(ips.physical_device, ips.surface, &surface_capabilities))
-    
-    swapchain_extent := surface_capabilities.currentExtent
-    // @note(viktor): this is like for wayland or something, dont know if i want to maintain that any further
-    if surface_capabilities.currentExtent.width == 0xFFFFFFFF {
-        swapchain_extent = to_extent(new_size)
-    }
-    
-    if swapchain_extent.width == 0 && swapchain_extent.height == 0 {
-        if old_swapchain == nil {
-            assert(false, "Welp :(")
-        }
-        return
-    }
-    
-    swapchain_create_info := vk.SwapchainCreateInfoKHR {
-        sType = .SWAPCHAIN_CREATE_INFO_KHR,
-        surface          = ips.surface,
-        minImageCount    = surface_capabilities.minImageCount,
-        imageFormat      = old_swapchain.format,
-        imageColorSpace  = .SRGB_NONLINEAR,
-        imageExtent      = swapchain_extent,
-        imageArrayLayers = 1,
-        imageUsage       = { .TRANSFER_DST },
-        preTransform     = { .IDENTITY },
-        compositeAlpha   = { .OPAQUE },
-        presentMode      = VSync ? .FIFO : .IMMEDIATE,
-        
-        oldSwapchain = old_swapchain.swapchain,
-    }
-    
-    result: Swapchain
-    result.size   = new_size
-    result.format = old_swapchain.format
-    result.depth_buffer.format = old_swapchain.depth_buffer.format
-    
-    check(vk.CreateSwapchainKHR(device, &swapchain_create_info, nil, &result.swapchain))
-    
-    if old_swapchain.swapchain != 0 {
-        destroy_swapchain(device, old_swapchain)
-    }
-    
-    image_count: u32
-    check(vk.GetSwapchainImagesKHR(device, result.swapchain, &image_count, nil))
-    resize(&result.images, image_count)
-    resize(&result.render_completes, image_count)
-    check(vk.GetSwapchainImagesKHR(device, result.swapchain, &image_count, &result.images[0]))
-    
-    // @waste semaphores only need to be deleted and recreated, if the image_count changes up or down respectively
-    for &it in result.render_completes {
-        it = create_semaphore(device)
-    }
-    
-    result.depth_buffer = gpu_make_image(result.size, result.depth_buffer.format, { .DEPTH_STENCIL_ATTACHMENT },         { .DEPTH })
-    result.color_buffer = gpu_make_image(result.size, result.format,              { .COLOR_ATTACHMENT , .TRANSFER_SRC }, { .COLOR })
-    
-    old_swapchain ^= result
-}
-
-destroy_swapchain :: proc (device: vk.Device, swapchain: ^Swapchain) {
-    for &it in swapchain.render_completes {
-        vk.DestroySemaphore(device, it, nil)
-    }
-    clear(&swapchain.render_completes)
-    // @note(viktor): the images are allocated for use, so we can just drop the handles
-    clear(&swapchain.images)
-    
-    gpu_delete(swapchain.depth_buffer)
-    gpu_delete(swapchain.color_buffer)
-    
-    vk.DestroySwapchainKHR(device, swapchain.swapchain, nil)
 }
 
 ////////////////////////////////////////////////
@@ -534,6 +431,122 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
 
 ////////////////////////////////////////////////
 
+get_swapchain_format :: proc (ips: IPS) -> vk.Format {
+    format_count: u32
+    // @study: GetPhysicalDeviceSurfaceFormats2KHR: would this help?
+    check(vk.GetPhysicalDeviceSurfaceFormatsKHR(ips.physical_device, ips.surface, &format_count, nil))
+    formats := make([] vk.SurfaceFormatKHR, format_count, context.temp_allocator)
+    check(vk.GetPhysicalDeviceSurfaceFormatsKHR(ips.physical_device, ips.surface, &format_count, raw_data(formats)))
+    
+    if len(formats) == 1 && formats[0].format == .UNDEFINED {
+        return .R8G8B8A8_SRGB
+    }
+    
+    for format in formats {
+        if format.format == .R8G8B8A8_SRGB || format.format == .B8G8R8A8_SRGB {
+            return format.format
+        }
+    }
+    
+    return formats[0].format
+}
+
+get_depth_buffer_format :: proc (ips: IPS) -> vk.Format {
+    result: vk.Format
+    
+    // @todo(viktor): in niagara it is claimed, that we should "just use D32_SFLOAT" for depth buffer "these days"
+    depth_format_list := [] vk.Format { .D32_SFLOAT_S8_UINT, .D24_UNORM_S8_UINT }
+    for it in depth_format_list {
+        format_properties := vk.FormatProperties2 { sType = .FORMAT_PROPERTIES_2 }
+        vk.GetPhysicalDeviceFormatProperties2(ips.physical_device, it, &format_properties)
+        
+        if .DEPTH_STENCIL_ATTACHMENT in format_properties.formatProperties.optimalTilingFeatures {
+            result = it
+            break
+        }
+    }
+    
+    return result
+}
+
+recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, old_swapchain: ^Swapchain) {
+    // @cleanup this should not have changed so we could cache it in IPS
+    surface_capabilities: vk.SurfaceCapabilitiesKHR
+    check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(ips.physical_device, ips.surface, &surface_capabilities))
+    
+    swapchain_extent := surface_capabilities.currentExtent
+    // @note(viktor): this is like for wayland or something, dont know if i want to maintain that any further
+    if surface_capabilities.currentExtent.width == 0xFFFFFFFF {
+        swapchain_extent = to_extent(new_size)
+    }
+    
+    if swapchain_extent.width == 0 && swapchain_extent.height == 0 {
+        if old_swapchain == nil {
+            assert(false, "Welp :(")
+        }
+        return
+    }
+    
+    swapchain_create_info := vk.SwapchainCreateInfoKHR {
+        sType = .SWAPCHAIN_CREATE_INFO_KHR,
+        surface          = ips.surface,
+        minImageCount    = surface_capabilities.minImageCount,
+        imageFormat      = old_swapchain.format,
+        imageColorSpace  = .SRGB_NONLINEAR,
+        imageExtent      = swapchain_extent,
+        imageArrayLayers = 1,
+        imageUsage       = { .TRANSFER_DST },
+        preTransform     = { .IDENTITY },
+        compositeAlpha   = { .OPAQUE },
+        presentMode      = VSync ? .FIFO : .IMMEDIATE,
+        
+        oldSwapchain = old_swapchain.swapchain,
+    }
+    
+    result: Swapchain
+    result.size   = new_size
+    result.format = old_swapchain.format
+    result.depth_buffer.format = old_swapchain.depth_buffer.format
+    
+    check(vk.CreateSwapchainKHR(device, &swapchain_create_info, nil, &result.swapchain))
+    
+    if old_swapchain.swapchain != 0 {
+        destroy_swapchain(device, old_swapchain)
+    }
+    
+    image_count: u32
+    check(vk.GetSwapchainImagesKHR(device, result.swapchain, &image_count, nil))
+    resize(&result.images, image_count)
+    resize(&result.render_completes, image_count)
+    check(vk.GetSwapchainImagesKHR(device, result.swapchain, &image_count, &result.images[0]))
+    
+    // @waste semaphores only need to be deleted and recreated, if the image_count changes up or down respectively
+    for &it in result.render_completes {
+        it = create_semaphore(device)
+    }
+    
+    result.depth_buffer = gpu_make_image(result.size, result.depth_buffer.format, { .DEPTH_STENCIL_ATTACHMENT },         { .DEPTH })
+    result.color_buffer = gpu_make_image(result.size, result.format,              { .COLOR_ATTACHMENT , .TRANSFER_SRC }, { .COLOR })
+    
+    old_swapchain ^= result
+}
+
+destroy_swapchain :: proc (device: vk.Device, swapchain: ^Swapchain) {
+    for &it in swapchain.render_completes {
+        vk.DestroySemaphore(device, it, nil)
+    }
+    clear(&swapchain.render_completes)
+    // @note(viktor): the images are allocated for use, so we can just drop the handles
+    clear(&swapchain.images)
+    
+    gpu_delete(swapchain.depth_buffer)
+    gpu_delete(swapchain.color_buffer)
+    
+    vk.DestroySwapchainKHR(device, swapchain.swapchain, nil)
+}
+
+////////////////////////////////////////////////
+
 @(thread_local)
 barrier_state: struct {
     is_open:  bool,
@@ -547,13 +560,19 @@ begin_pipeline_barrier :: proc () {
     barrier_state.is_open = true
 }
 
-add_image_barrier :: proc (image: vk.Image, src_access_mask: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_access_mask: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
+add_image_barrier :: proc { add_image_barrier_vk, add_image_barrier_image }
+add_image_barrier_image :: proc (image: Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
+    add_image_barrier(image.image, src_stage, src_access, old_layout, dst_stage, dst_access, new_layout, aspect_mask)
+}
+add_image_barrier_vk :: proc (image: vk.Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
     assert(barrier_state.is_open)
     
     append(&barrier_state.image_barriers, vk.ImageMemoryBarrier2 {
         sType = .IMAGE_MEMORY_BARRIER_2,
-        srcAccessMask = src_access_mask,
-        dstAccessMask = dst_access_mask,
+        srcAccessMask = src_access,
+        dstAccessMask = dst_access,
+        srcStageMask  = src_stage,
+        dstStageMask  = dst_stage,
         oldLayout = old_layout,
         newLayout = new_layout,
         image = image,
@@ -561,29 +580,22 @@ add_image_barrier :: proc (image: vk.Image, src_access_mask: vk.AccessFlags2, ol
     })
 }
 
-add_memory_barrier :: proc (buffer: vk.Buffer, src_access_mask: vk.AccessFlags2, dst_access_mask: vk.AccessFlags2) {
+add_memory_barrier :: proc (buffer: Buffer, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2) {
     assert(barrier_state.is_open)
     
     append(&barrier_state.buffer_barriers, vk.BufferMemoryBarrier2 {
         sType = .BUFFER_MEMORY_BARRIER_2,
-        srcAccessMask = src_access_mask,
-        dstAccessMask = dst_access_mask,
-        buffer = buffer,
+        srcAccessMask = src_access,
+        dstAccessMask = dst_access,
+        srcStageMask  = src_stage,
+        dstStageMask  = dst_stage,
+        buffer = buffer.buffer,
         size   = auto_cast vk.WHOLE_SIZE,
     })
 }
 
-end_pipeline_barrier :: proc (command_buffer: vk.CommandBuffer, src_stage_mask, dst_stage_mask: vk.PipelineStageFlags2) {
+end_pipeline_barrier :: proc (command_buffer: vk.CommandBuffer) {
     assert(barrier_state.is_open)
-    
-    for &it in barrier_state.image_barriers {
-        it.srcStageMask = src_stage_mask
-        it.dstStageMask = dst_stage_mask
-    }
-    for &it in barrier_state.buffer_barriers {
-        it.srcStageMask = src_stage_mask
-        it.dstStageMask = dst_stage_mask
-    }
     
     vk.CmdPipelineBarrier2(command_buffer, &vk.DependencyInfo {
         sType = .DEPENDENCY_INFO,
@@ -702,6 +714,7 @@ create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sw
             colorAttachmentCount    = 1,
             pColorAttachmentFormats = &swapchain_format,
             depthAttachmentFormat   = swapchain.depth_buffer.format,
+            stencilAttachmentFormat = .UNDEFINED,
         },
         stageCount = auto_cast len(shader_stages),
         pStages    = &shader_stages[0],
@@ -829,12 +842,12 @@ queue_submit :: proc (queue: vk.Queue, swapchain: Swapchain, frame: Frame, image
         {
             sType = .SEMAPHORE_SUBMIT_INFO,
             semaphore = swapchain.render_completes[image_index],
-            stageMask = { .ALL_GRAPHICS },
+            stageMask = { .ALL_COMMANDS },
         },
         {
             sType = .SEMAPHORE_SUBMIT_INFO,
             semaphore = timeline_semaphore,
-            value = signal_value,
+            value     = signal_value,
             stageMask = { .ALL_COMMANDS },
         },
     }

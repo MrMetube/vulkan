@@ -225,8 +225,8 @@ main :: proc () {
             check(vk.BeginCommandBuffer(cb_once, &cb_once_begin_info))
             
             begin_pipeline_barrier()
-                add_image_barrier(texture.image, {}, .UNDEFINED, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
-            end_pipeline_barrier(cb_once, {}, { .TRANSFER })
+                add_image_barrier(texture, {}, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
+            end_pipeline_barrier(cb_once)
             
             copy_regions := make([dynamic] vk.BufferImageCopy, context.temp_allocator)
             for level in 0..<loaded_texture.mip_levels {
@@ -242,8 +242,8 @@ main :: proc () {
             vk.CmdCopyBufferToImage(cb_once, source_buffer.buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
             
             begin_pipeline_barrier()
-                add_image_barrier(texture.image, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
-            end_pipeline_barrier(cb_once, { .TRANSFER }, { .FRAGMENT_SHADER })
+                add_image_barrier(texture, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
+            end_pipeline_barrier(cb_once)
             
             check(vk.EndCommandBuffer(cb_once))
             
@@ -770,8 +770,10 @@ main :: proc () {
         vk.CmdFillBuffer(cb, draw_command_count_buffer.buffer, 0, size_of(dccb_view^), 0)
         
         begin_pipeline_barrier()
-            add_memory_barrier(draw_command_count_buffer.buffer, { .TRANSFER_WRITE }, { .SHADER_WRITE, .SHADER_READ })
-        end_pipeline_barrier(cb, { .TRANSFER }, { .COMPUTE_SHADER })
+            // :OcclusionCull: the memory barrier for the depth pyramid had a parameters, but just for the late pass (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=10157)
+            add_memory_barrier(draw_command_buffer, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .INDIRECT_COMMAND_READ, .SHADER_READ }, { .COMPUTE_SHADER }, { .SHADER_WRITE, .SHADER_READ })
+            add_memory_barrier(draw_command_count_buffer, { .TRANSFER }, { .TRANSFER_WRITE }, { .COMPUTE_SHADER }, { .SHADER_WRITE, .SHADER_READ })
+        end_pipeline_barrier(cb)
         
         vk.CmdBindPipeline(cb, .COMPUTE, compute_pipeline.pipeline)
         
@@ -784,21 +786,25 @@ main :: proc () {
         vk.CmdPushConstants(cb, compute_pipeline.layout, compute_pipeline.shader_stages, 0, size_of(frame.cull_globals.gpu), &frame.cull_globals.gpu)
         
         // @volatile the round up needs align with the ComputeWidth
+        // @todo(viktor): we now extract the localsize xyz so we could do get_group_count(shader.localsize, len(draws)) here.
         draw_count := cast(u32) len(draws) + 31 / 32
         vk.CmdDispatch(cb, draw_count, 1, 1)
         
         begin_pipeline_barrier()
-            add_memory_barrier(draw_command_buffer.buffer, { .SHADER_WRITE }, { .INDIRECT_COMMAND_READ })
-        end_pipeline_barrier(cb, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
+            add_memory_barrier(draw_command_buffer,       { .COMPUTE_SHADER }, { .SHADER_WRITE }, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .INDIRECT_COMMAND_READ, .SHADER_READ })
+            add_memory_barrier(draw_command_count_buffer, { .COMPUTE_SHADER }, { .SHADER_WRITE }, { .DRAW_INDIRECT }, { .INDIRECT_COMMAND_READ })
+        end_pipeline_barrier(cb)
         
         vk.CmdWriteTimestamp(cb, { .BOTTOM_OF_PIPE }, query_pool, 3)
         
         ////////////////////////////////////////////////
         
+        // :OcclusionCull: the barrier before the depth pyramid was missing the barrier for the pyramid.image itself (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=11592)
+        
         begin_pipeline_barrier()
-            add_image_barrier(swapchain.color_buffer.image, {}, .UNDEFINED, { .COLOR_ATTACHMENT_WRITE },         .COLOR_ATTACHMENT_OPTIMAL)
-            add_image_barrier(swapchain.depth_buffer.image, {}, .UNDEFINED, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .DEPTH_STENCIL_ATTACHMENT_OPTIMAL, { .DEPTH, .STENCIL })
-        end_pipeline_barrier(cb, { .BOTTOM_OF_PIPE }, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS })
+            add_image_barrier(swapchain.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .COLOR_ATTACHMENT_OPTIMAL)
+            add_image_barrier(swapchain.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .DEPTH_STENCIL_ATTACHMENT_OPTIMAL, { .DEPTH, .STENCIL })
+        end_pipeline_barrier(cb)
         
         ////////////////////////////////////////////////
         
@@ -838,9 +844,9 @@ main :: proc () {
         vk.CmdEndRendering(cb)
         
         begin_pipeline_barrier()
-            add_image_barrier(swapchain.color_buffer.image, { .COLOR_ATTACHMENT_WRITE }, .COLOR_ATTACHMENT_OPTIMAL, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
-            add_image_barrier(swapchain.images[image_index], {}, .UNDEFINED, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
-        end_pipeline_barrier(cb, { .COLOR_ATTACHMENT_OUTPUT }, { .TRANSFER })
+            add_image_barrier(swapchain.color_buffer,  { .COLOR_ATTACHMENT_OUTPUT }, { .COLOR_ATTACHMENT_WRITE }, .COLOR_ATTACHMENT_OPTIMAL, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
+            add_image_barrier(swapchain.images[image_index], { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
+        end_pipeline_barrier(cb)
         
         vk.CmdCopyImage(cb, swapchain.color_buffer.image, .TRANSFER_SRC_OPTIMAL, swapchain.images[image_index], .TRANSFER_DST_OPTIMAL, 1, &vk.ImageCopy {
             srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
@@ -849,8 +855,8 @@ main :: proc () {
         })
         
         begin_pipeline_barrier()
-            add_image_barrier(swapchain.images[image_index], { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, {}, .PRESENT_SRC_KHR)
-        end_pipeline_barrier(cb, { .TRANSFER }, {})
+            add_image_barrier(swapchain.images[image_index], { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, {}, {}, .PRESENT_SRC_KHR)
+        end_pipeline_barrier(cb)
         
         ////////////////////////////////////////////////
         
