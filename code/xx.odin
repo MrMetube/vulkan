@@ -5,7 +5,6 @@ import "base:intrinsics"
 
 import "core:fmt"
 import "core:os"
-import "core:text/regex"
 import "core:strings"
 import win "core:sys/windows"
 
@@ -385,28 +384,6 @@ make_directory_if_not_exists :: proc (path: string) -> bool {
 
 remove_if_exists :: proc (path: string) {
     if os.exists(path) do os.remove(path)
-}
-
-delete_all_like :: proc (path, pattern: string) {
-    files := all_like(path, pattern)
-    for file in files {
-        os.remove(file)
-    }
-}
-
-all_like :: proc (path, pattern: string, allocator := context.temp_allocator) -> [] string {
-    dir, _ := os.read_all_directory_by_path(path, allocator)
-    reg, _ := regex.create(pattern)
-    
-    result := make([dynamic] string, allocator)
-    for file in dir {
-        _, ok := regex.match(reg, file.name)
-        if ok {
-            append(&result, file.fullpath)
-        }
-    }
-    
-    return result[:]
 }
 
 ////////////////////////////////////////////////

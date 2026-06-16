@@ -132,7 +132,7 @@ main :: proc () {
     defer sdl.QuitSubSystem({ .VIDEO })
     
     window := sdl.CreateWindow("How to Vulkan", 1280, 720, sdl.WINDOW_VULKAN | sdl.WINDOW_RESIZABLE)
-    check_sdl(window != nil)
+    check(window != nil)
     defer sdl.DestroyWindow(window)
     
     ////////////////////////////////////////////////

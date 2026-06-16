@@ -1,3 +1,4 @@
+#+vet !unused-procedures
 package build
 
 import "base:intrinsics"
