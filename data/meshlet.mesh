@@ -4,7 +4,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types: require
 #extension GL_ARB_shader_draw_parameters: require
 
-#include "common.h"
+#include "common.glslh"
 
 #define MeshWidth 32
 
@@ -31,15 +31,15 @@ layout(binding = 0) readonly buffer Draws {
 	Draw draw_buffer[];
 };
 
-layout(binding = 1) readonly buffer Meshlets {
+layout(binding = 2) readonly buffer Meshlets {
 	Meshlet meshlet_buffer[];
 };
 
-layout(binding = 2) readonly buffer MeshletData {
+layout(binding = 3) readonly buffer MeshletData {
 	uint meshlet_data_buffer[];
 };
 
-layout(binding = 3) readonly buffer Vertices {
+layout(binding = 4) readonly buffer Vertices {
 	Vertex vertex_buffer[];
 };
 
@@ -69,14 +69,20 @@ void main() {
     uint thread_index  = gl_LocalInvocationID.x;
 	uint meshlet_index = task_result.indices[gl_WorkGroupID.x];
     uint draw_index    = task_result.draw_index;
+    // :DrawAndLODData: @cleanup niagara managed to "pass" the offset by using the NV functions, which allow for an offset.
+    // this is so that the Draw structure, does not need to store the meshlet offset for the mesh shader,
+    // which then only requires then draw.vertex_offset, and all other fields can be moved into a separate
+    // buffer alongside the LOD data.
+    uint meshlet_offset = task_result.meshlet_offset;
     
     Draw draw = draw_buffer[draw_index];
     
     Meshlet meshlet;
     
-    if (meshlet_index < (draw.meshlet_count + draw.meshlet_offset)) {
+    // @cleanup can this even happen here anymore?
+    // if (meshlet_index < (draw.meshlet_count + meshlet_offset)) {
         meshlet = meshlet_buffer[meshlet_index];
-    }
+    // }
     
     uint vertex_count   = meshlet.vertex_count;
     uint triangle_count = meshlet.triangle_count;
@@ -118,7 +124,7 @@ void main() {
             result.debug_color = vec3(float(mhash & 255), float((mhash >> 8) & 255), float((mhash >> 16) & 255)) / 255.0;
         }
         
-        // @note(viktor): vulkan uses a inverted y-axis, so we invert it back to the regular y+ = up here
+        // vulkan uses a inverted y-axis, so we invert it back to the regular y+ = up here
         gl_MeshVerticesEXT[i].gl_Position = position * vec4(1, -1, 1, 1);
         mesh_result[i] = result;
     }

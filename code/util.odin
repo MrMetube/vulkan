@@ -6,6 +6,7 @@ import "base:intrinsics"
 import "base:runtime"
 
 import "core:simd"
+import "core:mem"
 
 _ :: simd
 
@@ -276,10 +277,11 @@ make_shallow_copy_slice :: proc (source: $A/ [] $T, allocator: Allocator) -> A {
 }
 make_shallow_copy_soa :: proc (source: $A/ #soa [dynamic] $T, allocator: Allocator) -> A {
     result := make(A, len(source), allocator)
-    // @cleanup why doesn't copy(dst, src) work here?
+    
     for it, index in source {
         result[index] = it
     }
+    
     return result
 }
 

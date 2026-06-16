@@ -6,8 +6,9 @@
 #define TaskWidth 32
 
 struct Task_Result {
-    uint draw_index;
     uint indices[TaskWidth];
+    uint draw_index;
+    uint meshlet_offset;
 };
 
 
@@ -31,7 +32,17 @@ layout(buffer_reference, buffer_reference_align = 8) buffer Draw_Globals {
 
 // @volatile
 struct Draw {
-    vec3 center;
+    vec4  orientation;
+    vec3  p;
+    float scale;
+    
+    uint mesh_index;
+    uint vertex_offset; // this is a duplication of Mesh[mesh_index].vertex_offset, it helps data locality in the mesh shader
+};
+
+// @volatile
+struct Mesh {
+    vec3  center;
     float radius;
     
     uint vertex_offset;
@@ -39,9 +50,7 @@ struct Draw {
     uint meshlet_offset;
     uint meshlet_count;
     
-    vec4  orientation;
-    vec3  p;
-    float scale;
+    uint __triangle_count; 
 };
 
 // @volatile

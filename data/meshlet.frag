@@ -3,7 +3,7 @@
 // #extension GL_EXT_nonuniform_qualifier : require
 // #extension GL_EXT_samplerless_texture_functions : enable
 
-#include "common.h"
+#include "common.glslh"
 
 ////////////////////////////////////////////////
 

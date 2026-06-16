@@ -5,21 +5,23 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64: require
 #extension GL_KHR_shader_subgroup_ballot: require
 
-#include "common.h"
+#include "common.glslh"
 
 #define ComputeWidth 32
 
 layout(local_size_x = ComputeWidth, local_size_y = 1, local_size_z = 1) in;
 
 layout(buffer_reference, buffer_reference_align = 16) buffer Draw_p         { Draw         v; };
+layout(buffer_reference, buffer_reference_align = 16) buffer Mesh_p         { Mesh         v; };
 layout(buffer_reference, buffer_reference_align = 16) buffer Draw_Command_p { Draw_Command v; };
 layout(buffer_reference, buffer_reference_align = 4)  buffer uint_p         { uint         v; };
 
 // @volatile
 layout(buffer_reference, buffer_reference_align = 8) buffer Cull_Globals {
     vec4 frustum_planes[6];
-	Draw_p         draw_array;
-	Draw_Command_p draw_command_array;
+	Draw_p         draw_buffer;
+	Mesh_p         mesh_buffer;
+	Draw_Command_p draw_command_buffer;
 	uint_p         draw_command_count;
 };
 
@@ -28,7 +30,7 @@ layout(push_constant) uniform Push_Data {
     Cull_Globals globals;
 };
 
-// @note(viktor): the ballot code assumes that the subgroup size is 32, which needs to be revised for non NVidia archs.
+// the ballot code assumes that the subgroup size is 32, which needs to be revised for non NVidia architectures.
 
 void main() {
     uint group_index  = gl_WorkGroupID.x;
@@ -36,11 +38,12 @@ void main() {
     uint draw_index   = group_index * ComputeWidth + thread_index;
     
     
-    Draw_p draw               = globals.draw_array[draw_index];
+    Draw_p draw               = globals.draw_buffer[draw_index];
+    Mesh_p mesh               = globals.mesh_buffer[draw.v.mesh_index];
     uint_p draw_command_count = globals.draw_command_count;
     
-    vec3  center = transform(draw.v.orientation, draw.v.scale, draw.v.p, draw.v.center);
-    float radius = draw.v.radius * draw.v.scale;
+    vec3  center = transform(draw.v.orientation, draw.v.scale, draw.v.p, mesh.v.center);
+    float radius = draw.v.scale * mesh.v.radius;
     
     bool visible = true;
     for (int i = 0; i < 6; i++) {
@@ -66,10 +69,10 @@ void main() {
     // The meshes were not drawn for about one frame and then it was stable again for a while. This repeated
     // indefinitly.
     if (visible) {
-        Draw_Command_p draw_command = globals.draw_command_array[draw_command_index];
+        Draw_Command_p draw_command = globals.draw_command_buffer[draw_command_index];
         draw_command.v.draw_id = draw_index;
         
-        draw_command.v.groupCountX = (draw.v.meshlet_count + TaskWidth-1) / TaskWidth;
+        draw_command.v.groupCountX = (mesh.v.meshlet_count + TaskWidth-1) / TaskWidth;
         draw_command.v.groupCountY = 1;
         draw_command.v.groupCountZ = 1;
     }

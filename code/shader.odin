@@ -23,7 +23,7 @@ compile_and_load_shader :: proc (input: string, bytes_allocator: Allocator, outp
     append(&cmd, "--target-env=vulkan1.4")
     append(&cmd, "-o", shader_output)
     if ODIN_DEBUG {
-        append(&cmd, "-g") // @note(viktor): embed shader source code for renderdoc
+        append(&cmd, "-g") // embed shader source code for renderdoc
     }
     if Optimized {
         append(&cmd, "-O")
@@ -154,8 +154,6 @@ compile_and_load_shader :: proc (input: string, bytes_allocator: Allocator, outp
             code = code[word_count:]
         }
         
-        // @todo(viktor): process extracted ids
-        
         for id in ids {
             if id.opcode == .Variable && (id.storage_class == .Uniform || id.storage_class == .UniformConstant || id.storage_class == .StorageBuffer ) {
                 assert(id.set == 0)
@@ -206,8 +204,13 @@ compile_and_load_shader :: proc (input: string, bytes_allocator: Allocator, outp
     return result, true
 }
 
+get_group_count :: proc (shader: Shader, total_count: u32) -> u32 {
+    result := (total_count + shader.local_size.x-1) / shader.local_size.x
+    return result
+}
+
 ////////////////////////////////////////////////
-// @note(viktor): copy-pasted from https://github.com/KhronosGroup/SPIRV-Headers/blob/main/include/spirv/unified1/spirv.h
+// copy-pasted from https://github.com/KhronosGroup/SPIRV-Headers/blob/main/include/spirv/unified1/spirv.h
 
 @(private="file")
 SpvMagicNumber :: 0x07230203

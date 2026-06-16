@@ -9,9 +9,9 @@ import sdl "vendor:sdl3"
 
 // @naming
 IPS :: struct {
-    instance:        vk.Instance,
-    physical_device: vk.PhysicalDevice,
-    surface:         vk.SurfaceKHR,
+    instance:          vk.Instance,
+    physical_device:   vk.PhysicalDevice,
+    surface:           vk.SurfaceKHR,
     device_properties: vk.PhysicalDeviceProperties2,
 }
 
@@ -21,7 +21,7 @@ Swapchain :: struct {
     render_completes: [dynamic] vk.Semaphore,
     
     size:   uv2,
-    format: vk.Format, // @cleanup this should be aligned with the color buffer
+    format: vk.Format, // @cleanup this is redundant with the color buffer's format
     
     color_buffer: Image,
     depth_buffer: Image,
@@ -64,12 +64,22 @@ Image :: struct {
     memory: vk.DeviceMemory,
     
 	sampler: vk.Sampler,
+    
+    last_transition: Transition,
 }
 
 Buffer :: struct {
     buffer:  vk.Buffer,
     memory:  vk.DeviceMemory,
     address: vk.DeviceAddress,
+
+    last_transition: Transition,
+}
+
+Transition :: struct {
+    stage: vk.PipelineStageFlags2, 
+    access: vk.AccessFlags2, 
+    layout: vk.ImageLayout, 
 }
 
 ////////////////////////////////////////////////
@@ -297,16 +307,16 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
         pNext = &vk.PhysicalDeviceVulkan14Features {
             sType = .PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
             
-            maintenance5   = true, // @note(viktor): deprecates ShaderModule
-            pushDescriptor = true, // @note(viktor): remove the need for CmdBindVertexBuffers
-            dynamicRenderingLocalRead = true, // @note(viktor): allows rendering to an image and then copying into the swapchain image, whilst using dynamic_rendering
+            maintenance5   = true, // deprecates ShaderModule
+            pushDescriptor = true, // remove the need for CmdBindVertexBuffers
+            dynamicRenderingLocalRead = true, // allows rendering to an image and then copying into the swapchain image, whilst using dynamic_rendering
             
         pNext = &vk.PhysicalDeviceVulkan13Features {
             sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
             
             synchronization2 = true,
             dynamicRendering = true,
-            maintenance4     = true, // @note(viktor): allows using layout(local_size...)
+            maintenance4     = true, // needed to use layout(local_size...)
             
         pNext = &vk.PhysicalDeviceVulkan12Features {
             sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
@@ -323,7 +333,7 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
             uniformAndStorageBuffer8BitAccess = true,
             storageBuffer8BitAccess           = true,
             
-            drawIndirectCount = true, // @note(viktor): let the culling shader specify the amount of draw commands, so that we don't dispatch empty commands
+            drawIndirectCount = true, // let the culling shader specify the amount of draw commands, so that we don't dispatch empty commands
             
             scalarBlockLayout   = true, // @study did this not become required in 1.4?
             samplerFilterMinmax = true,
@@ -378,21 +388,8 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
     
     // @waste there are a lot of buffers here, each of which is very small
     for &frame in frames {
-        frame.draw_globals.buffer, frame.draw_globals.cpu = gpu_make_buffer_type(Draw_Globals, { .SHADER_DEVICE_ADDRESS })
-        
-        device_address_info := vk.BufferDeviceAddressInfo {
-            sType  = .BUFFER_DEVICE_ADDRESS_INFO,
-            buffer = frame.draw_globals.buffer.buffer,
-        }
-        frame.draw_globals.gpu = vk.GetBufferDeviceAddress(device, &device_address_info)
-        
-        frame.cull_globals.buffer, frame.cull_globals.cpu = gpu_make_buffer_type(Cull_Globals, { .SHADER_DEVICE_ADDRESS })
-        
-        device_address_info = vk.BufferDeviceAddressInfo {
-            sType  = .BUFFER_DEVICE_ADDRESS_INFO,
-            buffer = frame.cull_globals.buffer.buffer,
-        }
-        frame.cull_globals.gpu = vk.GetBufferDeviceAddress(device, &device_address_info)
+        frame.draw_globals.gpu, frame.draw_globals.cpu = gpu_make_buffer_type(Draw_Globals, { .SHADER_DEVICE_ADDRESS })
+        frame.cull_globals.gpu, frame.cull_globals.cpu = gpu_make_buffer_type(Cull_Globals, { .SHADER_DEVICE_ADDRESS })
         
         frame.image_aquired = create_semaphore(device)
         defer_destroy(vk.DestroySemaphore, frame.image_aquired)
@@ -433,7 +430,6 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
 
 get_swapchain_format :: proc (ips: IPS) -> vk.Format {
     format_count: u32
-    // @study: GetPhysicalDeviceSurfaceFormats2KHR: would this help?
     check(vk.GetPhysicalDeviceSurfaceFormatsKHR(ips.physical_device, ips.surface, &format_count, nil))
     formats := make([] vk.SurfaceFormatKHR, format_count, context.temp_allocator)
     check(vk.GetPhysicalDeviceSurfaceFormatsKHR(ips.physical_device, ips.surface, &format_count, raw_data(formats)))
@@ -470,7 +466,6 @@ get_depth_buffer_format :: proc (ips: IPS) -> vk.Format {
 }
 
 recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, old_swapchain: ^Swapchain) {
-    // @cleanup this should not have changed so we could cache it in IPS
     surface_capabilities: vk.SurfaceCapabilitiesKHR
     check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(ips.physical_device, ips.surface, &surface_capabilities))
     
@@ -510,6 +505,7 @@ recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, old_swap
     
     check(vk.CreateSwapchainKHR(device, &swapchain_create_info, nil, &result.swapchain))
     
+    // @waste semaphores only need to be deleted and recreated, if the image_count changes up or down respectively
     if old_swapchain.swapchain != 0 {
         destroy_swapchain(device, old_swapchain)
     }
@@ -520,7 +516,6 @@ recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, old_swap
     resize(&result.render_completes, image_count)
     check(vk.GetSwapchainImagesKHR(device, result.swapchain, &image_count, &result.images[0]))
     
-    // @waste semaphores only need to be deleted and recreated, if the image_count changes up or down respectively
     for &it in result.render_completes {
         it = create_semaphore(device)
     }
@@ -536,7 +531,7 @@ destroy_swapchain :: proc (device: vk.Device, swapchain: ^Swapchain) {
         vk.DestroySemaphore(device, it, nil)
     }
     clear(&swapchain.render_completes)
-    // @note(viktor): the images are allocated for use, so we can just drop the handles
+    // the images are allocated for us, so we can just drop the handles
     clear(&swapchain.images)
     
     gpu_delete(swapchain.depth_buffer)
@@ -550,7 +545,7 @@ destroy_swapchain :: proc (device: vk.Device, swapchain: ^Swapchain) {
 @(thread_local)
 barrier_state: struct {
     is_open:  bool,
-    image_barriers: [dynamic] vk.ImageMemoryBarrier2,
+    image_barriers:  [dynamic] vk.ImageMemoryBarrier2,
     buffer_barriers: [dynamic] vk.BufferMemoryBarrier2,
 }
 
@@ -561,8 +556,9 @@ begin_pipeline_barrier :: proc () {
 }
 
 add_image_barrier :: proc { add_image_barrier_vk, add_image_barrier_image }
-add_image_barrier_image :: proc (image: Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
+add_image_barrier_image :: proc (image: ^Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
     add_image_barrier(image.image, src_stage, src_access, old_layout, dst_stage, dst_access, new_layout, aspect_mask)
+    image.last_transition = { dst_stage, dst_access, new_layout }
 }
 add_image_barrier_vk :: proc (image: vk.Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
     assert(barrier_state.is_open)
@@ -580,7 +576,7 @@ add_image_barrier_vk :: proc (image: vk.Image, src_stage: vk.PipelineStageFlags2
     })
 }
 
-add_memory_barrier :: proc (buffer: Buffer, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2) {
+add_buffer_barrier :: proc (buffer: ^Buffer, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2) {
     assert(barrier_state.is_open)
     
     append(&barrier_state.buffer_barriers, vk.BufferMemoryBarrier2 {
@@ -592,6 +588,18 @@ add_memory_barrier :: proc (buffer: Buffer, src_stage: vk.PipelineStageFlags2, s
         buffer = buffer.buffer,
         size   = auto_cast vk.WHOLE_SIZE,
     })
+    
+    buffer.last_transition = { stage = dst_stage, access = dst_access }
+}
+
+add_image_barrier_transition_from_last :: proc (image: ^Image, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
+    last := image.last_transition
+    add_image_barrier(image, last.stage, last.access, last.layout, dst_stage, dst_access, new_layout, aspect_mask)
+}
+
+add_buffer_barrier_transition_from_last :: proc (buffer: ^Buffer, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2) {
+    last := buffer.last_transition
+    add_buffer_barrier(buffer, last.stage, last.access, dst_stage, dst_access)
 }
 
 end_pipeline_barrier :: proc (command_buffer: vk.CommandBuffer) {
@@ -669,7 +677,9 @@ create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sha
     
     check(vk.CreateComputePipelines(device, cache, 1, &create_info, nil, &result.pipeline))
     
-    result.update_template = create_update_template(device, .COMPUTE, result.layout, storage_buffer_count)
+    if storage_buffer_count != 0 {
+        result.update_template = create_update_template(device, .COMPUTE, result.layout, storage_buffer_count)
+    }
     
     return result
 }
@@ -759,14 +769,15 @@ create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sw
     
     check(vk.CreateGraphicsPipelines(device, cache, 1,&create_info, nil, &result.pipeline))
     
-    result.update_template = create_update_template(device, .GRAPHICS, result.layout, storage_buffer_count)
+    if storage_buffer_count != 0 {
+        result.update_template = create_update_template(device, .GRAPHICS, result.layout, storage_buffer_count)
+    }
     
     return result
 }
 
 create_update_template :: proc (device: vk.Device, bind_point: vk. PipelineBindPoint, layout: vk.PipelineLayout, storage_buffer_count: u32) -> vk.DescriptorUpdateTemplate {
-    // @cleanup
-    if storage_buffer_count == 0 { return 0 }
+    assert(storage_buffer_count != 0)
     
     // @todo(viktor): The information of which shader stage needs which storage buffer could be parsed from the compiled spirv file.
     update_template_entries: [dynamic; 32] vk.DescriptorUpdateTemplateEntry

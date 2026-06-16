@@ -28,11 +28,9 @@ Frame :: struct {
     image_aquired:  vk.Semaphore,
 }
 
-// @todo(viktor): should vk.DeviceAddress be part of the buffer, so that it is all in one member
 Push_Constant :: struct ($T: typeid) {
-    buffer: Buffer,
+    gpu: Buffer,
     cpu:    ^T,
-    gpu:    vk.DeviceAddress,
 }
 
 DescriptorUpdateData :: struct #raw_union {
@@ -49,20 +47,6 @@ Geometry :: struct {
     meshes: [dynamic] Mesh,
 }
 
-Mesh :: struct {
-    center: v3,
-    radius: f32,
-    
-    vertex_offset: u32,
-    vertex_count:  u32,
-    
-    meshlet_offset: u32,
-    meshlet_count:  u32,
-    
-    // @note(viktor): just for statistics, might become unused
-    triangle_count: u32,
-}
-
 ////////////////////////////////////////////////
 
 // @shader meshlet.task
@@ -75,9 +59,12 @@ MaxTriangles :: 84
 // @shader cull.comp
 Cull_Globals :: struct {
     frustum_planes: [6] v4,
-    draw:               vk.DeviceAddress,
-    draw_command:       vk.DeviceAddress,
-    draw_command_count: vk.DeviceAddress,
+    using buffers: struct #all_or_none {
+        draw:               vk.DeviceAddress,
+        mesh:               vk.DeviceAddress,
+        draw_command:       vk.DeviceAddress,
+        draw_command_count: vk.DeviceAddress,
+    },
 }
 
 // @shader
@@ -88,18 +75,27 @@ Draw_Globals :: struct {
 }
 
 // @shader
-Draw :: struct {
-    center: v3,
-    radius: f32,
-    
-    vertex_offset:  u32,
-    vertex_count:   u32,
-    meshlet_offset: u32,
-    meshlet_count:  u32,
-    
+Draw :: struct #align(16) {
     orientation: q32,
     p:           v3,
     scale:       f32,
+    
+    mesh_index:    u32,
+    vertex_offset: u32,
+}
+
+Mesh :: struct #align(16) {
+    center: v3,
+    radius: f32,
+    
+    vertex_offset: u32,
+    vertex_count:  u32,
+    
+    meshlet_offset: u32,
+    meshlet_count:  u32,
+    
+    // @note(viktor): just for statistics, might become unused, @shader remove it once cleaned up here
+    triangle_count: u32,
 }
 
 // @shader
@@ -159,9 +155,10 @@ main :: proc () {
     // @todo(viktor): currently all are allocated to be host visible, so that we can simplify copying into them.
     // Rethink if any of these should be copied to device_local memory
     vertex_buffer,       vb_view  := gpu_make_buffer([] Vertex,    256 * Megabyte / size_of(Vertex),  { .STORAGE_BUFFER })
-    meshlet_buffer,      mb_view  := gpu_make_buffer([] Meshlet,   256 * Megabyte / size_of(Meshlet), { .STORAGE_BUFFER })
+    meshlet_buffer,      mlb_view := gpu_make_buffer([] Meshlet,   256 * Megabyte / size_of(Meshlet), { .STORAGE_BUFFER })
     meshlet_data_buffer, mdb_view := gpu_make_buffer([] u32,       256 * Megabyte / size_of(u32),     { .STORAGE_BUFFER })
     draw_buffer,         db_view  := gpu_make_buffer([] Draw,      256 * Megabyte / size_of(Draw),    { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
+    mesh_buffer,         mb_view  := gpu_make_buffer([] Mesh,      256 * Megabyte / size_of(Mesh),    { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
     // @todo(viktor): this buffer is never seen by the cpu, its filled by compute and used by task+mesh shader
     draw_command_buffer, dcb_view := gpu_make_buffer([] Draw_Command, 256 * Megabyte / size_of(Draw_Command), { .STORAGE_BUFFER, .INDIRECT_BUFFER, .SHADER_DEVICE_ADDRESS })
     draw_command_count_buffer, dccb_view := gpu_make_buffer_type(u32, { .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER, .SHADER_DEVICE_ADDRESS })
@@ -181,8 +178,9 @@ main :: proc () {
         }
         
         copy(vb_view,  geometry.vertices[:])
-        copy(mb_view,  geometry.meshlets[:])
+        copy(mlb_view, geometry.meshlets[:])
         copy(mdb_view, geometry.meshlet_data[:])
+        copy(mb_view,  geometry.meshes[:])
     }
     
     ////////////////////////////////////////////////
@@ -225,7 +223,7 @@ main :: proc () {
             check(vk.BeginCommandBuffer(cb_once, &cb_once_begin_info))
             
             begin_pipeline_barrier()
-                add_image_barrier(texture, {}, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
+                add_image_barrier(&texture, {}, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
             end_pipeline_barrier(cb_once)
             
             copy_regions := make([dynamic] vk.BufferImageCopy, context.temp_allocator)
@@ -242,7 +240,7 @@ main :: proc () {
             vk.CmdCopyBufferToImage(cb_once, source_buffer.buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
             
             begin_pipeline_barrier()
-                add_image_barrier(texture, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
+                add_image_barrier_transition_from_last(&texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
             end_pipeline_barrier(cb_once)
             
             check(vk.EndCommandBuffer(cb_once))
@@ -278,7 +276,7 @@ main :: proc () {
     
     // @todo put all buffer addresses into the push constant and remove these bindings
     // @shader needs to match the bindings in shaders
-    GraphicsStorageBufferCount :: 5
+    GraphicsStorageBufferCount :: 6
     
     graphics_descriptor_set_layout: vk.DescriptorSetLayout
     {
@@ -289,26 +287,32 @@ main :: proc () {
                 descriptorCount = 1,
                 stageFlags      = { .MESH_EXT, .TASK_EXT },
             },
-            { // meshlet
+            { // mesh
                 binding = 1,
                 descriptorType  = .STORAGE_BUFFER,
                 descriptorCount = 1,
-                stageFlags      = { .MESH_EXT, .TASK_EXT },
+                stageFlags      = { .TASK_EXT },
             },
-            { // meshlet data
+            { // meshlet
                 binding = 2,
                 descriptorType  = .STORAGE_BUFFER,
                 descriptorCount = 1,
                 stageFlags      = { .MESH_EXT, .TASK_EXT },
             },
-            { // vertex
+            { // meshlet data
                 binding = 3,
+                descriptorType  = .STORAGE_BUFFER,
+                descriptorCount = 1,
+                stageFlags      = { .MESH_EXT, .TASK_EXT },
+            },
+            { // vertex
+                binding = 4,
                 descriptorType  = .STORAGE_BUFFER,
                 descriptorCount = 1,
                 stageFlags      = { .MESH_EXT },
             },
             { // draw_command
-                binding = 4,
+                binding = 5,
                 descriptorType  = .STORAGE_BUFFER,
                 descriptorCount = 1,
                 stageFlags      = { .TASK_EXT },
@@ -421,7 +425,7 @@ main :: proc () {
     watcher_allocator := context.allocator
     watchers := make([dynamic] Watcher, watcher_allocator)
     
-    common_watcher_id := watchers_make(&watchers, "common.h")
+    common_watcher_id := watchers_make(&watchers, "common.glslh")
     
     shaders: [dynamic] Shader
     for file in shader_files {
@@ -478,24 +482,19 @@ main :: proc () {
     next_signal_value: u64 = MaxFramesInFlight + 1
     should_recreate_swapchain: bool
     
-    Smooth :: struct {
-        value:      f64,
-        last_value: f64,
-    }
-    
-    smooth_update :: proc (frame_time: f64, smooth: ^Smooth, value: f64) {
+    time_smoothed_blend :: proc (frame_time: f64, last_value: f64, value: f64) -> f64 {
         // @speed We could precompute ks if needed as it only depends on h and frame time, not the smooth itself.
         h :: 3.0 // = the amount of time it takes for the filter to converge to 90% of a fixed input value
         k := power(power(cast(f64) .1, 1 / h), frame_time)
         
-        smooth.value = linear_blend(value, smooth.last_value, k)
-        smooth.last_value = smooth.value
+        result := linear_blend(value, last_value, k)
+        return result
     }
     
     culling_enabled: bool = true
     
-    cpu_time: Smooth
-    gpu_time: Smooth
+    cpu_time: f64
+    gpu_time: f64
     for !quit {
         free_all(context.temp_allocator)
         
@@ -635,7 +634,7 @@ main :: proc () {
                 gpu_delta := gpu_end - gpu_begin
                 // @note(viktor): this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
                 if gpu_delta >= 0 {
-                    smooth_update(delta_time_64, &gpu_time, gpu_delta)
+                    gpu_time = time_smoothed_blend(delta_time_64, gpu_time, gpu_delta)
                 }
                 
                 cull_begin := cast(f64) query_results[2] * cast(f64) ips.device_properties.properties.limits.timestampPeriod * 1e-9
@@ -696,9 +695,12 @@ main :: proc () {
                 plane /= length(plane.xyz)
             }
             
-            cull_globals.draw               = draw_buffer.address
-            cull_globals.draw_command       = draw_command_buffer.address
-            cull_globals.draw_command_count = draw_command_count_buffer.address
+            cull_globals.buffers = {
+                draw               = draw_buffer.address,
+                mesh               = mesh_buffer.address,
+                draw_command       = draw_command_buffer.address,
+                draw_command_count = draw_command_count_buffer.address,
+            }
         }
         
         frame.draw_globals.cpu^ = draw_globals
@@ -719,15 +721,10 @@ main :: proc () {
             global_rotation := la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX)
             draw.orientation = rotation * global_rotation
             
-            mesh := random_choice(&entropy, geometry.meshes[:])
+            mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
             
-            draw.center = mesh.center
-            draw.radius = mesh.radius
-            
-            draw.vertex_offset  = mesh.vertex_offset
-            draw.vertex_count   = mesh.vertex_count
-            draw.meshlet_offset = mesh.meshlet_offset
-            draw.meshlet_count  = mesh.meshlet_count
+            draw.mesh_index    = mesh_index
+            draw.vertex_offset = mesh.vertex_offset
             
             triangles_this_frame += mesh.triangle_count
         }
@@ -736,19 +733,18 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        smooth_update(delta_time_64, &cpu_time, delta_time_64)
+        cpu_time = time_smoothed_blend(delta_time_64, cpu_time, delta_time_64)
         
         view :: proc (seconds: f64) -> time.Duration {
             return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
         }
         
-        // @todo(viktor): just accumulate triangle count and meshlet count each frame in the draw loop
         sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, cull time: %.3v, triangles: %v, %v triangles/s, culling %v", 
-            view(cpu_time.value), 
-            view(gpu_time.value), 
+            view(cpu_time), 
+            view(gpu_time), 
             view(cull_delta), 
             view_magnitude(triangles_this_frame), 
-            view_magnitude(cast(u64) (cast(f64) triangles_this_frame / gpu_time.value)),
+            view_magnitude(cast(u64) (cast(f64) triangles_this_frame / gpu_time)),
             culling_enabled ? "on" : "off",
         ))
         
@@ -767,12 +763,17 @@ main :: proc () {
         
         vk.CmdWriteTimestamp(cb, { .BOTTOM_OF_PIPE }, query_pool, 2)
         
+        // @todo(viktor): is this barrier/transition before the fill necessary?
+        begin_pipeline_barrier()
+            add_buffer_barrier(&draw_command_count_buffer, {}, {}, { .TRANSFER }, { .TRANSFER_WRITE })
+        end_pipeline_barrier(cb)
+        
         vk.CmdFillBuffer(cb, draw_command_count_buffer.buffer, 0, size_of(dccb_view^), 0)
         
         begin_pipeline_barrier()
             // :OcclusionCull: the memory barrier for the depth pyramid had a parameters, but just for the late pass (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=10157)
-            add_memory_barrier(draw_command_buffer, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .INDIRECT_COMMAND_READ, .SHADER_READ }, { .COMPUTE_SHADER }, { .SHADER_WRITE, .SHADER_READ })
-            add_memory_barrier(draw_command_count_buffer, { .TRANSFER }, { .TRANSFER_WRITE }, { .COMPUTE_SHADER }, { .SHADER_WRITE, .SHADER_READ })
+            add_buffer_barrier(&draw_command_buffer, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .INDIRECT_COMMAND_READ, .SHADER_READ }, { .COMPUTE_SHADER }, { .SHADER_WRITE, .SHADER_READ })
+            add_buffer_barrier_transition_from_last(&draw_command_count_buffer, { .COMPUTE_SHADER }, { .SHADER_WRITE, .SHADER_READ })
         end_pipeline_barrier(cb)
         
         vk.CmdBindPipeline(cb, .COMPUTE, compute_pipeline.pipeline)
@@ -783,16 +784,14 @@ main :: proc () {
             vk.CmdPushDescriptorSetWithTemplate(cb, compute_pipeline.update_template, compute_pipeline.layout, 0, raw_data(compute_descriptor_update[:]))
         }
         
-        vk.CmdPushConstants(cb, compute_pipeline.layout, compute_pipeline.shader_stages, 0, size_of(frame.cull_globals.gpu), &frame.cull_globals.gpu)
+        vk.CmdPushConstants(cb, compute_pipeline.layout, compute_pipeline.shader_stages, 0, size_of(frame.cull_globals.gpu.address), &frame.cull_globals.gpu.address)
         
-        // @volatile the round up needs align with the ComputeWidth
-        // @todo(viktor): we now extract the localsize xyz so we could do get_group_count(shader.localsize, len(draws)) here.
-        draw_count := cast(u32) len(draws) + 31 / 32
+        draw_count := get_group_count(draw_command_compute_shader, len(draws))
         vk.CmdDispatch(cb, draw_count, 1, 1)
         
         begin_pipeline_barrier()
-            add_memory_barrier(draw_command_buffer,       { .COMPUTE_SHADER }, { .SHADER_WRITE }, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .INDIRECT_COMMAND_READ, .SHADER_READ })
-            add_memory_barrier(draw_command_count_buffer, { .COMPUTE_SHADER }, { .SHADER_WRITE }, { .DRAW_INDIRECT }, { .INDIRECT_COMMAND_READ })
+            add_buffer_barrier_transition_from_last(&draw_command_buffer, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .INDIRECT_COMMAND_READ, .SHADER_READ })
+            add_buffer_barrier_transition_from_last(&draw_command_count_buffer, { .DRAW_INDIRECT }, { .INDIRECT_COMMAND_READ })
         end_pipeline_barrier(cb)
         
         vk.CmdWriteTimestamp(cb, { .BOTTOM_OF_PIPE }, query_pool, 3)
@@ -802,8 +801,8 @@ main :: proc () {
         // :OcclusionCull: the barrier before the depth pyramid was missing the barrier for the pyramid.image itself (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=11592)
         
         begin_pipeline_barrier()
-            add_image_barrier(swapchain.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .COLOR_ATTACHMENT_OPTIMAL)
-            add_image_barrier(swapchain.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .DEPTH_STENCIL_ATTACHMENT_OPTIMAL, { .DEPTH, .STENCIL })
+            add_image_barrier(&swapchain.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .COLOR_ATTACHMENT_OPTIMAL)
+            add_image_barrier(&swapchain.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .DEPTH_STENCIL_ATTACHMENT_OPTIMAL, { .DEPTH, .STENCIL })
         end_pipeline_barrier(cb)
         
         ////////////////////////////////////////////////
@@ -826,6 +825,7 @@ main :: proc () {
         // @shader meshlet pipeline
         graphics_descriptor_update := [GraphicsStorageBufferCount] DescriptorUpdateData {
             { buffer = { draw_buffer.buffer,         0, auto_cast vk.WHOLE_SIZE }},
+            { buffer = { mesh_buffer.buffer,         0, auto_cast vk.WHOLE_SIZE }},
             { buffer = { meshlet_buffer.buffer,      0, auto_cast vk.WHOLE_SIZE }},
             { buffer = { meshlet_data_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
             { buffer = { vertex_buffer.buffer,       0, auto_cast vk.WHOLE_SIZE }},
@@ -836,7 +836,7 @@ main :: proc () {
         vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline.layout, 1, 1, &textures_descriptor_set, 0, nil)
         
         
-        vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader_stages, 0, size_of(frame.draw_globals.gpu), &frame.draw_globals.gpu)
+        vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader_stages, 0, size_of(frame.draw_globals.gpu.address), &frame.draw_globals.gpu.address)
         // @todo(viktor): this is deprecated, use https://docs.vulkan.org/spec/latest/chapters/drawing.html#vkCmdDrawMeshTasksIndirectCount2EXT
         vk.CmdDrawMeshTasksIndirectCountEXT(cb, draw_command_buffer.buffer, auto_cast offset_of(Draw_Command, command), draw_command_count_buffer.buffer, 0, len(draws), size_of(Draw_Command))
         ////////////////////////////////////////////////
@@ -844,7 +844,7 @@ main :: proc () {
         vk.CmdEndRendering(cb)
         
         begin_pipeline_barrier()
-            add_image_barrier(swapchain.color_buffer,  { .COLOR_ATTACHMENT_OUTPUT }, { .COLOR_ATTACHMENT_WRITE }, .COLOR_ATTACHMENT_OPTIMAL, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
+            add_image_barrier_transition_from_last(&swapchain.color_buffer, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
             add_image_barrier(swapchain.images[image_index], { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
         end_pipeline_barrier(cb)
         
@@ -893,13 +893,14 @@ main :: proc () {
 	check(vk.DeviceWaitIdle(device))
     
     for frame in frames {
-        gpu_delete(frame.draw_globals.buffer)
-        gpu_delete(frame.cull_globals.buffer)
+        gpu_delete(frame.draw_globals.gpu)
+        gpu_delete(frame.cull_globals.gpu)
     }
     
     gpu_delete(vertex_buffer)
     gpu_delete(meshlet_buffer)
     gpu_delete(meshlet_data_buffer)
+    gpu_delete(mesh_buffer)
     gpu_delete(draw_buffer)
     gpu_delete(draw_command_buffer)
     gpu_delete(draw_command_count_buffer)
