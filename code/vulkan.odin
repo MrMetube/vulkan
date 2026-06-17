@@ -1068,7 +1068,7 @@ void uploadBuffer(VkDevice device, VkCommandPool commandPool, VkCommandBuffer co
     copyBarrier.buffer = buffer.buffer;
     copyBarrier.offset = 0;
     copyBarrier.size = size;
-
+    
     vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0,0,1, &copyBarrier, 0,0);
 
     VK_CHECK(vkEndCommandBuffer(commandBuffer));
@@ -1104,11 +1104,16 @@ gpu_delete_image :: proc (image: Image) {
 
 QueryPoolSize :: 256
 
-profile_cb: vk.CommandBuffer
-profile_query_pool: vk.QueryPool
-profile_zones:      [dynamic] Profile_Zone
-open_profile_zones: [dynamic] int
-query_to_zone:      [dynamic] Profile_Query
+gpu_profiler: struct {
+    cb:         vk.CommandBuffer,
+    pool:       vk.QueryPool,
+    zones:      [dynamic; QueryPoolSize] Profile_Zone,
+    open_zones: [dynamic; QueryPoolSize] int,
+    queries:    [dynamic; QueryPoolSize] Profile_Query,
+} = {
+    
+}
+
 Profile_Query :: struct { kind: Query_Kind, zone_index: int }
 Query_Kind :: enum { Begin, End }
 
@@ -1122,48 +1127,56 @@ Profile_Zone :: struct {
     total_time_with_children: f64,
 }
 
-gpu_profile_init :: proc (pool: vk.QueryPool) {
-    profile_query_pool = pool
+gpu_profile_make_query_pool :: proc (device: vk.Device) {
+    create_info := vk.QueryPoolCreateInfo {
+        sType = .QUERY_POOL_CREATE_INFO,
+        queryType = .TIMESTAMP,
+        queryCount = QueryPoolSize,
+    }
+    check(vk.CreateQueryPool(device, &create_info, nil, &gpu_profiler.pool))
+    defer_destroy(vk.DestroyQueryPool, gpu_profiler.pool)
 }
+
 gpu_profile_frame_begin :: proc (device: vk.Device, cb: vk.CommandBuffer) {
-    vk.ResetQueryPool(device, profile_query_pool, 0, QueryPoolSize)
+    vk.ResetQueryPool(device, gpu_profiler.pool, 0, QueryPoolSize)
     
-    assert(profile_query_pool != 0)
-    profile_cb = cb
+    assert(gpu_profiler.pool != 0)
+    gpu_profiler.cb = cb
     
-    clear(&profile_zones)
-    clear(&open_profile_zones)
-    clear(&query_to_zone)
+    clear(&gpu_profiler.zones)
+    clear(&gpu_profiler.open_zones)
+    clear(&gpu_profiler.queries)
     
     gpu_profile_zone_begin("frame")
 }
+
 gpu_profile_frame_end :: proc () {
-    assert(profile_query_pool != 0)
+    assert(gpu_profiler.pool != 0)
     gpu_profile_zone_end()
 }
 
 gpu_profile_zone_begin :: proc (label: string) {
-    assert(profile_cb != nil)
+    assert(gpu_profiler.cb != nil)
     zone: Profile_Zone
-    zone.parent_zone = peek(open_profile_zones[:]) or_else -1
+    zone.parent_zone = peek(gpu_profiler.open_zones[:]) or_else -1
     zone.label = label
     
-    zone_index := len(profile_zones)
-    append(&open_profile_zones, zone_index)
-    append(&profile_zones, zone)
+    zone_index := len(gpu_profiler.zones)
+    append(&gpu_profiler.open_zones, zone_index)
+    append(&gpu_profiler.zones, zone)
     
     gpu_profile_write_timestamp(.Begin, zone_index)
 }
 
 gpu_profile_zone_end   :: proc () {
-    assert(profile_cb != nil)
-    zone_index := pop(&open_profile_zones)
+    assert(gpu_profiler.cb != nil)
+    zone_index := pop(&gpu_profiler.open_zones)
     gpu_profile_write_timestamp(.End, zone_index)
 }
 
 gpu_profile_write_timestamp :: proc (kind: Query_Kind, zone_index: int) {
-    query_index := cast(u32) len(query_to_zone)
-    append(&query_to_zone, Profile_Query { kind, zone_index })
+    query_index := cast(u32) len(gpu_profiler.queries)
+    append(&gpu_profiler.queries, Profile_Query { kind, zone_index })
     
     stage: vk.PipelineStageFlags2
     switch kind {
@@ -1171,26 +1184,26 @@ gpu_profile_write_timestamp :: proc (kind: Query_Kind, zone_index: int) {
     case .End:   stage = { .BOTTOM_OF_PIPE }
     }
     
-    vk.CmdWriteTimestamp2(profile_cb, stage, profile_query_pool, query_index)
+    vk.CmdWriteTimestamp2(gpu_profiler.cb, stage, gpu_profiler.pool, query_index)
 }
 
 gpu_profile_collate_times :: proc (ips: IPS, device: vk.Device, print: bool) {
-    assert(profile_query_pool != 0)
-    assert(len(open_profile_zones) == 0)
+    assert(gpu_profiler.pool != 0)
+    assert(len(gpu_profiler.open_zones) == 0)
     
-    query_results: [256] u64
+    query_results: [QueryPoolSize] u64
     
-    query_count := cast(u32) len(query_to_zone)
-    query_result := vk.GetQueryPoolResults(device, profile_query_pool, 0, query_count, cast(int) size_of_slice(query_results[:query_count]), &query_results[0], size_of(query_results[0]), { ._64, .WAIT })
+    query_count := cast(u32) len(gpu_profiler.queries)
+    query_result := vk.GetQueryPoolResults(device, gpu_profiler.pool, 0, query_count, cast(int) size_of_slice(query_results[:query_count]), &query_results[0], size_of(query_results[0]), { ._64, .WAIT })
     
     if query_result == .NOT_READY || query_result == .ERROR_DEVICE_LOST { return }
     
     check(query_result)
     
-    for query, query_index in query_to_zone {
+    for query, query_index in gpu_profiler.queries {
         timestamp := cast(f64) query_results[query_index] * cast(f64) ips.device_properties.properties.limits.timestampPeriod * 1e-9
         
-        zone := &profile_zones[query.zone_index]
+        zone := &gpu_profiler.zones[query.zone_index]
         
         switch query.kind {
         case .Begin:
@@ -1198,7 +1211,7 @@ gpu_profile_collate_times :: proc (ips: IPS, device: vk.Device, print: bool) {
             zone.total_time_with_children -= timestamp
             
             for link := zone.parent_zone; link != -1; {
-                parent := &profile_zones[link]
+                parent := &gpu_profiler.zones[link]
                 parent.total_time               += timestamp
                 parent.total_time_with_children -= timestamp
                 
@@ -1210,7 +1223,7 @@ gpu_profile_collate_times :: proc (ips: IPS, device: vk.Device, print: bool) {
             zone.total_time_with_children += timestamp
             
             for link := zone.parent_zone; link != -1; {
-                parent := &profile_zones[link]
+                parent := &gpu_profiler.zones[link]
                 parent.total_time               -= timestamp
                 parent.total_time_with_children += timestamp
                 
@@ -1221,13 +1234,12 @@ gpu_profile_collate_times :: proc (ips: IPS, device: vk.Device, print: bool) {
     
     if print {
         fmt.printfln("---------------------\nGPU profile:")
-        for zone in profile_zones {
-            a := time.duration_round(cast(time.Duration) (zone.total_time * cast(f64) time.Second), 1 * time.Microsecond)
+        for zone in gpu_profiler.zones {
+            xx :: proc (seconds: f64) -> time.Duration { return cast(time.Duration) (seconds * cast(f64) time.Second) }
             
-            fmt.printf("  %12v: %v", zone.label, a)
+            fmt.printf("  %12v: %v", zone.label, xx(zone.total_time))
             if zone.total_time_with_children != zone.total_time {
-                b := time.duration_round(cast(time.Duration) (zone.total_time_with_children * cast(f64) time.Second), 1 * time.Microsecond)
-                fmt.printf(" (with children %v)", b)
+                fmt.printf(" (with children %v)", xx(zone.total_time_with_children))
             }
             fmt.printfln("")
         }
@@ -1238,7 +1250,7 @@ gpu_profile_get_zone :: proc (label: string) -> (Profile_Zone, bool) #optional_o
     // @speed
     result: Profile_Zone
     ok: bool
-    for it in profile_zones {
+    for it in gpu_profiler.zones {
         if label == it.label {
             result = it
             ok = true

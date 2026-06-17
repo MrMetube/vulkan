@@ -442,18 +442,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    // @cleanup
-    query_pool: vk.QueryPool
-    {
-        create_info := vk.QueryPoolCreateInfo {
-            sType = .QUERY_POOL_CREATE_INFO,
-            queryType = .TIMESTAMP,
-            queryCount = QueryPoolSize,
-        }
-        check(vk.CreateQueryPool(device, &create_info, nil, &query_pool))
-        defer_destroy(vk.DestroyQueryPool, query_pool)
-    }
-    gpu_profile_init(query_pool)
+    gpu_profile_make_query_pool(device)
     
     ////////////////////////////////////////////////
     
