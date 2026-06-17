@@ -442,7 +442,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    QueryPoolSize :: 128
+    // @cleanup
     query_pool: vk.QueryPool
     {
         create_info := vk.QueryPoolCreateInfo {
@@ -453,6 +453,7 @@ main :: proc () {
         check(vk.CreateQueryPool(device, &create_info, nil, &query_pool))
         defer_destroy(vk.DestroyQueryPool, query_pool)
     }
+    gpu_profile_init(query_pool)
     
     ////////////////////////////////////////////////
     
@@ -493,6 +494,7 @@ main :: proc () {
     
     culling_enabled: bool = true
     
+    cull_delta: f64
     cpu_time: f64
     gpu_time: f64
     for !quit {
@@ -508,6 +510,8 @@ main :: proc () {
         last_time = current_time
         
         ////////////////////////////////////////////////
+        
+        print_profile: bool
         
         mouse_delta: v2
         @(static) left_down: bool
@@ -528,10 +532,10 @@ main :: proc () {
                     left_down = false
                 }
             case .KEY_DOWN:
-                if event.key.key == sdl.K_SPACE {
-                    space_down = true
-                } else if event.key.key == sdl.K_C {
-                    culling_enabled = !culling_enabled
+                switch event.key.key {
+                case sdl.K_SPACE: space_down = true
+                case sdl.K_C:     culling_enabled = !culling_enabled
+                case sdl.K_P:     print_profile = true
                 }
             case .KEY_UP:
                 if event.key.key == sdl.K_SPACE {
@@ -617,31 +621,6 @@ main :: proc () {
             continue
         }
         check(wait_result)
-        
-        ////////////////////////////////////////////////
-        
-        cull_delta: f64
-        // @note(viktor): QueuePool must be reset before use, but that would require a whole cmd begin-end.
-        if absolute_frame_index > 1 {
-            query_results: [4] u64
-            query_result := vk.GetQueryPoolResults(device, query_pool, 0, len(&query_results), cast(int) size_of_slice(query_results[:]), &query_results[0], size_of(query_results[0]), { ._64 } )
-            
-            if query_result != .NOT_READY && query_result != .ERROR_DEVICE_LOST {
-                check(query_result)
-                
-                gpu_begin := cast(f64) query_results[0] * cast(f64) ips.device_properties.properties.limits.timestampPeriod * 1e-9
-                gpu_end   := cast(f64) query_results[1] * cast(f64) ips.device_properties.properties.limits.timestampPeriod * 1e-9
-                gpu_delta := gpu_end - gpu_begin
-                // @note(viktor): this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
-                if gpu_delta >= 0 {
-                    gpu_time = time_smoothed_blend(delta_time_64, gpu_time, gpu_delta)
-                }
-                
-                cull_begin := cast(f64) query_results[2] * cast(f64) ips.device_properties.properties.limits.timestampPeriod * 1e-9
-                cull_end   := cast(f64) query_results[3] * cast(f64) ips.device_properties.properties.limits.timestampPeriod * 1e-9
-                cull_delta = cull_end - cull_begin
-            }
-        }
         
         ////////////////////////////////////////////////
         
@@ -755,20 +734,19 @@ main :: proc () {
         
         check(vk.BeginCommandBuffer(cb, &vk.CommandBufferBeginInfo { sType = .COMMAND_BUFFER_BEGIN_INFO, flags = { .ONE_TIME_SUBMIT } }))
         
-        // @todo(viktor): make a basic region based profiler out of the labels
-        vk.CmdResetQueryPool(cb, query_pool, 0, QueryPoolSize)
-        vk.CmdWriteTimestamp(cb, { .BOTTOM_OF_PIPE }, query_pool, 0)
+        
+        gpu_profile_frame_begin(device, cb)
         
         ////////////////////////////////////////////////
         
-        vk.CmdWriteTimestamp(cb, { .BOTTOM_OF_PIPE }, query_pool, 2)
         
         // @todo(viktor): is this barrier/transition before the fill necessary?
         begin_pipeline_barrier()
-            add_buffer_barrier(&draw_command_count_buffer, {}, {}, { .TRANSFER }, { .TRANSFER_WRITE })
+        add_buffer_barrier(&draw_command_count_buffer, {}, {}, { .TRANSFER }, { .TRANSFER_WRITE })
         end_pipeline_barrier(cb)
         
         vk.CmdFillBuffer(cb, draw_command_count_buffer.buffer, 0, size_of(dccb_view^), 0)
+        gpu_profile_zone_begin("culling")
         
         begin_pipeline_barrier()
             // :OcclusionCull: the memory barrier for the depth pyramid had a parameters, but just for the late pass (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=10157)
@@ -789,12 +767,12 @@ main :: proc () {
         draw_count := get_group_count(draw_command_compute_shader, len(draws))
         vk.CmdDispatch(cb, draw_count, 1, 1)
         
+        gpu_profile_zone_end()
+        
         begin_pipeline_barrier()
             add_buffer_barrier_transition_from_last(&draw_command_buffer, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .INDIRECT_COMMAND_READ, .SHADER_READ })
             add_buffer_barrier_transition_from_last(&draw_command_count_buffer, { .DRAW_INDIRECT }, { .INDIRECT_COMMAND_READ })
         end_pipeline_barrier(cb)
-        
-        vk.CmdWriteTimestamp(cb, { .BOTTOM_OF_PIPE }, query_pool, 3)
         
         ////////////////////////////////////////////////
         
@@ -807,6 +785,7 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
+        gpu_profile_zone_begin("rendering")
         begin_rendering(cb, swapchain, swapchain.color_buffer, image_index, {0.07, 0.07, 0.07, 1})
         
         vk.CmdSetViewport(cb, 0, 1, &vk.Viewport {
@@ -842,6 +821,7 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         vk.CmdEndRendering(cb)
+        gpu_profile_zone_end()
         
         begin_pipeline_barrier()
             add_image_barrier_transition_from_last(&swapchain.color_buffer, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
@@ -860,7 +840,7 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        vk.CmdWriteTimestamp(cb, { .BOTTOM_OF_PIPE }, query_pool, 1)
+        gpu_profile_frame_end()
         
         vk.EndCommandBuffer(cb)
         
@@ -884,6 +864,15 @@ main :: proc () {
             should_recreate_swapchain = true
         } else {
             check(present_result)
+        }
+        
+        gpu_profile_collate_times(ips, device, print_profile)
+        
+        gpu_delta  := gpu_profile_get_zone("frame").total_time_with_children
+        cull_delta  = gpu_profile_get_zone("culling").total_time
+        // @note(viktor): this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
+        if gpu_delta >= 0 {
+            gpu_time = time_smoothed_blend(delta_time_64, gpu_time, gpu_delta)
         }
     }
     
