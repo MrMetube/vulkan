@@ -142,12 +142,9 @@ create_instance_physical_device_and_surface :: proc (window: ^sdl.Window, get_in
             }
             
             enabled := [?] vk.ValidationFeatureEnableEXT {
-                // @study what are these and would they be useful in debug mode
-                // GPU_ASSISTED
-                // GPU_ASSISTED_RESERVE_BINDING_SLOT
-                // BEST_PRACTICES
-                // DEBUG_PRINTF
-                .SYNCHRONIZATION_VALIDATION
+                .BEST_PRACTICES,
+                // DEBUG_PRINTF // @todo enable this, if needed
+                .SYNCHRONIZATION_VALIDATION,
             }
             
             instance_create_info.pNext = &vk.DebugUtilsMessengerCreateInfoEXT {

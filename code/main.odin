@@ -560,11 +560,11 @@ main :: proc () {
         
         watchers_check_for_modification(watchers)
         
-        if reload_shaders_if_needed(watchers, shader_allocator, draw_cull_shader) || !pipeline_is_valid(cull_pipeline) {
+        if reload_shaders_if_needed(watchers, shader_allocator, &draw_cull_shader) || !pipeline_is_valid(cull_pipeline) {
             cull_pipeline = create_compute_pipeline(device, pipeline_cache, draw_cull_shader, ComputeStorageBufferCount, compute_descriptor_set_layout, cull_pipeline)
         }
         
-        if reload_shaders_if_needed(watchers, shader_allocator, ..meshlet_shaders[:]) || !pipeline_is_valid(meshlet_pipeline) {
+        if reload_shaders_if_needed(watchers, shader_allocator, meshlet_shaders[:]) || !pipeline_is_valid(meshlet_pipeline) {
             meshlet_pipeline = create_graphics_pipeline(device, pipeline_cache, swapchain, { graphics_descriptor_set_layout, textures_descriptor_set_layout }, meshlet_shaders[:], GraphicsStorageBufferCount, meshlet_pipeline)
         }
         

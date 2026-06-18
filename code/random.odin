@@ -21,7 +21,7 @@ next_random_u32 :: proc (series: ^RandomSeries) -> u32 {
     return extract(series.state, 0)
 }
 xor_shift :: proc (series: ^RandomSeries) ->  lane_u32 {
-    // @note(viktor): Reference xor_shift from https://en.wikipedia.org/wiki/Xorshift
+    // Reference xor_shift from https://en.wikipedia.org/wiki/Xorshift
     x := series.state 
         
     x ~= shift_left( x, 13)

@@ -13,18 +13,26 @@ init_shader_and_watchers :: proc (watchers: ^[dynamic] Watcher, common_watcher: 
     return result
 }
 
-reload_shaders_if_needed :: proc (watchers: [dynamic] Watcher, shader_allocator: Allocator, shaders: ..Shader) -> bool {
+reload_shaders_if_needed :: proc { reload_shaders_if_needed_one, reload_shaders_if_needed_slice }
+reload_shaders_if_needed_one :: proc (watchers: [dynamic] Watcher, shader_allocator: Allocator, shader: ^Shader) -> bool {
+    was_changed: bool
+    
+    if watcher_modified(watchers, shader.source_watcher, shader.common_watcher) {
+        watcher_set_up_to_date(watchers, shader.source_watcher, shader.common_watcher)
+        result, ok := compile_and_load_shader(shader.input, shader_allocator, old = shader)
+        if ok {
+            shader^ = result
+            was_changed = true
+        }
+    }
+    
+    return was_changed
+}
+reload_shaders_if_needed_slice :: proc (watchers: [dynamic] Watcher, shader_allocator: Allocator, shaders: [] Shader) -> bool {
     any_shader_was_changed: bool
     
     for &shader in shaders {
-        if watcher_modified(watchers, shader.source_watcher, shader.common_watcher) {
-            watcher_set_up_to_date(watchers, shader.source_watcher, shader.common_watcher)
-            result, ok := compile_and_load_shader(shader.input, shader_allocator, old = &shader)
-            if ok {
-                shader = result
-                any_shader_was_changed = true
-            }
-        }
+        any_shader_was_changed ||= reload_shaders_if_needed(watchers, shader_allocator, &shader)
     }
     
     return any_shader_was_changed
