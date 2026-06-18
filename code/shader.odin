@@ -13,6 +13,23 @@ init_shader_and_watchers :: proc (watchers: ^[dynamic] Watcher, common_watcher: 
     return result
 }
 
+reload_shaders_if_needed :: proc (watchers: [dynamic] Watcher, shader_allocator: Allocator, shaders: ..Shader) -> bool {
+    any_shader_was_changed: bool
+    
+    for &shader in shaders {
+        if watcher_modified(watchers, shader.source_watcher, shader.common_watcher) {
+            watcher_set_up_to_date(watchers, shader.source_watcher, shader.common_watcher)
+            result, ok := compile_and_load_shader(shader.input, shader_allocator, old = &shader)
+            if ok {
+                shader = result
+                any_shader_was_changed = true
+            }
+        }
+    }
+    
+    return any_shader_was_changed
+}
+
 compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator, output_directory := "build", output_extension := ".spv", old: ^Shader = nil) -> (Shader, bool) {
     cmd: Cmd
     cmd.allocator = context.temp_allocator

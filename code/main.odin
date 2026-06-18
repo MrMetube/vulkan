@@ -425,15 +425,15 @@ main :: proc () {
     watchers := make([dynamic] Watcher, watcher_allocator)
     
     
-    shaders: [dynamic] Shader
+    meshlet_shaders: [dynamic] Shader
     for file in shader_files {
         // @speed we duplicate this watcher per shader, so that each shader can keep track of the header being changed and be recompiled independently from other shaders, without effecting their modification test.
         common_watcher_id := watchers_make(&watchers, "shaders/common.glslh")
         shader := init_shader_and_watchers(&watchers, common_watcher_id, file, shader_allocator)
-        append(&shaders, shader)
+        append(&meshlet_shaders, shader)
     }
     
-    draw_command_compute_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/draw_cull.comp", shader_allocator)
+    draw_cull_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/draw_cull.comp", shader_allocator)
     
     ////////////////////////////////////////////////
     
@@ -449,8 +449,8 @@ main :: proc () {
     // @speed is a pipeline cache still a good optimization?
     pipeline_cache: vk.PipelineCache = 0
     
-    pipeline:         Pipeline
-    compute_pipeline: Pipeline
+    meshlet_pipeline:         Pipeline
+    cull_pipeline: Pipeline
     
     ////////////////////////////////////////////////
     
@@ -560,34 +560,12 @@ main :: proc () {
         
         watchers_check_for_modification(watchers)
         
-        compute_shader_was_changed: bool
-        if watcher_modified(watchers, draw_command_compute_shader.source_watcher, draw_command_compute_shader.common_watcher) {
-            watcher_set_up_to_date(watchers, draw_command_compute_shader.source_watcher, draw_command_compute_shader.common_watcher)
-            result, ok := compile_and_load_shader(draw_command_compute_shader.input, shader_allocator, old = &draw_command_compute_shader)
-            if ok {
-                draw_command_compute_shader = result
-                compute_shader_was_changed = true
-            }
+        if reload_shaders_if_needed(watchers, shader_allocator, draw_cull_shader) || !pipeline_is_valid(cull_pipeline) {
+            cull_pipeline = create_compute_pipeline(device, pipeline_cache, draw_cull_shader, ComputeStorageBufferCount, compute_descriptor_set_layout, cull_pipeline)
         }
         
-        any_shader_was_changed: bool
-        for &shader in shaders {
-            if watcher_modified(watchers, shader.source_watcher, shader.common_watcher) {
-                watcher_set_up_to_date(watchers, shader.source_watcher, shader.common_watcher)
-                result, ok := compile_and_load_shader(shader.input, shader_allocator, old = &shader)
-                if ok {
-                    shader = result
-                    any_shader_was_changed = true
-                }
-            }
-        }
-        
-        if compute_shader_was_changed || !pipeline_is_valid(compute_pipeline) {
-            compute_pipeline = create_compute_pipeline(device, pipeline_cache, draw_command_compute_shader, ComputeStorageBufferCount, compute_descriptor_set_layout, compute_pipeline)
-        }
-        
-        if any_shader_was_changed || !pipeline_is_valid(pipeline) {
-            pipeline = create_graphics_pipeline(device, pipeline_cache, swapchain, { graphics_descriptor_set_layout, textures_descriptor_set_layout }, shaders[:], GraphicsStorageBufferCount, pipeline)
+        if reload_shaders_if_needed(watchers, shader_allocator, ..meshlet_shaders[:]) || !pipeline_is_valid(meshlet_pipeline) {
+            meshlet_pipeline = create_graphics_pipeline(device, pipeline_cache, swapchain, { graphics_descriptor_set_layout, textures_descriptor_set_layout }, meshlet_shaders[:], GraphicsStorageBufferCount, meshlet_pipeline)
         }
         
         ////////////////////////////////////////////////
@@ -741,17 +719,17 @@ main :: proc () {
             add_buffer_barrier_transition_from_last(&draw_command_count_buffer, { .COMPUTE_SHADER }, { .SHADER_WRITE, .SHADER_READ })
         end_pipeline_barrier(cb)
         
-        vk.CmdBindPipeline(cb, .COMPUTE, compute_pipeline.pipeline)
+        vk.CmdBindPipeline(cb, .COMPUTE, cull_pipeline.pipeline)
         
         if ComputeStorageBufferCount != 0 {
             // @shader cull.comp
             compute_descriptor_update := [ComputeStorageBufferCount] DescriptorUpdateData {}
-            vk.CmdPushDescriptorSetWithTemplate(cb, compute_pipeline.update_template, compute_pipeline.layout, 0, raw_data(compute_descriptor_update[:]))
+            vk.CmdPushDescriptorSetWithTemplate(cb, cull_pipeline.update_template, cull_pipeline.layout, 0, raw_data(compute_descriptor_update[:]))
         }
         
-        vk.CmdPushConstants(cb, compute_pipeline.layout, compute_pipeline.shader_stages, 0, size_of(frame.cull_globals.gpu.address), &frame.cull_globals.gpu.address)
+        vk.CmdPushConstants(cb, cull_pipeline.layout, cull_pipeline.shader_stages, 0, size_of(frame.cull_globals.gpu.address), &frame.cull_globals.gpu.address)
         
-        draw_count := get_group_count(draw_command_compute_shader, len(draws))
+        draw_count := get_group_count(draw_cull_shader, len(draws))
         vk.CmdDispatch(cb, draw_count, 1, 1)
         
         gpu_profile_zone_end()
@@ -786,7 +764,7 @@ main :: proc () {
         
         vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D { extent = to_extent(swapchain.size) })
         
-        vk.CmdBindPipeline(cb, .GRAPHICS, pipeline.pipeline)
+        vk.CmdBindPipeline(cb, .GRAPHICS, meshlet_pipeline.pipeline)
         
         // @shader meshlet pipeline
         graphics_descriptor_update := [GraphicsStorageBufferCount] DescriptorUpdateData {
@@ -797,12 +775,12 @@ main :: proc () {
             { buffer = { vertex_buffer.buffer,       0, auto_cast vk.WHOLE_SIZE }},
             { buffer = { draw_command_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
         }
-        vk.CmdPushDescriptorSetWithTemplate(cb, pipeline.update_template, pipeline.layout, 0, &graphics_descriptor_update[0])
+        vk.CmdPushDescriptorSetWithTemplate(cb, meshlet_pipeline.update_template, meshlet_pipeline.layout, 0, &graphics_descriptor_update[0])
         
-        vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipeline.layout, 1, 1, &textures_descriptor_set, 0, nil)
+        vk.CmdBindDescriptorSets(cb, .GRAPHICS, meshlet_pipeline.layout, 1, 1, &textures_descriptor_set, 0, nil)
         
         
-        vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader_stages, 0, size_of(frame.draw_globals.gpu.address), &frame.draw_globals.gpu.address)
+        vk.CmdPushConstants(cb, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(frame.draw_globals.gpu.address), &frame.draw_globals.gpu.address)
         // @todo(viktor): this is deprecated, use https://docs.vulkan.org/spec/latest/chapters/drawing.html#vkCmdDrawMeshTasksIndirectCount2EXT
         vk.CmdDrawMeshTasksIndirectCountEXT(cb, draw_command_buffer.buffer, auto_cast offset_of(Draw_Command, command), draw_command_count_buffer.buffer, 0, len(draws), size_of(Draw_Command))
         ////////////////////////////////////////////////
@@ -882,8 +860,8 @@ main :: proc () {
     gpu_delete(draw_command_count_buffer)
     
     destroy_swapchain(device, &swapchain)
-    destroy_pipeline(device, pipeline)
-    destroy_pipeline(device, compute_pipeline)
+    destroy_pipeline(device, meshlet_pipeline)
+    destroy_pipeline(device, cull_pipeline)
     
     for texture in textures {
         gpu_delete(texture)
