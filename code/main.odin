@@ -707,7 +707,7 @@ main :: proc () {
         
         // @todo(viktor): is this barrier/transition before the fill necessary?
         begin_pipeline_barrier()
-        add_buffer_barrier(&draw_command_count_buffer, {}, {}, { .TRANSFER }, { .TRANSFER_WRITE })
+            add_buffer_barrier(&draw_command_count_buffer, {}, {}, { .TRANSFER }, { .TRANSFER_WRITE })
         end_pipeline_barrier(cb)
         
         vk.CmdFillBuffer(cb, draw_command_count_buffer.buffer, 0, size_of(dccb_view^), 0)
@@ -783,6 +783,7 @@ main :: proc () {
         vk.CmdPushConstants(cb, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(frame.draw_globals.gpu.address), &frame.draw_globals.gpu.address)
         // @todo(viktor): this is deprecated, use https://docs.vulkan.org/spec/latest/chapters/drawing.html#vkCmdDrawMeshTasksIndirectCount2EXT
         vk.CmdDrawMeshTasksIndirectCountEXT(cb, draw_command_buffer.buffer, auto_cast offset_of(Draw_Command, command), draw_command_count_buffer.buffer, 0, len(draws), size_of(Draw_Command))
+        
         ////////////////////////////////////////////////
         
         vk.CmdEndRendering(cb)

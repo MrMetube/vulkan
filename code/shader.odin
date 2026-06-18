@@ -1,3 +1,4 @@
+#+vet explicit-allocators
 package main
 
 import "core:fmt"
@@ -88,7 +89,7 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
     }
     
     if old != nil {
-        delete(old.bytes)
+        delete(old.bytes, bytes_allocator)
     }
     
     result.bytes = shader_bytes

@@ -251,7 +251,7 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
     device: vk.Device
     queue_family_index: u32
     
-    queue_family_priority := [] f32 { 1 }
+    queue_family_priority := [?] f32 { 1 }
     
     device_extensions := [] cstring { 
         vk.KHR_SWAPCHAIN_EXTENSION_NAME,
@@ -321,7 +321,7 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
         pNext = &vk.PhysicalDeviceMeshShaderFeaturesEXT {
             sType = .PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
             
-            meshShader = true,
+            meshShader = true, // 57.18% (vulkan.gpuinfo.org for "1.4 and up" on 18.06.2026)
             taskShader = true,
         },
         },
@@ -334,8 +334,8 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
         pQueueCreateInfos    = &vk.DeviceQueueCreateInfo {
             sType = .DEVICE_QUEUE_CREATE_INFO,
             queueFamilyIndex = queue_family_index,
-            queueCount       = auto_cast len(queue_family_priority),
-            pQueuePriorities = raw_data(queue_family_priority),
+            queueCount       = len(queue_family_priority),
+            pQueuePriorities = raw_data(&queue_family_priority),
         },
         
         enabledExtensionCount   = auto_cast len(device_extensions),
@@ -780,16 +780,9 @@ create_update_template :: proc (device: vk.Device, bind_point: vk. PipelineBindP
 }
 
 destroy_pipeline :: proc (device: vk.Device, pipeline: Pipeline) {
-    if pipeline.layout != 0 {
-        vk.DestroyPipelineLayout(device, pipeline.layout, nil)
-    }
-    
-    if pipeline.pipeline != 0 {
-        vk.DestroyPipeline(device, pipeline.pipeline, nil)
-    }
-    
+    vk.DestroyPipelineLayout(device,           pipeline.layout,          nil)
+    vk.DestroyPipeline(device,                 pipeline.pipeline,        nil)
     vk.DestroyDescriptorUpdateTemplate(device, pipeline.update_template, nil)
-    
 }
 
 ////////////////////////////////////////////////
