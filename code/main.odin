@@ -745,7 +745,7 @@ main :: proc () {
         
         begin_pipeline_barrier()
             add_image_barrier(&swapchain.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .COLOR_ATTACHMENT_OPTIMAL)
-            add_image_barrier(&swapchain.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .DEPTH_STENCIL_ATTACHMENT_OPTIMAL, { .DEPTH, .STENCIL })
+            add_image_barrier(&swapchain.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .DEPTH_STENCIL_ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
         end_pipeline_barrier(cb)
         
         ////////////////////////////////////////////////

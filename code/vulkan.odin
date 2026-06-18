@@ -423,8 +423,8 @@ get_swapchain_format :: proc (ips: IPS) -> vk.Format {
 get_depth_buffer_format :: proc (ips: IPS) -> vk.Format {
     result: vk.Format
     
-    // The stencil bits are currently wasted/unused, so we could also just select D32_SFLOAT and save that memory.
-    depth_format_list := [] vk.Format { .D32_SFLOAT_S8_UINT, .D24_UNORM_S8_UINT }
+    // :Stencil: Switch to .D32_SFLOAT_S8_UINT if we actually make use of the stencil buffer.
+    depth_format_list := [] vk.Format { .D32_SFLOAT }
     for it in depth_format_list {
         format_properties := vk.FormatProperties2 { sType = .FORMAT_PROPERTIES_2 }
         vk.GetPhysicalDeviceFormatProperties2(ips.physical_device, it, &format_properties)
@@ -434,6 +434,7 @@ get_depth_buffer_format :: proc (ips: IPS) -> vk.Format {
             break
         }
     }
+    assert(result != .UNDEFINED)
     
     return result
 }
@@ -493,6 +494,7 @@ recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, old_swap
         it = create_semaphore(device)
     }
     
+    // :Stencil: add the .STENCIL mask bit
     result.depth_buffer = gpu_make_image(result.size, result.depth_buffer.format, { .DEPTH_STENCIL_ATTACHMENT },         { .DEPTH })
     result.color_buffer = gpu_make_image(result.size, result.format,              { .COLOR_ATTACHMENT , .TRANSFER_SRC }, { .COLOR })
     
@@ -697,7 +699,7 @@ create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sw
             colorAttachmentCount    = 1,
             pColorAttachmentFormats = &swapchain_format,
             depthAttachmentFormat   = swapchain.depth_buffer.format,
-            stencilAttachmentFormat = .UNDEFINED,
+            stencilAttachmentFormat = .UNDEFINED, // :Stencil: 
         },
         stageCount = auto_cast len(shader_stages),
         pStages    = &shader_stages[0],
@@ -724,6 +726,7 @@ create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sw
             depthTestEnable  = true,
             depthWriteEnable = true,
             depthCompareOp   = .GREATER,
+            // :Stencil: stencilTestEnable:     b32,
         },
         pColorBlendState = &vk.PipelineColorBlendStateCreateInfo {
             sType = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
