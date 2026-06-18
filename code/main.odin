@@ -416,24 +416,24 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    // @todo(viktor): if we want to only reload specific shaders, we need a general purpose allocator.
     shader_allocator := context.allocator
     
     shader_files := make([dynamic] string, context.temp_allocator)
-    get_all_files_with_extension(&shader_files, ".", shader_allocator, ".frag", ".mesh", ".task")
+    get_all_files_with_extension(&shader_files, "shaders", shader_allocator, ".frag", ".mesh", ".task")
     
     watcher_allocator := context.allocator
     watchers := make([dynamic] Watcher, watcher_allocator)
     
-    common_watcher_id := watchers_make(&watchers, "common.glslh")
     
     shaders: [dynamic] Shader
     for file in shader_files {
+        // @speed we duplicate this watcher per shader, so that each shader can keep track of the header being changed and be recompiled independently from other shaders, without effecting their modification test.
+        common_watcher_id := watchers_make(&watchers, "shaders/common.glslh")
         shader := init_shader_and_watchers(&watchers, common_watcher_id, file, shader_allocator)
         append(&shaders, shader)
     }
     
-    draw_command_compute_shader := init_shader_and_watchers(&watchers, common_watcher_id, "draw_cull.comp", shader_allocator)
+    draw_command_compute_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/draw_cull.comp", shader_allocator)
     
     ////////////////////////////////////////////////
     
@@ -560,27 +560,25 @@ main :: proc () {
         
         watchers_check_for_modification(watchers)
         
+        compute_shader_was_changed: bool
+        if watcher_modified(watchers, draw_command_compute_shader.source_watcher, draw_command_compute_shader.common_watcher) {
+            watcher_set_up_to_date(watchers, draw_command_compute_shader.source_watcher, draw_command_compute_shader.common_watcher)
+            result, ok := compile_and_load_shader(draw_command_compute_shader.input, shader_allocator, old = &draw_command_compute_shader)
+            if ok {
+                draw_command_compute_shader = result
+                compute_shader_was_changed = true
+            }
+        }
+        
         any_shader_was_changed: bool
         for &shader in shaders {
             if watcher_modified(watchers, shader.source_watcher, shader.common_watcher) {
                 watcher_set_up_to_date(watchers, shader.source_watcher, shader.common_watcher)
-                
                 result, ok := compile_and_load_shader(shader.input, shader_allocator, old = &shader)
                 if ok {
                     shader = result
                     any_shader_was_changed = true
                 }
-            }
-        }
-        
-        compute_shader_was_changed: bool
-        if watcher_modified(watchers, draw_command_compute_shader.source_watcher, draw_command_compute_shader.common_watcher) {
-            watcher_set_up_to_date(watchers, draw_command_compute_shader.source_watcher, draw_command_compute_shader.common_watcher)
-            
-            result, ok := compile_and_load_shader(draw_command_compute_shader.input, shader_allocator, old = &draw_command_compute_shader)
-            if ok {
-                draw_command_compute_shader = result
-                compute_shader_was_changed = true
             }
         }
         

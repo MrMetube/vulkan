@@ -13,11 +13,15 @@ init_shader_and_watchers :: proc (watchers: ^[dynamic] Watcher, common_watcher: 
     return result
 }
 
-compile_and_load_shader :: proc (input: string, bytes_allocator: Allocator, output_extension := ".spv", old: ^Shader = nil) -> (Shader, bool) {
+compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator, output_directory := "build", output_extension := ".spv", old: ^Shader = nil) -> (Shader, bool) {
     cmd: Cmd
     cmd.allocator = context.temp_allocator
     
-    shader_output := fmt.tprintf("%v%v", input, output_extension)
+    input_directory, input_file := os.split_path(input_path)
+    
+    output_path, _ := os.join_path({input_directory, output_directory, input_file}, context.temp_allocator)
+    
+    shader_output := fmt.tprintf("%v%v", output_path, output_extension)
     
     append(&cmd, "C:/tools/VulkanSDK/1.4.350.0/Bin/glslc.exe")
     append(&cmd, "--target-env=vulkan1.4")
@@ -28,13 +32,13 @@ compile_and_load_shader :: proc (input: string, bytes_allocator: Allocator, outp
     if Optimized {
         append(&cmd, "-O")
     }
-    append(&cmd, input)
+    append(&cmd, input_path)
     
     result: Shader
     if old != nil {
         result = old^
     }
-    result.input = input
+    result.input = input_path
     
     stdout: string
     stderr: string

@@ -85,7 +85,7 @@ watcher_set_up_to_date_ids :: proc (watchers: [dynamic] Watcher, ids: ..Watcher_
 ////////////////////////////////////////////////
 
 get_all_files_with_extension :: proc (files: ^[dynamic] string, directory: string, path_allocator: Allocator, extensions: ..string) {
-    infos, err := os.read_all_directory_by_path(".", path_allocator)
+    infos, err := os.read_all_directory_by_path(directory, path_allocator)
     defer os.file_info_slice_delete(infos, path_allocator)
     
     assert(err == nil)
@@ -99,7 +99,10 @@ get_all_files_with_extension :: proc (files: ^[dynamic] string, directory: strin
         }
         
         if matches {
-            append(files, strings.clone(info.fullpath, path_allocator))
+            path := strings.clone(info.fullpath, context.temp_allocator)
+            working_dir, _ := os.get_working_directory(context.temp_allocator)
+            path, _ = os.get_relative_path(working_dir, path, path_allocator)
+            append(files, path)
         }
     }
 }

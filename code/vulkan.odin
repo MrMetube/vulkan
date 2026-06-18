@@ -28,12 +28,6 @@ Swapchain :: struct {
     depth_buffer: Image,
 }
 
-Swapchain_Info :: struct {
-    image: vk.Image,
-    
-    render_completed: vk.Semaphore,
-}
-
 Pipeline :: struct {
     pipeline: vk.Pipeline,
     layout:   vk.PipelineLayout,
@@ -73,14 +67,14 @@ Buffer :: struct {
     buffer:  vk.Buffer,
     memory:  vk.DeviceMemory,
     address: vk.DeviceAddress,
-
+    
     last_transition: Transition,
 }
 
 Transition :: struct {
-    stage: vk.PipelineStageFlags2, 
-    access: vk.AccessFlags2, 
-    layout: vk.ImageLayout, 
+    stage:  vk.PipelineStageFlags2,
+    access: vk.AccessFlags2,
+    layout: vk.ImageLayout,
 }
 
 ////////////////////////////////////////////////
