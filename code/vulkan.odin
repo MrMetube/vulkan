@@ -253,30 +253,6 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
     
     queue_family_priority := [] f32 { 1 }
     
-    if false {
-        // @todo(viktor): GetPhysicalDeviceFeatures2 crashes
-        f14 := &vk.PhysicalDeviceVulkan14Features { sType = .PHYSICAL_DEVICE_VULKAN_1_4_FEATURES, pNext = nil }
-        f13 := &vk.PhysicalDeviceVulkan13Features { sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, pNext = &f14 }
-        f12 := &vk.PhysicalDeviceVulkan12Features { sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, pNext = &f13 }
-        f11 := &vk.PhysicalDeviceVulkan11Features { sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, pNext = &f12 }
-        supported_features := vk.PhysicalDeviceFeatures2 { sType = .PHYSICAL_DEVICE_FEATURES_2, pNext = &f11 }
-        
-        vk.GetPhysicalDeviceFeatures2(ips.physical_device, &supported_features)
-        if 
-            !f14.maintenance5 || !f14.pushDescriptor ||
-            !f13.dynamicRendering ||  !f13.synchronization2 || 
-            !f12.timelineSemaphore || !f12.descriptorIndexing || 
-            !f12.shaderSampledImageArrayNonUniformIndexing || 
-            !f12.descriptorBindingVariableDescriptorCount || 
-            !f12.runtimeDescriptorArray || !f12.bufferDeviceAddress ||
-            !f12.shaderInt8 || !f12.uniformAndStorageBuffer8BitAccess || 
-            !f12.shaderFloat16 ||
-            !f11.shaderDrawParameters || !f11.storageBuffer16BitAccess || !f11.uniformAndStorageBuffer16BitAccess {
-            fmt.printfln("Physical device doesn't meet the feauture requirements")
-            check(false)
-        }
-    }
-    
     device_extensions := [] cstring { 
         vk.KHR_SWAPCHAIN_EXTENSION_NAME,
         vk.EXT_MESH_SHADER_EXTENSION_NAME,
@@ -289,13 +265,15 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
         pNext = &vk.PhysicalDeviceFeatures2 {
             sType = .PHYSICAL_DEVICE_FEATURES_2,
             
-            features = {
-                samplerAnisotropy = true,
-                shaderInt16       = true,
+            // @correctness These are technically optional device features, and should be queried for availablity before using them.
+            features = { 
+                multiDrawIndirect = true, // supported on NVidia since the GTX 1080
+                samplerAnisotropy = true, // required since 1.4
+                shaderInt16       = true, // required since 1.4
                 shaderInt64       = true,
-                multiDrawIndirect = true, // @study check availablity in general nowadays
             },
-            
+        
+        // These features are guaranteed to be supported, if the device suppports vulkan 1.4
         pNext = &vk.PhysicalDeviceVulkan14Features {
             sType = .PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
             
@@ -307,7 +285,7 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
             sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
             
             synchronization2 = true,
-            dynamicRendering = true,
+            dynamicRendering = true, // remove the need for RenderPass and FrameBuffer objects
             maintenance4     = true, // needed to use layout(local_size...)
             
         pNext = &vk.PhysicalDeviceVulkan12Features {
@@ -327,7 +305,7 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
             
             drawIndirectCount = true, // let the culling shader specify the amount of draw commands, so that we don't dispatch empty commands
             
-            scalarBlockLayout   = true, // @study did this not become required in 1.4?
+            scalarBlockLayout   = true, // required since 1.4
             samplerFilterMinmax = true,
             
             hostQueryReset = true,
@@ -338,7 +316,8 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
             storageBuffer16BitAccess           = true,
             uniformAndStorageBuffer16BitAccess = true,
             shaderDrawParameters               = true,
-            
+        
+        // @correctness These features are still extensions, and we should query their availability.
         pNext = &vk.PhysicalDeviceMeshShaderFeaturesEXT {
             sType = .PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
             
@@ -444,7 +423,7 @@ get_swapchain_format :: proc (ips: IPS) -> vk.Format {
 get_depth_buffer_format :: proc (ips: IPS) -> vk.Format {
     result: vk.Format
     
-    // @todo(viktor): in niagara it is claimed, that we should "just use D32_SFLOAT" for depth buffer "these days"
+    // The stencil bits are currently wasted/unused, so we could also just select D32_SFLOAT and save that memory.
     depth_format_list := [] vk.Format { .D32_SFLOAT_S8_UINT, .D24_UNORM_S8_UINT }
     for it in depth_format_list {
         format_properties := vk.FormatProperties2 { sType = .FORMAT_PROPERTIES_2 }
