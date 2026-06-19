@@ -75,7 +75,7 @@ Draw_Globals :: struct {
 }
 
 // @shader
-Draw :: struct #align(16) {
+Draw :: struct {
     orientation: q32,
     p:           v3,
     scale:       f32,
@@ -84,7 +84,8 @@ Draw :: struct #align(16) {
     vertex_offset: u32,
 }
 
-Mesh :: struct #align(16) {
+// @shader
+Mesh :: struct {
     center: v3,
     radius: f32,
     
@@ -105,7 +106,7 @@ Draw_Command :: struct {
 }
 
 // @shader
-Meshlet :: struct #align(16) {
+Meshlet :: struct {
     center: v3,
     radius: f32,
     cone_axis:   [3] i8,

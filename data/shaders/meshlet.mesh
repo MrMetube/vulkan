@@ -21,25 +21,25 @@ layout(push_constant) uniform Push_Data {
 
 // @volatile
 struct Vertex {
-    float px, py, pz, p_pad;
+    vec3 p; float p_pad;
     uint8_t  nx, ny, nz, n_pad;
-	float tu, tv;
+	vec2 t;
 };
 
 
-layout(binding = 0) readonly buffer Draws {
+layout(binding = 0, std430, scalar) readonly buffer Draws {
 	Draw draw_buffer[];
 };
 
-layout(binding = 2) readonly buffer Meshlets {
+layout(binding = 2, std430, scalar) readonly buffer Meshlets {
 	Meshlet meshlet_buffer[];
 };
 
-layout(binding = 3) readonly buffer MeshletData {
+layout(binding = 3, std430, scalar) readonly buffer MeshletData {
 	uint meshlet_data_buffer[];
 };
 
-layout(binding = 4) readonly buffer Vertices {
+layout(binding = 4, std430, scalar) readonly buffer Vertices {
 	Vertex vertex_buffer[];
 };
 
@@ -98,14 +98,14 @@ void main() {
         uint vertex_index = draw.vertex_offset + meshlet_data_buffer[vertex_offset + i];
         Vertex vertex = vertex_buffer[vertex_index];
         
-        vec3 p = vec3(vertex.px, vertex.py, vertex.pz);
+        vec3 p = vertex.p;
         p = rotate(draw.orientation, p);
         p *= draw.scale;
         p += draw.p;
         vec4 view_p = vec4(p, 1.0);
         
         vec3 n = vec3(vertex.nx, vertex.ny, vertex.nz) / 127.0 - 1.0;
-        vec2 t = vec2(vertex.tu, vertex.tv);
+        vec2 t = vertex.t;
         
         Mesh_Result result;
         view_p = globals.view * view_p;

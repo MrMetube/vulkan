@@ -1,7 +1,8 @@
 #define Debug false
 
 #extension GL_EXT_shader_8bit_storage: require
-#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference   : require
+#extension GL_EXT_scalar_block_layout: require
 
 #define TaskWidth 32
 
@@ -24,7 +25,7 @@ struct Mesh_Result {
 ////////////////////////////////////////////////
 
 // @volatile
-layout(buffer_reference, buffer_reference_align = 8) buffer Draw_Globals {
+layout(buffer_reference, buffer_reference_align = 8, std430, scalar) buffer Draw_Globals {
     mat4 view;
     mat4 projection;
     vec4 light_pos[4];

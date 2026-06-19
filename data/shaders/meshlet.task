@@ -14,19 +14,19 @@ layout(push_constant) uniform Push_Data {
     Draw_Globals globals;
 };
 
-layout(binding = 0) readonly buffer Draws {
+layout(binding = 0, std430, scalar) readonly buffer Draws {
 	Draw draw_buffer[];
 };
 
-layout(binding = 1) readonly buffer Meshes {
+layout(binding = 1, std430, scalar) readonly buffer Meshes {
 	Mesh mesh_buffer[];
 };
 
-layout(binding = 2) readonly buffer Meshlets {
+layout(binding = 2, std430, scalar) readonly buffer Meshlets {
 	Meshlet meshlet_buffer[];
 };
 
-layout(binding = 5) readonly buffer Draw_Commands {
+layout(binding = 5, std430, scalar) readonly buffer Draw_Commands {
     Draw_Command draw_command_buffer[];
 };
 
