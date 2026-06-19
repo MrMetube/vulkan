@@ -699,11 +699,9 @@ main :: proc () {
         
         check(vk.BeginCommandBuffer(cb, &vk.CommandBufferBeginInfo { sType = .COMMAND_BUFFER_BEGIN_INFO, flags = { .ONE_TIME_SUBMIT } }))
         
-        
         gpu_profile_frame_begin(device, cb)
         
         ////////////////////////////////////////////////
-        
         
         // @todo(viktor): is this barrier/transition before the fill necessary?
         begin_pipeline_barrier()
@@ -734,6 +732,8 @@ main :: proc () {
         
         gpu_profile_zone_end()
         
+        gpu_profile_zone_begin("memory barriers")
+        
         begin_pipeline_barrier()
             add_buffer_barrier_transition_from_last(&draw_command_buffer, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .INDIRECT_COMMAND_READ, .SHADER_READ })
             add_buffer_barrier_transition_from_last(&draw_command_count_buffer, { .DRAW_INDIRECT }, { .INDIRECT_COMMAND_READ })
@@ -744,14 +744,17 @@ main :: proc () {
         // :OcclusionCull: the barrier before the depth pyramid was missing the barrier for the pyramid.image itself (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=11592)
         
         begin_pipeline_barrier()
-            add_image_barrier(&swapchain.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .COLOR_ATTACHMENT_OPTIMAL)
-            add_image_barrier(&swapchain.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .DEPTH_STENCIL_ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
+            add_image_barrier(&swapchain.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL)
+            add_image_barrier(&swapchain.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
         end_pipeline_barrier(cb)
+        
+        gpu_profile_zone_end()
         
         ////////////////////////////////////////////////
         
-        gpu_profile_zone_begin("rendering")
         begin_rendering(cb, swapchain, swapchain.color_buffer, image_index, {0.07, 0.07, 0.07, 1})
+        
+        gpu_profile_zone_begin("rendering")
         
         vk.CmdSetViewport(cb, 0, 1, &vk.Viewport {
             x      = 0,
@@ -764,6 +767,7 @@ main :: proc () {
         
         vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D { extent = to_extent(swapchain.size) })
         
+        gpu_profile_zone_begin("meshlets")
         vk.CmdBindPipeline(cb, .GRAPHICS, meshlet_pipeline.pipeline)
         
         // @shader meshlet pipeline
@@ -781,13 +785,15 @@ main :: proc () {
         
         
         vk.CmdPushConstants(cb, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(frame.draw_globals.gpu.address), &frame.draw_globals.gpu.address)
-        // @todo(viktor): this is deprecated, use https://docs.vulkan.org/spec/latest/chapters/drawing.html#vkCmdDrawMeshTasksIndirectCount2EXT
         vk.CmdDrawMeshTasksIndirectCountEXT(cb, draw_command_buffer.buffer, auto_cast offset_of(Draw_Command, command), draw_command_count_buffer.buffer, 0, len(draws), size_of(Draw_Command))
+        gpu_profile_zone_end()
         
         ////////////////////////////////////////////////
         
         vk.CmdEndRendering(cb)
         gpu_profile_zone_end()
+        
+        gpu_profile_zone_begin("copy to swapchain")
         
         begin_pipeline_barrier()
             add_image_barrier_transition_from_last(&swapchain.color_buffer, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
@@ -803,6 +809,8 @@ main :: proc () {
         begin_pipeline_barrier()
             add_image_barrier(swapchain.images[image_index], { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, {}, {}, .PRESENT_SRC_KHR)
         end_pipeline_barrier(cb)
+        
+        gpu_profile_zone_end()
         
         ////////////////////////////////////////////////
         

@@ -345,7 +345,7 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
     check(vk.CreateDevice(ips.physical_device, &device_create_info, nil, &device))
     
     vk.load_proc_addresses_device(device)
-
+    
     ////////////////////////////////////////////////
     
     queue: vk.Queue
@@ -731,7 +731,7 @@ create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sw
         pColorBlendState = &vk.PipelineColorBlendStateCreateInfo {
             sType = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
             attachmentCount = 1,
-            pAttachments = &vk.PipelineColorBlendAttachmentState {
+            pAttachments    = &vk.PipelineColorBlendAttachmentState {
                 colorWriteMask = { .R, .G, .B, .A },
             },
         },
@@ -1176,24 +1176,20 @@ gpu_profile_collate_times :: proc (ips: IPS, device: vk.Device, print: bool) {
             zone.total_time               -= timestamp
             zone.total_time_with_children -= timestamp
             
-            for link := zone.parent_zone; link != -1; {
-                parent := &gpu_profiler.zones[link]
+            if zone.parent_zone != -1 {
+                parent := &gpu_profiler.zones[zone.parent_zone]
                 parent.total_time               += timestamp
                 parent.total_time_with_children -= timestamp
-                
-                link = parent.parent_zone
             }
             
         case .End:
             zone.total_time               += timestamp
             zone.total_time_with_children += timestamp
             
-            for link := zone.parent_zone; link != -1; {
-                parent := &gpu_profiler.zones[link]
+            if zone.parent_zone != -1 {
+                parent := &gpu_profiler.zones[zone.parent_zone]
                 parent.total_time               -= timestamp
                 parent.total_time_with_children += timestamp
-                
-                link = parent.parent_zone
             }
         }
     }

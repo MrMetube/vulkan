@@ -1,7 +1,8 @@
 # To Do
 - do a depth prepass where we only render into the depthbuffer
   - then do a second pass, where depthtest is set to Equal, in which we compute the color
-  
+- rewatch on bindless https://youtu.be/bPzpz2d0ins?t=11594  
+- rewatch on memory allocation https://youtu.be/Ju4rXct6mPI?t=9813
 ## Legay
 Taken from this page https://docs.vulkan.org/spec/latest/appendices/legacy.html.
 
