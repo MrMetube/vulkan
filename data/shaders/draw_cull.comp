@@ -1,7 +1,5 @@
 #version 460
 
-#extension GL_EXT_buffer_reference: require
-#extension GL_EXT_buffer_reference2: require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64: require
 #extension GL_KHR_shader_subgroup_ballot: require
 
@@ -10,24 +8,6 @@
 #define ComputeWidth 32
 
 layout(local_size_x = ComputeWidth, local_size_y = 1, local_size_z = 1) in;
-
-#define Pointer(T, alignment) layout(buffer_reference, buffer_reference_align = alignment, std430, scalar) buffer T##_p { T v; };
-
-Pointer(Draw, 8)
-Pointer(Mesh, 8)
-Pointer(Draw_Command, 8)
-Pointer(uint, 8)
-
-// @volatile
-layout(buffer_reference, buffer_reference_align = 8, std430, scalar) buffer Cull_Globals {
-    vec4 frustum_planes[6];
-	Draw_p         draw_buffer;
-	Mesh_p         mesh_buffer;
-	Draw_Command_p draw_command_buffer;
-	uint_p         draw_command_count;
-    // bool frustum_culling_enabled;
-    // bool lod_enabled;
-};
 
 // @volatile
 layout(push_constant) uniform Push_Data {
@@ -81,8 +61,8 @@ void main() {
         
         Mesh_LOD lod = mesh.v.lods[lod_index];
         
-        draw_command.v.groupCountX = (lod.meshlet_count + TaskWidth-1) / TaskWidth;
-        draw_command.v.groupCountY = 1;
-        draw_command.v.groupCountZ = 1;
+        draw_command.v.command.groupCountX = (lod.meshlet_count + TaskWidth-1) / TaskWidth;
+        draw_command.v.command.groupCountY = 1;
+        draw_command.v.command.groupCountZ = 1;
     }
 }

@@ -1,8 +1,14 @@
 
-
+#extension GL_EXT_buffer_reference: require
+#extension GL_EXT_buffer_reference2: require
 #extension GL_EXT_shader_8bit_storage: require
 #extension GL_EXT_buffer_reference   : require
 #extension GL_EXT_scalar_block_layout: require
+
+// @todo(viktor): should a ^uint be aligned by 8 or by 4, or should it be the align_of(T) of the cpu type
+#define Pointer(T) layout(buffer_reference, buffer_reference_align = 8, std430, scalar) buffer T##_p { T v; }
+
+#include "api.generated.glslh"
 
 #define Debug false
 
@@ -22,67 +28,6 @@ struct Mesh_Result {
     vec3 view_vec;
 
     vec3 debug_color; // @cleanup
-};
-
-////////////////////////////////////////////////
-
-// @volatile
-layout(buffer_reference, buffer_reference_align = 8, std430, scalar) buffer Draw_Globals {
-    mat4 view;
-    mat4 projection;
-    vec4 light_pos[4];
-};
-
-// @volatile
-struct Draw {
-    vec4  orientation;
-    vec3  p;
-    float scale;
-    
-    uint mesh_index;
-    uint vertex_offset; // this is a duplication of Mesh[mesh_index].vertex_offset, it helps data locality in the mesh shader
-};
-
-// @volatile
-struct Mesh_LOD {
-    uint meshlet_offset;
-    uint meshlet_count;
-};
-
-// @volatile
-struct Mesh {
-    vec3  center;
-    float radius;
-    
-    uint vertex_offset;
-    uint vertex_count;
-    
-    uint __triangle_count; 
-    
-    uint     lod_count; 
-    Mesh_LOD lods[8];
-};
-
-// @volatile
-struct Draw_Command {
-    uint draw_id;
-    uint lod_index;
-    
-    uint groupCountX;
-    uint groupCountY;
-    uint groupCountZ;
-};
-
-// @volatile
-struct Meshlet {
-    vec3  center;
-    float radius;
-    int8_t  cone_axis[3];
-    uint8_t cone_cutoff;
-    
-    uint data_offset;
-    uint8_t vertex_count;
-    uint8_t triangle_count;
 };
 
 ////////////////////////////////////////////////

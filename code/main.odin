@@ -57,14 +57,12 @@ MaxVertices  :: 64
 MaxTriangles :: 84
 
 // @shader cull.comp
-Cull_Globals :: struct {
+Cull_Globals :: struct #all_or_none {
     frustum_planes: [6] v4,
-    using buffers: struct #all_or_none {
-        draw:               vk.DeviceAddress,
-        mesh:               vk.DeviceAddress,
-        draw_command:       vk.DeviceAddress,
-        draw_command_count: vk.DeviceAddress,
-    },
+    draw:               vk.DeviceAddress "Draw draw_buffer",
+    mesh:               vk.DeviceAddress "Mesh mesh_buffer",
+    draw_command:       vk.DeviceAddress "Draw_Command draw_command_buffer",
+    draw_command_count: vk.DeviceAddress "uint draw_command_count",
 }
 
 // @shader
@@ -119,7 +117,7 @@ Meshlet :: struct {
     cone_axis:   [3] i8,
     cone_cutoff: i8,
     
-    data_offset:    u32, // data_offset:][:vertexcount
+    data_offset:    u32, // [data_offset:][:vertexcount]
     vertex_count:   u8,
     triangle_count: u8,
 }
@@ -424,6 +422,8 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
+    generate_shader_api("shaders/api.generated.glslh")
+    
     shader_allocator := context.allocator
     
     shader_files := make([dynamic] string, context.temp_allocator)
@@ -635,22 +635,22 @@ main :: proc () {
         // @todo(viktor): we also need to take the view matrix into account
         draw_distance: f32 = 100
         
-        cull_globals: Cull_Globals
-        
+        frustum_planes: [6] v4
         if culling_enabled {
-            cull_globals.frustum_planes[0] = get_column_v4(projection, 3) + get_column_v4(projection, 0) // x + w < 0
-            cull_globals.frustum_planes[1] = get_column_v4(projection, 3) - get_column_v4(projection, 0) // x - w > 0
-            cull_globals.frustum_planes[2] = get_column_v4(projection, 3) + get_column_v4(projection, 1) // y + w < 0
-            cull_globals.frustum_planes[3] = get_column_v4(projection, 3) - get_column_v4(projection, 1) // y - w > 0
-            cull_globals.frustum_planes[4] = get_column_v4(projection, 3) - get_column_v4(projection, 2) // z - w > 0 -- :ReversedZ:
-            cull_globals.frustum_planes[5] = v4{0, 0, -1, draw_distance}                                 // :ReversedZ: infinite far plane
+            frustum_planes[0] = get_column_v4(projection, 3) + get_column_v4(projection, 0) // x + w < 0
+            frustum_planes[1] = get_column_v4(projection, 3) - get_column_v4(projection, 0) // x - w > 0
+            frustum_planes[2] = get_column_v4(projection, 3) + get_column_v4(projection, 1) // y + w < 0
+            frustum_planes[3] = get_column_v4(projection, 3) - get_column_v4(projection, 1) // y - w > 0
+            frustum_planes[4] = get_column_v4(projection, 3) - get_column_v4(projection, 2) // z - w > 0 -- :ReversedZ:
+            frustum_planes[5] = v4{0, 0, -1, draw_distance}                                 // :ReversedZ: infinite far plane
             
-            for &plane in cull_globals.frustum_planes {
+            for &plane in frustum_planes {
                 plane /= length(plane.xyz)
             }
         }
         
-        cull_globals.buffers = {
+        cull_globals := Cull_Globals {
+            frustum_planes     = frustum_planes,
             draw               = draw_buffer.address,
             mesh               = mesh_buffer.address,
             draw_command       = draw_command_buffer.address,
@@ -665,7 +665,7 @@ main :: proc () {
         triangles_this_frame: u32
         
         entropy := seed_random_series(5175546)
-        @(static) draws: [500] Draw
+        @(static) draws: [50] Draw
         for &draw in draws {
             p := random_bilateral(&entropy, v3) * {20, 15, 60}
             
