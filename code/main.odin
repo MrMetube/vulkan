@@ -66,6 +66,7 @@ Cull_Globals :: struct #all_or_none {
 
     frustum_culling_enabled: b32,
     lod_enabled:             b32,
+    draw_count:              u32,
     // @cleanup
     camera_p: v3,
 }
@@ -616,6 +617,49 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
+        triangles_this_frame: u32
+        
+        entropy := seed_random_series(5156)
+        when !false {
+            @(static) draws: [50] Draw
+            for &draw in draws {
+                p := random_bilateral(&entropy, v3) * {20, 15, 60}
+                
+                draw.p           = p
+                draw.scale       = linear_blend(cast(f32) 1, 4, square(random_unilateral(&entropy, f32)))
+                rotation        := la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
+                global_rotation := la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX)
+                draw.orientation = rotation * global_rotation
+                
+                mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
+                
+                draw.mesh_index    = mesh_index
+                draw.vertex_offset = mesh.vertex_offset
+                
+                triangles_this_frame += mesh.triangle_count
+            }
+        } else {
+            @(static) draws: [1] Draw
+            for &draw in draws {
+                p := v3{0, 0, -3}
+                
+                draw.p           = p
+                draw.scale       = 1
+                draw.orientation = 0
+                
+                mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
+                
+                draw.mesh_index    = mesh_index
+                draw.vertex_offset = mesh.vertex_offset
+                
+                triangles_this_frame += mesh.triangle_count
+            }
+        }
+        
+        copy(db_view, draws[:])
+        
+        ////////////////////////////////////////////////
+        
         projection_reversed_z :: proc (fov_y, aspect_w_h, near_z: f32) -> m4 { // :ReversedZ:
             f := 1 / tan(fov_y / 2)
             a := f / aspect_w_h
@@ -667,55 +711,12 @@ main :: proc () {
             
             lod_enabled             = cast(b32) lod_enabled,
             frustum_culling_enabled = cast(b32) culling_enabled,
-            
-            camera_p = cam_pos,
+            draw_count              = len(draws),
+            camera_p                = cam_pos,
         }
         
         frame.draw_globals.cpu^ = draw_globals
         frame.cull_globals.cpu^ = cull_globals
-        
-        ////////////////////////////////////////////////
-        
-        triangles_this_frame: u32
-        
-        entropy := seed_random_series(5156)
-        when false {
-            @(static) draws: [50] Draw
-            for &draw in draws {
-                p := random_bilateral(&entropy, v3) * {20, 15, 60}
-                
-                draw.p           = p
-                draw.scale       = linear_blend(cast(f32) 1, 4, square(random_unilateral(&entropy, f32)))
-                rotation        := la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
-                global_rotation := la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX)
-                draw.orientation = rotation * global_rotation
-                
-                mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
-                
-                draw.mesh_index    = mesh_index
-                draw.vertex_offset = mesh.vertex_offset
-                
-                triangles_this_frame += mesh.triangle_count
-            }
-        } else {
-            @(static) draws: [1] Draw
-            for &draw in draws {
-                p := v3{0, 0, -3}
-                
-                draw.p           = p
-                draw.scale       = 1
-                draw.orientation = 0
-                
-                mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
-                
-                draw.mesh_index    = mesh_index
-                draw.vertex_offset = mesh.vertex_offset
-                
-                triangles_this_frame += mesh.triangle_count
-            }
-        }
-        
-        copy(db_view, draws[:])
         
         ////////////////////////////////////////////////
         

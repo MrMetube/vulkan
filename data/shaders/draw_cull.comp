@@ -21,10 +21,12 @@ void main() {
     uint thread_index = gl_LocalInvocationID.x;
     uint draw_index   = group_index * ComputeWidth + thread_index;
     
+    if (draw_index >= globals.draw_count) return;
     
     Draw_p draw               = globals.draw_buffer[draw_index];
     Mesh_p mesh               = globals.mesh_buffer[draw.v.mesh_index];
     uint_p draw_command_count = globals.draw_command_count;
+    
     
     vec3  center = transform(draw.v.orientation, draw.v.scale, draw.v.p, mesh.v.center);
     float radius = draw.v.scale * mesh.v.radius;
