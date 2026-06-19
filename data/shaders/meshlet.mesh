@@ -93,7 +93,7 @@ void main() {
     
     uint vertex_offset = meshlet.data_offset;
     uint index_offset  = vertex_offset + vertex_count;
-        
+    
     for (uint i = thread_index; i < vertex_count; i += MeshWidth) {
         uint vertex_index = draw.vertex_offset + meshlet_data_buffer[vertex_offset + i];
         Vertex vertex = vertex_buffer[vertex_index];

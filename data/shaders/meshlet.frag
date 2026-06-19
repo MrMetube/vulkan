@@ -31,7 +31,7 @@ void main(void) {
     vec3 color = diffuse * albedo + specular;
     
     if (Debug) {
-        color = mesh_result.debug_color;
+        color *= mesh_result.debug_color;
     }
     
     pixel_result = vec4(color, 1.0);

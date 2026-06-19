@@ -55,6 +55,7 @@ generate_shader_api :: proc (output_file: string) {
         case m4: type_name = "mat4"
         
         case q32: type_name = "vec4"
+        case b32: type_name = "bool"
         
         case: 
             if array_type, ok := info.variant.(runtime.Type_Info_Array); ok {

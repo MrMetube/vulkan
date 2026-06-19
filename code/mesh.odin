@@ -66,17 +66,19 @@ load_mesh :: proc (geometry: ^Geometry, filepath: string, _allocator: Allocator)
     ////////////////////////////////////////////////
     // build meshlets per lod
     
-    // @todo(viktor): should this be a copy?
     lod_indices := mesh_indices
+    
+    LOD_Factor :: 0.5
+    LOD_Error  :: 1e-2
     
     for &lod in mesh.lods {
         lod.meshlet_offset = cast(u32) len(geometry.meshlets)
         lod.meshlet_count  = append_meshlets(geometry, mesh_vertices, lod_indices[:])
         mesh.lod_count += 1
         
-        next_count_target := floor(uint, cast(f32) len(lod_indices) * 0.5)
+        next_count_target := floor(uint, cast(f32) len(lod_indices) * LOD_Factor)
         
-        next_count := meshoptimizer.simplify(&lod_indices[0], &lod_indices[0], len(lod_indices), &mesh_vertices[0].p[0], len(mesh_vertices), size_of(mesh_vertices[0]), next_count_target, 1e-4, {}, nil)
+        next_count := meshoptimizer.simplify(&lod_indices[0], &lod_indices[0], len(lod_indices), &mesh_vertices[0].p[0], len(mesh_vertices), size_of(mesh_vertices[0]), next_count_target, LOD_Error, {}, nil)
         
         assert(next_count <= len(lod_indices))
         

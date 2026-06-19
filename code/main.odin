@@ -63,6 +63,11 @@ Cull_Globals :: struct #all_or_none {
     mesh:               vk.DeviceAddress "Mesh mesh_buffer",
     draw_command:       vk.DeviceAddress "Draw_Command draw_command_buffer",
     draw_command_count: vk.DeviceAddress "uint draw_command_count",
+
+    frustum_culling_enabled: b32,
+    lod_enabled:             b32,
+    // @cleanup
+    camera_p: v3,
 }
 
 // @shader
@@ -172,9 +177,9 @@ main :: proc () {
     geometry: Geometry
     {
         paths := [?] string {
-            "tutorial/suzanne.obj",
-            "models/bunny.obj",
-            // "models/lucy_280k.obj",
+            // "tutorial/suzanne.obj",
+            // "models/bunny.obj",
+            "models/lucy_280k.obj",
         }
         
         for path in paths {
@@ -470,7 +475,7 @@ main :: proc () {
         pos.xz += arm(t * Tau)
     }
     
-    cam_pos := v3{ 0, 0, -6 }
+    cam_pos := v3{ 0, 0, 0}
     object_rotation: v3
     quit: bool
     last_time := time.tick_now()
@@ -629,20 +634,24 @@ main :: proc () {
         }
         
         projection := projection_reversed_z(70 * RadPerDeg, cast(f32) swapchain.size.x / cast(f32) swapchain.size.y, 0.01)
+        view       := translate(1, -cam_pos)
         draw_globals.projection = projection
-        draw_globals.view       = translate(1, cam_pos)
+        draw_globals.view       = view
         
         // @todo(viktor): we also need to take the view matrix into account
         draw_distance: f32 = 100
         
         frustum_planes: [6] v4
         if culling_enabled {
-            frustum_planes[0] = get_column_v4(projection, 3) + get_column_v4(projection, 0) // x + w < 0
-            frustum_planes[1] = get_column_v4(projection, 3) - get_column_v4(projection, 0) // x - w > 0
-            frustum_planes[2] = get_column_v4(projection, 3) + get_column_v4(projection, 1) // y + w < 0
-            frustum_planes[3] = get_column_v4(projection, 3) - get_column_v4(projection, 1) // y - w > 0
-            frustum_planes[4] = get_column_v4(projection, 3) - get_column_v4(projection, 2) // z - w > 0 -- :ReversedZ:
-            frustum_planes[5] = v4{0, 0, -1, draw_distance}                                 // :ReversedZ: infinite far plane
+            view_projection := projection * draw_globals.view
+            cam_forward := v3{0, 0, -1}
+            
+            frustum_planes[0] = get_column_v4(view_projection, 3) + get_column_v4(view_projection, 0) // x + w < 0
+            frustum_planes[1] = get_column_v4(view_projection, 3) - get_column_v4(view_projection, 0) // x - w > 0
+            frustum_planes[2] = get_column_v4(view_projection, 3) + get_column_v4(view_projection, 1) // y + w < 0
+            frustum_planes[3] = get_column_v4(view_projection, 3) - get_column_v4(view_projection, 1) // y - w > 0
+            frustum_planes[4] = get_column_v4(view_projection, 3) - get_column_v4(view_projection, 2) // z - w > 0 -- :ReversedZ:
+            frustum_planes[5] = v4{**cam_forward, draw_distance + dot(cam_forward, cam_pos)}          // :ReversedZ: infinite far plane
             
             for &plane in frustum_planes {
                 plane /= length(plane.xyz)
@@ -655,6 +664,11 @@ main :: proc () {
             mesh               = mesh_buffer.address,
             draw_command       = draw_command_buffer.address,
             draw_command_count = draw_command_count_buffer.address,
+            
+            lod_enabled             = cast(b32) lod_enabled,
+            frustum_culling_enabled = cast(b32) culling_enabled,
+            
+            camera_p = cam_pos,
         }
         
         frame.draw_globals.cpu^ = draw_globals
@@ -664,23 +678,41 @@ main :: proc () {
         
         triangles_this_frame: u32
         
-        entropy := seed_random_series(5175546)
-        @(static) draws: [50] Draw
-        for &draw in draws {
-            p := random_bilateral(&entropy, v3) * {20, 15, 60}
-            
-            draw.p           = p
-            draw.scale       = linear_blend(cast(f32) 1, 4, square(random_unilateral(&entropy, f32)))
-            rotation        := la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
-            global_rotation := la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX)
-            draw.orientation = rotation * global_rotation
-            
-            mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
-            
-            draw.mesh_index    = mesh_index
-            draw.vertex_offset = mesh.vertex_offset
-            
-            triangles_this_frame += mesh.triangle_count
+        entropy := seed_random_series(5156)
+        when false {
+            @(static) draws: [50] Draw
+            for &draw in draws {
+                p := random_bilateral(&entropy, v3) * {20, 15, 60}
+                
+                draw.p           = p
+                draw.scale       = linear_blend(cast(f32) 1, 4, square(random_unilateral(&entropy, f32)))
+                rotation        := la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
+                global_rotation := la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX)
+                draw.orientation = rotation * global_rotation
+                
+                mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
+                
+                draw.mesh_index    = mesh_index
+                draw.vertex_offset = mesh.vertex_offset
+                
+                triangles_this_frame += mesh.triangle_count
+            }
+        } else {
+            @(static) draws: [1] Draw
+            for &draw in draws {
+                p := v3{0, 0, -3}
+                
+                draw.p           = p
+                draw.scale       = 1
+                draw.orientation = 0
+                
+                mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
+                
+                draw.mesh_index    = mesh_index
+                draw.vertex_offset = mesh.vertex_offset
+                
+                triangles_this_frame += mesh.triangle_count
+            }
         }
         
         copy(db_view, draws[:])

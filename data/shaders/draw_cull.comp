@@ -30,9 +30,11 @@ void main() {
     float radius = draw.v.scale * mesh.v.radius;
     
     bool visible = true;
-    for (int i = 0; i < 6; i++) {
-        vec4 plane = globals.frustum_planes[i];
-        visible = visible && (dot(plane, vec4(center, 1)) > -radius);
+    if (globals.frustum_culling_enabled) {
+        for (int i = 0; i < 6; i++) {
+            vec4 plane = globals.frustum_planes[i];
+            visible = visible && (dot(plane, vec4(center, 1)) > -radius);
+        }
     }
     
     uvec4 ballot = subgroupBallot(visible);
@@ -53,8 +55,20 @@ void main() {
     // The meshes were not drawn for about one frame and then it was stable again for a while. This repeated
     // indefinitly.
     if (visible) {
-        // @todo(viktor): The real camera world position.
         uint lod_index = 0;
+        if (globals.lod_enabled) 
+        {
+            // @todo(viktor): The real camera world position.
+            vec3 camera_position = globals.camera_p;
+            float lod_distance = max(1, distance(center, camera_position) - radius);
+            float log_lod_distance = log2(lod_distance);
+            
+            lod_index = int(lod_distance);
+            // lod_index = 1;
+            
+            lod_index = clamp(lod_index, 0, mesh.v.lod_count-1);
+        }
+        
         Draw_Command_p draw_command = globals.draw_command_buffer[draw_command_index];
         draw_command.v.draw_id = draw_index;
         draw_command.v.lod_index = lod_index; // :DrawAndLODData:
