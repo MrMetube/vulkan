@@ -1,8 +1,10 @@
-#define Debug false
+
 
 #extension GL_EXT_shader_8bit_storage: require
 #extension GL_EXT_buffer_reference   : require
 #extension GL_EXT_scalar_block_layout: require
+
+#define Debug false
 
 #define TaskWidth 32
 
@@ -42,21 +44,29 @@ struct Draw {
 };
 
 // @volatile
+struct Mesh_LOD {
+    uint meshlet_offset;
+    uint meshlet_count;
+};
+
+// @volatile
 struct Mesh {
     vec3  center;
     float radius;
     
     uint vertex_offset;
     uint vertex_count;
-    uint meshlet_offset;
-    uint meshlet_count;
     
     uint __triangle_count; 
+    
+    uint     lod_count; 
+    Mesh_LOD lods[8];
 };
 
 // @volatile
 struct Draw_Command {
     uint draw_id;
+    uint lod_index;
     
     uint groupCountX;
     uint groupCountY;
@@ -67,7 +77,7 @@ struct Draw_Command {
 struct Meshlet {
     vec3  center;
     float radius;
-    int8_t cone_axis[3];
+    int8_t  cone_axis[3];
     uint8_t cone_cutoff;
     
     uint data_offset;

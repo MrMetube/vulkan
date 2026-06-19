@@ -43,30 +43,32 @@ layout(local_size_x = TaskWidth, local_size_y = 1, local_size_z = 1) in;
 
 taskPayloadSharedEXT Task_Result task_result;
 
-#define CULL true
+#define BACKFACE_CULLING true
 
 void main() {
     uint meshlet_group_index = gl_WorkGroupID.x;
     uint thread_index        = gl_LocalInvocationID.x;
-    uint draw_index          = draw_command_buffer[gl_DrawID].draw_id;
+    Draw_Command command     = draw_command_buffer[gl_DrawID];
+    uint draw_index          = command.draw_id;
     
     Draw draw = draw_buffer[draw_index];
     Mesh mesh = mesh_buffer[draw.mesh_index];
     
-    uint meshlet_index = meshlet_group_index * TaskWidth + thread_index + mesh.meshlet_offset;
+    Mesh_LOD lod = mesh.lods[command.lod_index];
+    uint meshlet_index = meshlet_group_index * TaskWidth + thread_index + lod.meshlet_offset;
     
     if (thread_index == 0) {
         task_result.draw_index = draw_index;
         // see :DrawAndLODData:
-        task_result.meshlet_offset = mesh.meshlet_offset;
+        task_result.meshlet_offset = lod.meshlet_offset;
     }
     
     uint count;
-    if (CULL) {
+    if (BACKFACE_CULLING) {
         Meshlet meshlet = meshlet_buffer[meshlet_index];
         
         bool accept = false;
-        if (meshlet_index < (mesh.meshlet_count + mesh.meshlet_offset)) {
+        if (meshlet_index < (lod.meshlet_count + lod.meshlet_offset)) {
             vec3 cone_axis   = vec3(meshlet.cone_axis[0], meshlet.cone_axis[1], meshlet.cone_axis[2]) / 127.0;
             float cone_cutoff = float(meshlet.cone_cutoff) / 127.0;
             vec3 center      = meshlet.center;
@@ -91,7 +93,7 @@ void main() {
     } else {
         task_result.indices[thread_index] = meshlet_index;
         
-        count = min(TaskWidth, mesh.meshlet_count - (meshlet_group_index * TaskWidth + 0));
+        count = min(TaskWidth, lod.meshlet_count - (meshlet_group_index * TaskWidth + 0));
     }
     
     EmitMeshTasksEXT(count, 1, 1);

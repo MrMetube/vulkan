@@ -74,11 +74,11 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
     }
     
     if stdout != "" {
-        fmt.printfln("Hotreload output: %v", stdout)
+        fmt.printfln("Hotreload output:\n\n%v\n", stdout)
     }
     
     if stderr != "" {
-        fmt.printfln("Hotreload error: %v", stderr)
+        fmt.printfln("Hotreload error:\n\n%v\n", stderr)
         return result, false
     }
     

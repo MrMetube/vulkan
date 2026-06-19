@@ -13,11 +13,10 @@ layout(local_size_x = ComputeWidth, local_size_y = 1, local_size_z = 1) in;
 
 #define Pointer(T, alignment) layout(buffer_reference, buffer_reference_align = alignment, std430, scalar) buffer T##_p { T v; };
 
-// @volatile alignment must be the cpu's align_of(T)
-Pointer(Draw, 4)
-Pointer(Mesh, 4)
-Pointer(Draw_Command, 4)
-Pointer(uint, 4)
+Pointer(Draw, 8)
+Pointer(Mesh, 8)
+Pointer(Draw_Command, 8)
+Pointer(uint, 8)
 
 // @volatile
 layout(buffer_reference, buffer_reference_align = 8, std430, scalar) buffer Cull_Globals {
@@ -26,6 +25,8 @@ layout(buffer_reference, buffer_reference_align = 8, std430, scalar) buffer Cull
 	Mesh_p         mesh_buffer;
 	Draw_Command_p draw_command_buffer;
 	uint_p         draw_command_count;
+    // bool frustum_culling_enabled;
+    // bool lod_enabled;
 };
 
 // @volatile
@@ -72,10 +73,15 @@ void main() {
     // The meshes were not drawn for about one frame and then it was stable again for a while. This repeated
     // indefinitly.
     if (visible) {
+        // @todo(viktor): The real camera world position.
+        uint lod_index = 0;
         Draw_Command_p draw_command = globals.draw_command_buffer[draw_command_index];
         draw_command.v.draw_id = draw_index;
+        draw_command.v.lod_index = lod_index; // :DrawAndLODData:
         
-        draw_command.v.groupCountX = (mesh.v.meshlet_count + TaskWidth-1) / TaskWidth;
+        Mesh_LOD lod = mesh.v.lods[lod_index];
+        
+        draw_command.v.groupCountX = (lod.meshlet_count + TaskWidth-1) / TaskWidth;
         draw_command.v.groupCountY = 1;
         draw_command.v.groupCountZ = 1;
     }

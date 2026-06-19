@@ -92,17 +92,24 @@ Mesh :: struct {
     vertex_offset: u32,
     vertex_count:  u32,
     
-    meshlet_offset: u32,
-    meshlet_count:  u32,
-    
     // @note(viktor): just for statistics, might become unused, @shader remove it once cleaned up here
     triangle_count: u32,
+    
+    lod_count: u32,
+    lods:      [8] Mesh_LOD,
+}
+
+// @shader
+Mesh_LOD :: struct {
+    meshlet_offset: u32,
+    meshlet_count:  u32,
 }
 
 // @shader
 Draw_Command :: struct {
-    draw_id: u32,
-    command: vk.DrawMeshTasksIndirectCommandEXT,
+    draw_id:   u32,
+    lod_index: u32,
+    command:   vk.DrawMeshTasksIndirectCommandEXT,
 }
 
 // @shader
@@ -169,7 +176,7 @@ main :: proc () {
         paths := [?] string {
             "tutorial/suzanne.obj",
             "models/bunny.obj",
-            "models/lucy_280k.obj",
+            // "models/lucy_280k.obj",
         }
         
         for path in paths {
@@ -483,6 +490,7 @@ main :: proc () {
     }
     
     culling_enabled: bool = true
+    lod_enabled:     bool = true
     
     cull_delta: f64
     cpu_time: f64
@@ -525,6 +533,7 @@ main :: proc () {
                 switch event.key.key {
                 case sdl.K_SPACE: space_down = true
                 case sdl.K_C:     culling_enabled = !culling_enabled
+                case sdl.K_L:     lod_enabled = !lod_enabled
                 case sdl.K_P:     print_profile = true
                 }
             case .KEY_UP:
@@ -639,13 +648,13 @@ main :: proc () {
             for &plane in cull_globals.frustum_planes {
                 plane /= length(plane.xyz)
             }
-            
-            cull_globals.buffers = {
-                draw               = draw_buffer.address,
-                mesh               = mesh_buffer.address,
-                draw_command       = draw_command_buffer.address,
-                draw_command_count = draw_command_count_buffer.address,
-            }
+        }
+        
+        cull_globals.buffers = {
+            draw               = draw_buffer.address,
+            mesh               = mesh_buffer.address,
+            draw_command       = draw_command_buffer.address,
+            draw_command_count = draw_command_count_buffer.address,
         }
         
         frame.draw_globals.cpu^ = draw_globals
@@ -680,18 +689,21 @@ main :: proc () {
         
         cpu_time = time_smoothed_blend(delta_time_64, cpu_time, delta_time_64)
         
-        view :: proc (seconds: f64) -> time.Duration {
-            return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
+        {
+            view :: proc (seconds: f64) -> time.Duration {
+                return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
+            }
+            
+            sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, cull time: %.3v, triangles: %v, %v triangles/s, culling %v, level of detail %v", 
+                view(cpu_time), 
+                view(gpu_time), 
+                view(cull_delta), 
+                view_magnitude(triangles_this_frame), 
+                view_magnitude(cast(u64) (cast(f64) triangles_this_frame / gpu_time)),
+                culling_enabled ? "on" : "off",
+                lod_enabled ? "on" : "off",
+            ))
         }
-        
-        sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, cull time: %.3v, triangles: %v, %v triangles/s, culling %v", 
-            view(cpu_time), 
-            view(gpu_time), 
-            view(cull_delta), 
-            view_magnitude(triangles_this_frame), 
-            view_magnitude(cast(u64) (cast(f64) triangles_this_frame / gpu_time)),
-            culling_enabled ? "on" : "off",
-        ))
         
         ////////////////////////////////////////////////
         
@@ -900,7 +912,6 @@ check_vulkan :: proc (result: vk.Result, loc := #caller_location) {
     if result != .SUCCESS {
         fmt.printf("%v:%v:%v: Vulkan call returned %v", loc.file_path, loc.line, loc.column, result)
         intrinsics.debug_trap()
-        os.exit(1)
     }
 }
 check_sdl :: proc (result: bool, loc := #caller_location) {

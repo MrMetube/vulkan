@@ -31,7 +31,6 @@ load_mesh :: proc (geometry: ^Geometry, filepath: string, _allocator: Allocator)
         }
     }
     
-    // @waste we allocate vertices and indices, only to then optimize them and throw the original away
     mesh_indices := model.indices[:]
     
     ////////////////////////////////////////////////
@@ -41,7 +40,6 @@ load_mesh :: proc (geometry: ^Geometry, filepath: string, _allocator: Allocator)
     mesh.triangle_count = cast(u32) len(mesh_indices) / 3
     mesh.vertex_offset  = cast(u32) len(geometry.vertices)
     mesh.vertex_count   = cast(u32) len(mesh_vertices)
-    mesh.meshlet_offset = cast(u32) len(geometry.meshlets)
     
     {
         remap := make([] u32, len(mesh_indices), context.temp_allocator)
@@ -57,6 +55,7 @@ load_mesh :: proc (geometry: ^Geometry, filepath: string, _allocator: Allocator)
         meshoptimizer.remapVertexBuffer(&result_vertices[0], &mesh_vertices[0], len(mesh_vertices), size_of(Vertex), &remap[0])
         meshoptimizer.remapIndexBuffer(&result_indices[0],   &mesh_indices[0],  len(mesh_indices), &remap[0])
         
+        // @speed The indices themselves are not used, as me only support meshlet based rendering. Does this still make a performance difference, or are we wasting time with this optimization?
         meshoptimizer.optimizeVertexCache(&result_indices[0], &result_indices[0], len(result_indices), len(result_vertices))
         meshoptimizer.optimizeVertexFetch(&result_vertices[0], &result_indices[0], len(result_indices), &result_vertices[0], len(result_vertices), size_of(Vertex)) 
         
@@ -65,21 +64,63 @@ load_mesh :: proc (geometry: ^Geometry, filepath: string, _allocator: Allocator)
     }
     
     ////////////////////////////////////////////////
-    // build meshlets
+    // build meshlets per lod
     
+    // @todo(viktor): should this be a copy?
+    lod_indices := mesh_indices
+    
+    for &lod in mesh.lods {
+        lod.meshlet_offset = cast(u32) len(geometry.meshlets)
+        lod.meshlet_count  = append_meshlets(geometry, mesh_vertices, lod_indices[:])
+        mesh.lod_count += 1
+        
+        next_count_target := floor(uint, cast(f32) len(lod_indices) * 0.5)
+        
+        next_count := meshoptimizer.simplify(&lod_indices[0], &lod_indices[0], len(lod_indices), &mesh_vertices[0].p[0], len(mesh_vertices), size_of(mesh_vertices[0]), next_count_target, 1e-4, {}, nil)
+        
+        assert(next_count <= len(lod_indices))
+        
+        if next_count == len(lod_indices) {
+            break
+        }
+        
+        lod_indices = lod_indices[:next_count]
+    }
+    
+    ////////////////////////////////////////////////
+    // compute cone for backface culling
+    
+    center: v3
+    for vertex in mesh_vertices {
+        center += vertex.p
+    }
+    center /= cast(f32) len(mesh_vertices)
+    
+    radius_squared: f32
+    for vertex in mesh_vertices {
+        radius_squared = max(radius_squared, length_squared(vertex.p - center))
+    }
+    
+    mesh.center = center
+    mesh.radius = square_root(radius_squared)
+        
+    return true
+}
+
+append_meshlets :: proc (geometry: ^Geometry, mesh_vertices: [] Vertex, mesh_indices: [] u32) -> (count: u32) {
     max_vertices  :: MaxVertices
     max_triangles :: MaxTriangles 
     cone_weight :: 0.5 // 0 when not culling, otherwise 0..1 
     
-    max_count := meshoptimizer.buildMeshletsBound(auto_cast len(mesh_indices), max_vertices, max_triangles)
+    max_meshlet_count := meshoptimizer.buildMeshletsBound(auto_cast len(mesh_indices), max_vertices, max_triangles)
     
-    meshlets := make([] meshoptimizer.Meshlet, max_count,         context.temp_allocator)
+    meshlets := make([] meshoptimizer.Meshlet, max_meshlet_count, context.temp_allocator)
     vertices := make([] u32,                   len(mesh_indices), context.temp_allocator)
     indices  := make([] u8,                    len(mesh_indices), context.temp_allocator)
     
-    actual_count := meshoptimizer.buildMeshlets(&meshlets[0], &vertices[0], &indices[0], &mesh_indices[0], len(mesh_indices), cast(^f32) &mesh_vertices[0], len(mesh_vertices), size_of(mesh_vertices[0]), max_vertices, max_triangles, cone_weight)
+    meshlet_count := cast(u32) meshoptimizer.buildMeshlets(&meshlets[0], &vertices[0], &indices[0], &mesh_indices[0], len(mesh_indices), cast(^f32) &mesh_vertices[0], len(mesh_vertices), size_of(mesh_vertices[0]), max_vertices, max_triangles, cone_weight)
     
-    for source in meshlets[:actual_count] {
+    for source in meshlets[:meshlet_count] {
         dest := append_into(&geometry.meshlets)
         
         source_vertices := vertices[source.vertex_offset:]
@@ -102,29 +143,11 @@ load_mesh :: proc (geometry: ^Geometry, filepath: string, _allocator: Allocator)
         dest.radius = bounds.radius
         dest.cone_axis   = bounds.cone_axis_s8
         dest.cone_cutoff = bounds.cone_cutoff_s8
+        
+        meshlet_vertices  := &geometry.meshlet_data[dest.data_offset]
+        meshlet_triangles := &geometry.meshlet_data[dest.data_offset + auto_cast dest.vertex_count]
+        meshoptimizer.optimizeMeshlet(meshlet_vertices, cast(^u8) meshlet_triangles, auto_cast dest.triangle_count, auto_cast dest.vertex_count)
     }
     
-    for &meshlet in geometry.meshlets[mesh.meshlet_offset:] {
-        meshlet_vertices  := &geometry.meshlet_data[meshlet.data_offset]
-        meshlet_triangles := &geometry.meshlet_data[meshlet.data_offset + auto_cast meshlet.vertex_count]
-        meshoptimizer.optimizeMeshlet(meshlet_vertices, cast(^u8) meshlet_triangles, auto_cast meshlet.triangle_count, auto_cast meshlet.vertex_count)
-    }
-    
-    mesh.meshlet_count = cast(u32) actual_count
-    
-    center: v3
-    for vertex in mesh_vertices {
-        center += vertex.p
-    }
-    center /= cast(f32) len(mesh_vertices)
-    
-    radius_squared: f32
-    for vertex in mesh_vertices {
-        radius_squared = max(radius_squared, length_squared(vertex.p - center))
-    }
-    
-    mesh.center = center
-    mesh.radius = square_root(radius_squared)
-    
-    return true
+    return meshlet_count
 }

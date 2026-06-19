@@ -238,7 +238,7 @@ floor_v :: proc($T: typeid, v: [$N] f32) -> [N] T {
 
 ceil :: proc { ceil_s, ceil_v }
 ceil_s :: proc($T: typeid, f: f32) -> T {
-    result := cast(T) (simd.ceil(f) when F == lane_f32 else math.ceil(f))
+    result := cast(T) (simd.ceil(f) when T == lane_f32 else math.ceil(f))
     return result
 }
 ceil_v :: proc($T: typeid, v: [$N] f32) -> [N] T {
