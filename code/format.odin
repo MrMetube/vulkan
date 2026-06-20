@@ -1,3 +1,4 @@
+#+vet !unused-procedures
 package main
 
 import "base:runtime"

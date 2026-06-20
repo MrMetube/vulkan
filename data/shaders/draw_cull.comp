@@ -14,7 +14,7 @@ layout(push_constant) uniform Push_Data {
     Cull_Globals globals;
 };
 
-// the ballot code assumes that the subgroup size is 32, which needs to be revised for non NVidia architectures.
+// the ballot code assumes that the subgroup size is 32, which needs to be revised for non-NVidia architectures.
 
 void main() {
     uint group_index  = gl_WorkGroupID.x;
@@ -27,18 +27,18 @@ void main() {
     Mesh_p mesh               = globals.mesh_buffer[draw.v.mesh_index];
     uint_p draw_command_count = globals.draw_command_count;
     
-    
     vec3  center = transform(draw.v.orientation, draw.v.scale, draw.v.p, mesh.v.center);
     float radius = draw.v.scale * mesh.v.radius;
     
     bool visible = true;
     if (globals.frustum_culling_enabled) {
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < 5; i++) {
             vec4 plane = globals.frustum_planes[i];
             visible = visible && (dot(plane, vec4(center, 1)) > -radius);
         }
     }
     
+#if 0
     uvec4 ballot = subgroupBallot(visible);
     uint index   = subgroupBallotExclusiveBitCount(ballot); // how many threads, before this thread, had accept==true
     uint count   = subgroupBallotBitCount(ballot);          // how many threads, in total, had accept==true
@@ -51,6 +51,10 @@ void main() {
     }
     
     uint draw_command_index = subgroupBroadcastFirst(draw_command_group_index) + index;
+#else
+    uint draw_command_index = 0;
+    if (visible) draw_command_index = atomicAdd(draw_command_count.v, 1);
+#endif
     
     
     // @note(viktor): when disabling culling and drawing every mesh, there was a flickering every n-th frame.
@@ -58,26 +62,24 @@ void main() {
     // indefinitly.
     if (visible) {
         uint lod_index = 0;
-        if (globals.lod_enabled) 
-        {
+        if (globals.lod_enabled) {
             // @todo(viktor): The real camera world position.
             vec3 camera_position = globals.camera_p;
             float lod_distance = max(1, distance(center, camera_position) - radius);
             float log_lod_distance = log2(lod_distance);
-            
-            lod_index = int(lod_distance);
-            // lod_index = 1;
+            lod_index = int(log_lod_distance);
             
             lod_index = clamp(lod_index, 0, mesh.v.lod_count-1);
         }
         
         Draw_Command_p draw_command = globals.draw_command_buffer[draw_command_index];
-        draw_command.v.draw_id = draw_index;
+        draw_command.v.draw_id   = draw_index;
         draw_command.v.lod_index = lod_index; // :DrawAndLODData:
         
         Mesh_LOD lod = mesh.v.lods[lod_index];
         
-        draw_command.v.command.groupCountX = (lod.meshlet_count + TaskWidth-1) / TaskWidth;
+        uint meshlet_group_count = (lod.meshlet_count + TaskWidth-1) / TaskWidth;
+        draw_command.v.command.groupCountX = meshlet_group_count;
         draw_command.v.command.groupCountY = 1;
         draw_command.v.command.groupCountZ = 1;
     }

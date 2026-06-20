@@ -65,20 +65,18 @@ void main() {
     
     uint count;
     if (BACKFACE_CULLING) {
-        Meshlet meshlet = meshlet_buffer[meshlet_index];
-        
         bool accept = false;
         if (meshlet_index < (lod.meshlet_count + lod.meshlet_offset)) {
-            vec3 cone_axis   = vec3(meshlet.cone_axis[0], meshlet.cone_axis[1], meshlet.cone_axis[2]) / 127.0;
+            Meshlet meshlet = meshlet_buffer[meshlet_index];
+            
+            vec3 cone_axis    = vec3(meshlet.cone_axis[0], meshlet.cone_axis[1], meshlet.cone_axis[2]) / 127.0;
             float cone_cutoff = float(meshlet.cone_cutoff) / 127.0;
-            vec3 center      = meshlet.center;
-            float radius     = meshlet.radius;
+            vec3 center       = transform(draw.orientation, draw.scale, draw.p, meshlet.center);
+            float radius      = meshlet.radius * draw.scale;
             
             cone_axis = rotate(draw.orientation, cone_axis);
-            center    = transform(draw.orientation, draw.scale, draw.p, center);
-            radius   *= draw.scale;
             
-            vec3 camera_position = vec3(globals.view[0].w, globals.view[1].w, globals.view[2].w);
+            vec3 camera_position = mat3(globals.view) * globals.view[3].xyz;
             
             accept = !cone_cull(center, radius, cone_axis, cone_cutoff, camera_position);
         }

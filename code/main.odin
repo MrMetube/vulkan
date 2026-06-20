@@ -96,9 +96,6 @@ Mesh :: struct {
     vertex_offset: u32,
     vertex_count:  u32,
     
-    // @note(viktor): just for statistics, might become unused, @shader remove it once cleaned up here
-    triangle_count: u32,
-    
     lod_count: u32,
     lods:      [8] Mesh_LOD,
 }
@@ -178,9 +175,9 @@ main :: proc () {
     geometry: Geometry
     {
         paths := [?] string {
-            // "tutorial/suzanne.obj",
+            "tutorial/suzanne.obj",
             // "models/bunny.obj",
-            "models/lucy_280k.obj",
+            // "models/lucy_280k.obj",
         }
         
         for path in paths {
@@ -460,11 +457,33 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
+    stats_pool: vk.QueryPool
+    stats_bits := vk.QueryPipelineStatisticFlags {
+        .FRAGMENT_SHADER_INVOCATIONS,
+        .COMPUTE_SHADER_INVOCATIONS,
+        .TASK_SHADER_INVOCATIONS_EXT,
+        .MESH_SHADER_INVOCATIONS_EXT,
+    }
+    
+    {
+        StatsSize :: 1
+        create_info := vk.QueryPoolCreateInfo {
+            sType = .QUERY_POOL_CREATE_INFO,
+            queryType = .PIPELINE_STATISTICS,
+            pipelineStatistics = stats_bits,
+            queryCount = cast(u32) card(stats_bits),
+        }
+        check(vk.CreateQueryPool(device, &create_info, nil, &stats_pool))
+        defer_destroy(vk.DestroyQueryPool, stats_pool)
+    }
+    
+    ////////////////////////////////////////////////
+    
     // @speed is a pipeline cache still a good optimization?
     pipeline_cache: vk.PipelineCache = 0
     
-    meshlet_pipeline:         Pipeline
-    cull_pipeline: Pipeline
+    meshlet_pipeline: Pipeline
+    cull_pipeline:    Pipeline
     
     ////////////////////////////////////////////////
     
@@ -506,20 +525,14 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        // @todo(viktor): we currently include the time sdl.PollEvents and therefore windows window events take, which can just block us.
-        current_time  := time.tick_now()
-        delta_tick    := time.tick_diff(last_time, current_time)
-        delta_time_64 := time.duration_seconds(delta_tick)
-        delta_time := cast(f32) delta_time_64
-        last_time = current_time
-        
-        ////////////////////////////////////////////////
-        
         print_profile: bool
         
         mouse_delta: v2
+        mouse_wheel_delta: f32
         @(static) left_down: bool
         @(static) space_down: bool
+        
+        window_event_begin := time.tick_now()
         for event: sdl.Event; sdl.PollEvent(&event); {
             #partial switch event.type {
             case .QUIT:
@@ -548,11 +561,28 @@ main :: proc () {
                 }
                 
             case .MOUSE_WHEEL:
-                cam_pos.z += event.wheel.y * 10 * delta_time
+                mouse_wheel_delta = event.wheel.y
                 
             case .WINDOW_RESIZED:
                 should_recreate_swapchain = true
             }
+        }
+        
+        window_event_delta := time.tick_since(window_event_begin)
+        
+        ////////////////////////////////////////////////
+        
+        // Though we do not track the time, *we* take to handle the input, we also exclude all time taken by sdl and windows(which may block) with this
+        current_time  := time.tick_now()
+        delta_tick    := time.tick_diff(last_time, current_time)
+        delta_tick    -= window_event_delta
+        
+        delta_time_64 := time.duration_seconds(delta_tick)
+        delta_time := cast(f32) delta_time_64
+        last_time = current_time
+        
+        if mouse_wheel_delta != 0 {
+            cam_pos.z += mouse_wheel_delta * -10 * delta_time
         }
         
         if mouse_delta != 0 && left_down {
@@ -570,7 +600,6 @@ main :: proc () {
             should_recreate_swapchain = false
             
             vk.DeviceWaitIdle(device)
-            
             recreate_swapchain(ips, device, sdl_get_window_size(window), &swapchain)
         }
         
@@ -617,26 +646,22 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        triangles_this_frame: u32
-        
-        entropy := seed_random_series(5156)
-        when !false {
-            @(static) draws: [50] Draw
+        entropy := seed_random_series(54654)
+        when true {
+            @(static) draws: [500] Draw
+            global_rotation := la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX)
             for &draw in draws {
-                p := random_bilateral(&entropy, v3) * {20, 15, 60}
+                p := random_bilateral(&entropy, v3) * {10, 10, 10} - {0, 0, 20}
                 
                 draw.p           = p
-                draw.scale       = linear_blend(cast(f32) 1, 4, square(random_unilateral(&entropy, f32)))
+                draw.scale       = linear_blend(cast(f32) .1, .4, square(random_unilateral(&entropy, f32)))
                 rotation        := la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
-                global_rotation := la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX)
                 draw.orientation = rotation * global_rotation
                 
                 mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
                 
                 draw.mesh_index    = mesh_index
                 draw.vertex_offset = mesh.vertex_offset
-                
-                triangles_this_frame += mesh.triangle_count
             }
         } else {
             @(static) draws: [1] Draw
@@ -651,8 +676,6 @@ main :: proc () {
                 
                 draw.mesh_index    = mesh_index
                 draw.vertex_offset = mesh.vertex_offset
-                
-                triangles_this_frame += mesh.triangle_count
             }
         }
         
@@ -660,24 +683,23 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        projection_reversed_z :: proc (fov_y, aspect_w_h, near_z: f32) -> m4 { // :ReversedZ:
+        projection_reversed_z_infinite_far_plane :: proc (fov_y, aspect_w_h, near_z: f32) -> m4 { // :ReversedZ:
             f := 1 / tan(fov_y / 2)
-            a := f / aspect_w_h
-            b := f
-            c := near_z
+            x := f / aspect_w_h
+            y := f
+            n := near_z
             
-            // due to homogenous coordinates, z is effectively 1/z
             result := m4 {
-                a,  0,  0, 0,
-                0,  b,  0, 0,
-                0,  0,  0, c,
-                0,  0, -1, 0, // -1 in the original blog post
+                x,  0,  0,  0,
+                0,  y,  0,  0,
+                0,  0,  0,  n,
+                0,  0, -1,  0,
             }
             
             return result
         }
         
-        projection := projection_reversed_z(70 * RadPerDeg, cast(f32) swapchain.size.x / cast(f32) swapchain.size.y, 0.01)
+        projection := projection_reversed_z_infinite_far_plane(70 * RadPerDeg, cast(f32) swapchain.size.x / cast(f32) swapchain.size.y, 0.01)
         view       := translate(1, -cam_pos)
         draw_globals.projection = projection
         draw_globals.view       = view
@@ -687,15 +709,15 @@ main :: proc () {
         
         frustum_planes: [6] v4
         if culling_enabled {
-            view_projection := projection * draw_globals.view
+            view_projection := projection * view
             cam_forward := v3{0, 0, -1}
             
-            frustum_planes[0] = get_column_v4(view_projection, 3) + get_column_v4(view_projection, 0) // x + w < 0
-            frustum_planes[1] = get_column_v4(view_projection, 3) - get_column_v4(view_projection, 0) // x - w > 0
-            frustum_planes[2] = get_column_v4(view_projection, 3) + get_column_v4(view_projection, 1) // y + w < 0
-            frustum_planes[3] = get_column_v4(view_projection, 3) - get_column_v4(view_projection, 1) // y - w > 0
-            frustum_planes[4] = get_column_v4(view_projection, 3) - get_column_v4(view_projection, 2) // z - w > 0 -- :ReversedZ:
-            frustum_planes[5] = v4{**cam_forward, draw_distance + dot(cam_forward, cam_pos)}          // :ReversedZ: infinite far plane
+            frustum_planes[0] = get_row_v4(view_projection, 3) + get_row_v4(view_projection, 0) // x + w < 0
+            frustum_planes[1] = get_row_v4(view_projection, 3) - get_row_v4(view_projection, 0) // x - w > 0
+            frustum_planes[2] = get_row_v4(view_projection, 3) + get_row_v4(view_projection, 1) // y + w < 0
+            frustum_planes[3] = get_row_v4(view_projection, 3) - get_row_v4(view_projection, 1) // y - w > 0
+            frustum_planes[4] = get_row_v4(view_projection, 3) - get_row_v4(view_projection, 2) // z - w > 0 -- :ReversedZ:
+            // frustum_planes[5] = v4{**cam_forward, draw_distance + dot(cam_forward, cam_pos)}          // :ReversedZ: infinite far plane
             
             for &plane in frustum_planes {
                 plane /= length(plane.xyz)
@@ -727,14 +749,13 @@ main :: proc () {
                 return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
             }
             
-            sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, cull time: %.3v, triangles: %v, %v triangles/s, culling %v, level of detail %v", 
+            // @todo(viktor): how can we record how many triangles we have rendered after culling?
+            sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, cull time: %.3v, culling %v, level of detail %v", 
                 view(cpu_time), 
                 view(gpu_time), 
                 view(cull_delta), 
-                view_magnitude(triangles_this_frame), 
-                view_magnitude(cast(u64) (cast(f64) triangles_this_frame / gpu_time)),
                 culling_enabled ? "on" : "off",
-                lod_enabled ? "on" : "off",
+                lod_enabled     ? "on" : "off",
             ))
         }
         
@@ -745,6 +766,9 @@ main :: proc () {
         
         check(vk.BeginCommandBuffer(cb, &vk.CommandBufferBeginInfo { sType = .COMMAND_BUFFER_BEGIN_INFO, flags = { .ONE_TIME_SUBMIT } }))
         
+        vk.ResetQueryPool(device, stats_pool, 0, cast(u32) card(stats_bits))
+        
+        vk.CmdBeginQuery(cb, stats_pool, 0, {})
         gpu_profile_frame_begin(device, cb)
         
         ////////////////////////////////////////////////
@@ -861,6 +885,7 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         gpu_profile_frame_end()
+        vk.CmdEndQuery(cb, stats_pool, 0)
         
         vk.EndCommandBuffer(cb)
         
@@ -893,6 +918,26 @@ main :: proc () {
         // @note(viktor): this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
         if gpu_delta >= 0 {
             gpu_time = time_smoothed_blend(delta_time_64, gpu_time, gpu_delta)
+        }
+        
+        ////////////////////////////////////////////////
+        
+        {
+            stats_result: [128] u64
+            size := cast(int) size_of_slice(stats_result[:])
+            query_result := vk.GetQueryPoolResults(device, stats_pool, 0, 1, size, &stats_result[0], size_of(stats_result[0]), { ._64, .WAIT })
+            check(query_result)
+            
+            if print_profile {    
+                fmt.println("------------------------------------\nStats:")
+                index: int
+                for bit in stats_bits { defer index += 1
+                    stat_value := stats_result[index]
+                    fmt.printfln("  %v = %v", bit, stat_value)
+                    
+                }
+                fmt.printfln("-------------------------------------")
+            }
         }
     }
     

@@ -128,6 +128,7 @@ create_instance_physical_device_and_surface :: proc (window: ^sdl.Window, get_in
             ppEnabledExtensionNames = &instance_extensions[0],
         }
         
+        _ :: runtime
         when !Optimized {
             validation_layers := [] cstring { "VK_LAYER_KHRONOS_validation" }
             instance_create_info.enabledLayerCount   = auto_cast len(validation_layers)
@@ -157,7 +158,7 @@ create_instance_physical_device_and_surface :: proc (window: ^sdl.Window, get_in
                     sType = .VALIDATION_FEATURES_EXT,
                     enabledValidationFeatureCount = len(enabled),
                     pEnabledValidationFeatures = &enabled[0],
-                }
+                },
             }
         }
         
@@ -271,6 +272,8 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
                 samplerAnisotropy = true, // required since 1.4
                 shaderInt16       = true, // required since 1.4
                 shaderInt64       = true,
+                
+                pipelineStatisticsQuery = true,
             },
         
         // These features are guaranteed to be supported, if the device suppports vulkan 1.4
@@ -323,6 +326,7 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
             
             meshShader = true, // 57.18% (vulkan.gpuinfo.org for "1.4 and up" on 18.06.2026)
             taskShader = true,
+            meshShaderQueries = true,
         },
         },
         },
