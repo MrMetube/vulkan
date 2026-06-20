@@ -153,11 +153,20 @@ swap :: proc (a, b: ^$T ) { a^, b^ = b^, a^ }
 
 unused :: proc (_: $T) {}
 
-append_into :: proc (array: ^[dynamic] $T) -> ^T {
+append_into :: proc { append_into_array, append_into_fixed_array }
+append_into_array :: proc (array: ^[dynamic] $T) -> ^T {
     appended := append_nothing(array)
     result: ^T 
     if appended != 0 {
         result = last(array^)
+    }
+    return result
+}
+append_into_fixed_array :: proc (array: ^[dynamic; $N] $T) -> ^T {
+    appended, ok := append_nothing(array)
+    result: ^T 
+    if appended != 0 && ok {
+        result = last(array)
     }
     return result
 }

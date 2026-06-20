@@ -45,7 +45,7 @@ Shader :: struct {
     bytes:  [] u8,
     
     // @todo(viktor): these are unused right now, but should be used in pipeline creation and usage to make it less volatile
-    resource_mask:      bit_set[cast(u32) 0..<32],
+    resource_mask:      Shader_Resource_Mask,
     resource_types:     [32] vk.DescriptorType,
     use_push_constants: bool,
     local_size:         [3] u32,
@@ -53,6 +53,8 @@ Shader :: struct {
     source_watcher: Watcher_Id,
     common_watcher: Watcher_Id,
 }
+
+Shader_Resource_Mask :: bit_set[cast(u32) 0..<32; u32]
 
 Image :: struct {
     format: vk.Format,
@@ -654,7 +656,7 @@ create_pipeline_layout :: proc (device: vk.Device, stage_flags: vk.ShaderStageFl
     return result
 }
 
-create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, shader: Shader, storage_buffer_count: u32, set_layout: vk.DescriptorSetLayout, old: Pipeline = {}) -> Pipeline {
+create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, shader: Shader, set_layout: vk.DescriptorSetLayout, old: Pipeline = {}) -> Pipeline {
     if pipeline_is_valid(old) {
         check(vk.DeviceWaitIdle(device))
         destroy_pipeline(device, old)
@@ -684,14 +686,12 @@ create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sha
     
     check(vk.CreateComputePipelines(device, cache, 1, &create_info, nil, &result.pipeline))
     
-    if storage_buffer_count != 0 {
-        result.update_template = create_update_template(device, .COMPUTE, result.layout, storage_buffer_count)
-    }
+    result.update_template = create_update_template(device, .COMPUTE, result.layout, shader)
     
     return result
 }
 
-create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, swapchain: Swapchain, set_layouts: [] vk.DescriptorSetLayout, shaders: [] Shader, storage_buffer_count: u32, old: Pipeline = {}) -> Pipeline {
+create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, swapchain: Swapchain, set_layouts: [] vk.DescriptorSetLayout, shaders: [] Shader, old: Pipeline = {}) -> Pipeline {
     if pipeline_is_valid(old) {
         check(vk.DeviceWaitIdle(device))
         destroy_pipeline(device, old)
@@ -777,39 +777,97 @@ create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sw
     
     check(vk.CreateGraphicsPipelines(device, cache, 1,&create_info, nil, &result.pipeline))
     
-    if storage_buffer_count != 0 {
-        result.update_template = create_update_template(device, .GRAPHICS, result.layout, storage_buffer_count)
-    }
+    result.update_template = create_update_template(device, .GRAPHICS, result.layout, ..shaders)
     
     return result
 }
 
-create_update_template :: proc (device: vk.Device, bind_point: vk. PipelineBindPoint, layout: vk.PipelineLayout, storage_buffer_count: u32) -> vk.DescriptorUpdateTemplate {
-    assert(storage_buffer_count != 0)
+gather_descriptor_resources :: proc (shaders: ..Shader) -> ([32] vk.DescriptorType, Shader_Resource_Mask) {
+    resource_types: [32] vk.DescriptorType
+    resource_mask: Shader_Resource_Mask
     
-    // @todo(viktor): The information of which shader stage needs which storage buffer could be parsed from the compiled spirv file.
-    update_template_entries: [dynamic; 32] vk.DescriptorUpdateTemplateEntry
-    for index in 0..<storage_buffer_count {
-        append(&update_template_entries, vk.DescriptorUpdateTemplateEntry {
-            dstBinding      = index,
-            descriptorType  = .STORAGE_BUFFER,
-            descriptorCount = 1,
-            offset          = cast(int) index * size_of(DescriptorUpdateData),
-            stride          = size_of(DescriptorUpdateData),
-        })
+    for shader in shaders {
+        for i in shader.resource_mask {
+            if i in resource_mask {
+                assert(resource_types[i] == shader.resource_types[i], "Mismatching binding types in shaders")
+            } else {
+                resource_types[i] = shader.resource_types[i]
+                resource_mask += { i }
+            }
+        }
     }
+    
+    return resource_types, resource_mask
+}
+
+create_descriptor_set_layout :: proc (device: vk.Device, shaders: ..Shader) -> vk.DescriptorSetLayout {
+    bindings: [dynamic; 32] vk.DescriptorSetLayoutBinding
+    resource_types, resource_mask := gather_descriptor_resources(..shaders)
+    
+    for i in resource_mask {
+        binding := append_into(&bindings)
         
-    update_template_create_info := vk.DescriptorUpdateTemplateCreateInfo {
-        sType = .DESCRIPTOR_UPDATE_TEMPLATE_CREATE_INFO,
-        pipelineBindPoint   = bind_point,
-        pipelineLayout      = layout,
-        templateType        = .PUSH_DESCRIPTORS,
-        descriptorUpdateEntryCount = cast(u32) len(update_template_entries),
-        pDescriptorUpdateEntries   = &update_template_entries[0],
+        binding^ = {
+            binding         = i,
+            
+            descriptorType  = resource_types[i],
+            descriptorCount = 1,
+        }
+        
+        for shader in shaders {
+            if i in shader.resource_mask {
+                binding.stageFlags += { shader.stage }
+            }
+        }
+    }
+    
+    create_info := vk.DescriptorSetLayoutCreateInfo {
+        sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        flags        = { .PUSH_DESCRIPTOR },
+        bindingCount = auto_cast len(bindings),
+        pBindings    = raw_data(bindings[:]),
+    }
+    
+    result: vk.DescriptorSetLayout
+    
+    check(vk.CreateDescriptorSetLayout(device, &create_info, nil, &result))
+    defer_destroy(vk.DestroyDescriptorSetLayout, result)
+    
+    return result
+}
+
+create_update_template :: proc (device: vk.Device, bind_point: vk. PipelineBindPoint, layout: vk.PipelineLayout, shaders: ..Shader) -> vk.DescriptorUpdateTemplate {
+    entries: [dynamic; 32] vk.DescriptorUpdateTemplateEntry
+    resource_types, resource_mask := gather_descriptor_resources(..shaders)
+    
+    for i in cast(u32) 0..<32 {
+        if i in resource_mask {
+            entry := append_into(&entries)
+            
+            entry^ = {
+                dstBinding      = i,
+                descriptorType  = resource_types[i],
+                descriptorCount = 1,
+                offset          = cast(int) i * size_of(DescriptorUpdateData),
+                stride          = size_of(DescriptorUpdateData),
+            }
+        }
     }
     
     result: vk.DescriptorUpdateTemplate
-    check(vk.CreateDescriptorUpdateTemplate(device, &update_template_create_info, nil, &result))
+    
+    if len(entries) > 0 {
+        create_info := vk.DescriptorUpdateTemplateCreateInfo {
+            sType = .DESCRIPTOR_UPDATE_TEMPLATE_CREATE_INFO,
+            pipelineBindPoint = bind_point,
+            pipelineLayout    = layout,
+            templateType      = .PUSH_DESCRIPTORS,
+            descriptorUpdateEntryCount = cast(u32) len(entries),
+            pDescriptorUpdateEntries   = &entries[0],
+        }
+        
+        check(vk.CreateDescriptorUpdateTemplate(device, &create_info, nil, &result))
+    }
     
     return result
 }

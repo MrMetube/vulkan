@@ -19,14 +19,6 @@ layout(push_constant) uniform Push_Data {
     Draw_Globals globals;
 };
 
-// @volatile
-struct Vertex {
-    vec3 p; float p_pad;
-    uint8_t  nx, ny, nz, n_pad;
-	vec2 t;
-};
-
-
 layout(binding = 0, std430, scalar) readonly buffer Draws {
 	Draw draw_buffer[];
 };
@@ -104,15 +96,14 @@ void main() {
         p += draw.p;
         vec4 view_p = vec4(p, 1.0);
         
-        vec3 n = vec3(vertex.nx, vertex.ny, vertex.nz) / 127.0 - 1.0;
-        vec2 t = vertex.t;
+        vec3 n = vec3(vertex.n[0], vertex.n[1], vertex.n[2]) / 127.0 - 1.0;
         
         Mesh_Result result;
         view_p = globals.view * view_p;
         
         vec4 position = globals.projection * (globals.view * view_p);
         result.normal = mat3(globals.view) * n;
-        result.uv     = t;
+        result.uv     = vertex.uv;
         
         for (int li = 0; li < 4; li++) {
             result.light_vec[li] = globals.light_pos[li].xyz - view_p.xyz;
@@ -152,5 +143,4 @@ void main() {
             gl_PrimitiveTriangleIndicesEXT[triangle_index + 3] = uvec3((u2 >>  8) & 0xFF, (u2 >> 16) & 0xFF, (u2 >> 24) & 0xFF);
         }
     }
-    
 }

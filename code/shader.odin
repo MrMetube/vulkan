@@ -32,6 +32,7 @@ generate_shader_api :: proc (output_file: string) {
     append_simple_struct(&builder, Mesh_LOD)
     append_simple_struct(&builder, Mesh)
     append_simple_struct(&builder, Meshlet)
+    append_simple_struct(&builder, Vertex)
     
     append_buffer_reference_struct(&builder, Cull_Globals)
     append_buffer_reference_struct(&builder, Draw_Globals)
@@ -60,7 +61,7 @@ generate_shader_api :: proc (output_file: string) {
         case: 
             if array_type, ok := info.variant.(runtime.Type_Info_Array); ok {
                 array_string = fmt.tprintf("[%v]", array_type.count)
-                type_name = fmt.tprint(get_type_name(array_type.elem))
+                type_name = fmt.tprintf("%v%v", get_type_name(array_type.elem))
             } else {
                 type_name = fmt.tprint(info.id)
             }
@@ -211,15 +212,18 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
             opcode:   SpvOp,
             type_id:  u32,
             
-            set: u32,
+            set:     u32,
             binding: u32,
             
             constant: u32,
             storage_class: SpvStorageClass,
         }
+        
         ids := make([] Id, id_bound, context.temp_allocator)
         
-        code     := shader_code[5:]
+        for &id in ids { id.binding = 0xff }
+        
+        code := shader_code[5:]
         
         local_size: [3] i32 = -1
         
@@ -257,67 +261,78 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
                     local_size.z = cast(i32) code[5]
                 }
                 
+            case .Decorate:
+                id := code[1]
+                decoration := cast(SpvDecoration) code[2]
+                
+                #partial switch decoration {
+                case .DescriptorSet:
+                    ids[id].set = code[3]
+                case .Binding:
+                    ids[id].binding = code[3]
+                }
+                
+            case .TypeStruct, .TypeImage, .TypeSampler, .TypeSampledImage:
+                id := code[1]
+                assert(ids[id].opcode == {})
+                
+                ids[id].opcode = opcode
+                
             case .Constant:
                 id := code[2]
                 assert(ids[id].opcode == {})
                 
-                ids[id] = { 
-                    opcode   = opcode,
-                    type_id  = code[1],
-                    constant = code[3], 
-                }
+                ids[id].opcode   = opcode
+                ids[id].type_id  = code[1]
+                ids[id].constant = code[3]
                     
             case .Variable:
                 id := code[2]
                 assert(ids[id].opcode == {})
                 
-                ids[id] = { 
-                    opcode        = opcode,
-                    type_id       = code[1],
-                    storage_class = cast(SpvStorageClass) code[3], 
-                }
+                ids[id].opcode        = opcode
+                ids[id].type_id       = code[1]
+                ids[id].storage_class = cast(SpvStorageClass) code[3]
                 
             case .TypePointer:
                 id := code[1]
                 assert(ids[id].opcode == {})
                 
-                ids[id] = { 
-                    opcode        = opcode,
-                    type_id       = code[3],
-                    storage_class = cast(SpvStorageClass) code[2], 
-                }
+                ids[id].opcode        = opcode
+                ids[id].type_id       = code[3]
+                ids[id].storage_class = cast(SpvStorageClass) code[2]
             }
             
             code = code[word_count:]
         }
         
         for id in ids {
-            if id.opcode == .Variable && (id.storage_class == .Uniform || id.storage_class == .UniformConstant || id.storage_class == .StorageBuffer ) {
-                assert(id.set == 0)
-                assert(id.binding < 32)
-                assert(ids[id.type_id].opcode == .TypePointer)
-                
-                assert(id.binding not_in result.resource_mask)
-                
-                type_kind := ids[ids[id.type_id].type_id].opcode
-                
-                #partial switch type_kind {
-                case .TypeStruct:       
-                    result.resource_types[id.binding] = .STORAGE_BUFFER
-                    result.resource_mask += { id.binding }
+            if id.opcode == .Variable && id.storage_class in (bit_set[SpvStorageClass] { .Uniform, .UniformConstant, .StorageBuffer}) {
+                if id.set == 0 {
+                    assert(id.binding < 32)
+                    assert(ids[id.type_id].opcode == .TypePointer)
                     
-                case .TypeImage:        
-                    result.resource_types[id.binding] = .STORAGE_IMAGE
-                    result.resource_mask += { id.binding }
+                    assert(id.binding not_in result.resource_mask)
                     
-                case .TypeSampler:      
-                    result.resource_types[id.binding] = .SAMPLER
-                    result.resource_mask += { id.binding }
+                    type_kind := ids[ids[id.type_id].type_id].opcode
                     
-                case .TypeSampledImage: 
-                    result.resource_types[id.binding] = .COMBINED_IMAGE_SAMPLER
-                    result.resource_mask += { id.binding }
-                    
+                    #partial switch type_kind {
+                    case .TypeStruct:       
+                        result.resource_types[id.binding] = .STORAGE_BUFFER
+                        result.resource_mask += { id.binding }
+                        
+                    case .TypeImage:        
+                        result.resource_types[id.binding] = .STORAGE_IMAGE
+                        result.resource_mask += { id.binding }
+                        
+                    case .TypeSampler:      
+                        result.resource_types[id.binding] = .SAMPLER
+                        result.resource_mask += { id.binding }
+                        
+                    case .TypeSampledImage: 
+                        result.resource_types[id.binding] = .COMBINED_IMAGE_SAMPLER
+                        result.resource_mask += { id.binding }
+                    }
                 }
             }
             
@@ -379,6 +394,210 @@ get_group_count :: proc (shader: Shader, count_x: u32 = 1, count_y: u32 = 1, cou
 
 @(private="file")
 SpvMagicNumber :: 0x07230203
+
+@(private="file")
+SpvDecoration :: enum u32 {
+    RelaxedPrecision = 0,
+    SpecId = 1,
+    Block = 2,
+    BufferBlock = 3,
+    RowMajor = 4,
+    ColMajor = 5,
+    ArrayStride = 6,
+    MatrixStride = 7,
+    GLSLShared = 8,
+    GLSLPacked = 9,
+    CPacked = 10,
+    BuiltIn = 11,
+    NoPerspective = 13,
+    Flat = 14,
+    Patch = 15,
+    Centroid = 16,
+    Sample = 17,
+    Invariant = 18,
+    Restrict = 19,
+    Aliased = 20,
+    Volatile = 21,
+    Constant = 22,
+    Coherent = 23,
+    NonWritable = 24,
+    NonReadable = 25,
+    Uniform = 26,
+    UniformId = 27,
+    SaturatedConversion = 28,
+    Stream = 29,
+    Location = 30,
+    Component = 31,
+    Index = 32,
+    Binding = 33,
+    DescriptorSet = 34,
+    Offset = 35,
+    XfbBuffer = 36,
+    XfbStride = 37,
+    FuncParamAttr = 38,
+    FPRoundingMode = 39,
+    FPFastMathMode = 40,
+    LinkageAttributes = 41,
+    NoContraction = 42,
+    InputAttachmentIndex = 43,
+    Alignment = 44,
+    MaxByteOffset = 45,
+    AlignmentId = 46,
+    MaxByteOffsetId = 47,
+    SaturatedToLargestFloat8NormalConversionEXT = 4216,
+    NoSignedWrap = 4469,
+    NoUnsignedWrap = 4470,
+    WeightTextureQCOM = 4487,
+    BlockMatchTextureQCOM = 4488,
+    BlockMatchSamplerQCOM = 4499,
+    ExplicitInterpAMD = 4999,
+    NodeSharesPayloadLimitsWithAMDX = 5019,
+    NodeMaxPayloadsAMDX = 5020,
+    TrackFinishWritingAMDX = 5078,
+    PayloadNodeNameAMDX = 5091,
+    PayloadNodeBaseIndexAMDX = 5098,
+    PayloadNodeSparseArrayAMDX = 5099,
+    PayloadNodeArraySizeAMDX = 5100,
+    PayloadDispatchIndirectAMDX = 5105,
+    ArrayStrideIdEXT = 5124,
+    OffsetIdEXT = 5125,
+    UTFEncodedKHR = 5145,
+    OverrideCoverageNV = 5248,
+    PassthroughNV = 5250,
+    ViewportRelativeNV = 5252,
+    SecondaryViewportRelativeNV = 5256,
+    PerPrimitiveEXT = 5271,
+    PerPrimitiveNV = 5271,
+    PerViewNV = 5272,
+    PerTaskNV = 5273,
+    PerVertexKHR = 5285,
+    PerVertexNV = 5285,
+    NonUniform = 5300,
+    NonUniformEXT = 5300,
+    RestrictPointer = 5355,
+    RestrictPointerEXT = 5355,
+    AliasedPointer = 5356,
+    AliasedPointerEXT = 5356,
+    MemberOffsetNV = 5358,
+    HitObjectShaderRecordBufferNV = 5386,
+    HitObjectShaderRecordBufferEXT = 5389,
+    BankNV = 5397,
+    BindlessSamplerNV = 5398,
+    BindlessImageNV = 5399,
+    BoundSamplerNV = 5400,
+    BoundImageNV = 5401,
+    SIMTCallINTEL = 5599,
+    ReferencedIndirectlyINTEL = 5602,
+    ClobberINTEL = 5607,
+    SideEffectsINTEL = 5608,
+    VectorComputeVariableINTEL = 5624,
+    FuncParamIOKindINTEL = 5625,
+    VectorComputeFunctionINTEL = 5626,
+    StackCallINTEL = 5627,
+    GlobalVariableOffsetINTEL = 5628,
+    CounterBuffer = 5634,
+    HlslCounterBufferGOOGLE = 5634,
+    HlslSemanticGOOGLE = 5635,
+    UserSemantic = 5635,
+    UserTypeGOOGLE = 5636,
+    FunctionRoundingModeINTEL = 5822,
+    FunctionDenormModeINTEL = 5823,
+    RegisterALTERA = 5825,
+    RegisterINTEL = 5825,
+    MemoryALTERA = 5826,
+    MemoryINTEL = 5826,
+    NumbanksALTERA = 5827,
+    NumbanksINTEL = 5827,
+    BankwidthALTERA = 5828,
+    BankwidthINTEL = 5828,
+    MaxPrivateCopiesALTERA = 5829,
+    MaxPrivateCopiesINTEL = 5829,
+    SinglepumpALTERA = 5830,
+    SinglepumpINTEL = 5830,
+    DoublepumpALTERA = 5831,
+    DoublepumpINTEL = 5831,
+    MaxReplicatesALTERA = 5832,
+    MaxReplicatesINTEL = 5832,
+    SimpleDualPortALTERA = 5833,
+    SimpleDualPortINTEL = 5833,
+    MergeALTERA = 5834,
+    MergeINTEL = 5834,
+    BankBitsALTERA = 5835,
+    BankBitsINTEL = 5835,
+    ForcePow2DepthALTERA = 5836,
+    ForcePow2DepthINTEL = 5836,
+    StridesizeALTERA = 5883,
+    StridesizeINTEL = 5883,
+    WordsizeALTERA = 5884,
+    WordsizeINTEL = 5884,
+    TrueDualPortALTERA = 5885,
+    TrueDualPortINTEL = 5885,
+    BurstCoalesceALTERA = 5899,
+    BurstCoalesceINTEL = 5899,
+    CacheSizeALTERA = 5900,
+    CacheSizeINTEL = 5900,
+    DontStaticallyCoalesceALTERA = 5901,
+    DontStaticallyCoalesceINTEL = 5901,
+    PrefetchALTERA = 5902,
+    PrefetchINTEL = 5902,
+    StallEnableALTERA = 5905,
+    StallEnableINTEL = 5905,
+    FuseLoopsInFunctionALTERA = 5907,
+    FuseLoopsInFunctionINTEL = 5907,
+    MathOpDSPModeALTERA = 5909,
+    MathOpDSPModeINTEL = 5909,
+    AliasScopeINTEL = 5914,
+    NoAliasINTEL = 5915,
+    InitiationIntervalALTERA = 5917,
+    InitiationIntervalINTEL = 5917,
+    MaxConcurrencyALTERA = 5918,
+    MaxConcurrencyINTEL = 5918,
+    PipelineEnableALTERA = 5919,
+    PipelineEnableINTEL = 5919,
+    BufferLocationALTERA = 5921,
+    BufferLocationINTEL = 5921,
+    IOPipeStorageALTERA = 5944,
+    IOPipeStorageINTEL = 5944,
+    FunctionFloatingPointModeINTEL = 6080,
+    SingleElementVectorINTEL = 6085,
+    VectorComputeCallableFunctionINTEL = 6087,
+    MediaBlockIOINTEL = 6140,
+    StallFreeALTERA = 6151,
+    StallFreeINTEL = 6151,
+    FPMaxErrorDecorationINTEL = 6170,
+    LatencyControlLabelALTERA = 6172,
+    LatencyControlLabelINTEL = 6172,
+    LatencyControlConstraintALTERA = 6173,
+    LatencyControlConstraintINTEL = 6173,
+    ConduitKernelArgumentALTERA = 6175,
+    ConduitKernelArgumentINTEL = 6175,
+    RegisterMapKernelArgumentALTERA = 6176,
+    RegisterMapKernelArgumentINTEL = 6176,
+    MMHostInterfaceAddressWidthALTERA = 6177,
+    MMHostInterfaceAddressWidthINTEL = 6177,
+    MMHostInterfaceDataWidthALTERA = 6178,
+    MMHostInterfaceDataWidthINTEL = 6178,
+    MMHostInterfaceLatencyALTERA = 6179,
+    MMHostInterfaceLatencyINTEL = 6179,
+    MMHostInterfaceReadWriteModeALTERA = 6180,
+    MMHostInterfaceReadWriteModeINTEL = 6180,
+    MMHostInterfaceMaxBurstALTERA = 6181,
+    MMHostInterfaceMaxBurstINTEL = 6181,
+    MMHostInterfaceWaitRequestALTERA = 6182,
+    MMHostInterfaceWaitRequestINTEL = 6182,
+    StableKernelArgumentALTERA = 6183,
+    StableKernelArgumentINTEL = 6183,
+    HostAccessINTEL = 6188,
+    InitModeALTERA = 6190,
+    InitModeINTEL = 6190,
+    ImplementInRegisterMapALTERA = 6191,
+    ImplementInRegisterMapINTEL = 6191,
+    ConditionalINTEL = 6247,
+    CacheControlLoadINTEL = 6442,
+    CacheControlStoreINTEL = 6443,
+    Max = 0x7fffffff,
+}
+
 
 @(private="file")
 SpvExecutionMode :: enum  u32 {
@@ -532,32 +751,32 @@ SpvStorageClass :: enum u32 {
     AtomicCounter = 10,
     Image = 11,
     StorageBuffer = 12,
-    TileImageEXT = 4172,
-    TileAttachmentQCOM = 4491,
-    NodePayloadAMDX = 5068,
-    CallableDataKHR = 5328,
-    CallableDataNV = 5328,
-    IncomingCallableDataKHR = 5329,
-    IncomingCallableDataNV = 5329,
-    RayPayloadKHR = 5338,
-    RayPayloadNV = 5338,
-    HitAttributeKHR = 5339,
-    HitAttributeNV = 5339,
-    IncomingRayPayloadKHR = 5342,
-    IncomingRayPayloadNV = 5342,
-    ShaderRecordBufferKHR = 5343,
-    ShaderRecordBufferNV = 5343,
-    PhysicalStorageBuffer = 5349,
-    PhysicalStorageBufferEXT = 5349,
-    HitObjectAttributeNV = 5385,
-    TaskPayloadWorkgroupEXT = 5402,
-    HitObjectAttributeEXT = 5411,
-    CodeSectionINTEL = 5605,
-    DeviceOnlyALTERA = 5936,
-    DeviceOnlyINTEL = 5936,
-    HostOnlyALTERA = 5937,
-    HostOnlyINTEL = 5937,
-    Max = 0x7fffffff,
+    // TileImageEXT = 4172,
+    // TileAttachmentQCOM = 4491,
+    // NodePayloadAMDX = 5068,
+    // CallableDataKHR = 5328,
+    // CallableDataNV = 5328,
+    // IncomingCallableDataKHR = 5329,
+    // IncomingCallableDataNV = 5329,
+    // RayPayloadKHR = 5338,
+    // RayPayloadNV = 5338,
+    // HitAttributeKHR = 5339,
+    // HitAttributeNV = 5339,
+    // IncomingRayPayloadKHR = 5342,
+    // IncomingRayPayloadNV = 5342,
+    // ShaderRecordBufferKHR = 5343,
+    // ShaderRecordBufferNV = 5343,
+    // PhysicalStorageBuffer = 5349,
+    // PhysicalStorageBufferEXT = 5349,
+    // HitObjectAttributeNV = 5385,
+    // TaskPayloadWorkgroupEXT = 5402,
+    // HitObjectAttributeEXT = 5411,
+    // CodeSectionINTEL = 5605,
+    // DeviceOnlyALTERA = 5936,
+    // DeviceOnlyINTEL = 5936,
+    // HostOnlyALTERA = 5937,
+    // HostOnlyINTEL = 5937,
+    // Max = 0x7fffffff,
 }
 
 @(private="file")

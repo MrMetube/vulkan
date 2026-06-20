@@ -9,7 +9,7 @@ layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
 // @volatile
 
 // layout(binding = 0) sampler2D Input;
-layout(binding = 0) uniform writeonly image2D Output;
+layout(binding = 0, r32f) uniform writeonly image2D Output;
 
 void main() {
     uvec2 pixel = gl_GlobalInvocationID.xy;

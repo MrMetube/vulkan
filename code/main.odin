@@ -284,13 +284,36 @@ main :: proc () {
     }
     
     ////////////////////////////////////////////////
+    
+    generate_shader_api("shaders/api.generated.glslh")
+    
+    shader_allocator := context.allocator
+    
+    shader_files := make([dynamic] string, context.temp_allocator)
+    get_all_files_with_extension(&shader_files, "shaders", shader_allocator, ".frag", ".mesh", ".task")
+    
+    watcher_allocator := context.allocator
+    watchers := make([dynamic] Watcher, watcher_allocator)
+    
+    
+    meshlet_shaders: [dynamic] Shader
+    for file in shader_files {
+        // @speed we duplicate this watcher per shader, so that each shader can keep track of the header being changed and be recompiled independently from other shaders, without effecting their modification test.
+        common_watcher_id := watchers_make(&watchers, "shaders/common.glslh")
+        shader := init_shader_and_watchers(&watchers, common_watcher_id, file, shader_allocator)
+        append(&meshlet_shaders, shader)
+    }
+    
+    draw_cull_shader    := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/draw_cull.comp",    shader_allocator)
+    depth_reduce_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/depth_reduce.comp", shader_allocator)
+    
+    ////////////////////////////////////////////////
     // @todo put all buffer addresses into the push constant and remove these bindings
     // @shader needs to match the bindings in shaders
-    GraphicsStorageBufferCount :: 6
     
-    graphics_descriptor_set_layout: vk.DescriptorSetLayout
-    {
-        bindings := [GraphicsStorageBufferCount] vk.DescriptorSetLayoutBinding {
+    graphics_descriptor_set_layout := create_descriptor_set_layout(device, ..meshlet_shaders[:])
+    if false {
+        bindings := [?] vk.DescriptorSetLayoutBinding {
             { // draw
                 binding = 0,
                 descriptorType  = .STORAGE_BUFFER,
@@ -341,52 +364,9 @@ main :: proc () {
     }
     
     ////////////////////////////////////////////////
-    // @shader draw_cull.comp
     
-    CullingStorageBufferCount :: 0
-    
-    cull_descriptor_set_layout: vk.DescriptorSetLayout
-    {
-        bindings := [CullingStorageBufferCount] vk.DescriptorSetLayoutBinding {
-        }
-        
-        create_info := vk.DescriptorSetLayoutCreateInfo {
-            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            flags        = { .PUSH_DESCRIPTOR },
-            bindingCount = len(bindings),
-            pBindings    = raw_data(bindings[:]),
-        }
-        
-        check(vk.CreateDescriptorSetLayout(device, &create_info, nil, &cull_descriptor_set_layout))
-        defer_destroy(vk.DestroyDescriptorSetLayout, cull_descriptor_set_layout)
-    }
-    
-    ////////////////////////////////////////////////
-    // @shader depth_reduce.comp
-    
-    DepthStorageBufferCount :: 1
-    depth_descriptor_set_layout: vk.DescriptorSetLayout
-    {
-        // @todo get the stage flags from the shader itself, i.e. depth_reduce.stage
-        bindings := [DepthStorageBufferCount] vk.DescriptorSetLayoutBinding {
-            { // output
-                binding = 0,
-                descriptorType  = .STORAGE_IMAGE,
-                descriptorCount = 1,
-                stageFlags      = { .COMPUTE },
-            },
-        }
-        
-        create_info := vk.DescriptorSetLayoutCreateInfo {
-            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            flags        = { .PUSH_DESCRIPTOR },
-            bindingCount = len(bindings),
-            pBindings    = raw_data(bindings[:]),
-        }
-        
-        check(vk.CreateDescriptorSetLayout(device, &create_info, nil, &cull_descriptor_set_layout))
-        defer_destroy(vk.DestroyDescriptorSetLayout, cull_descriptor_set_layout)
-    }
+    cull_descriptor_set_layout  := create_descriptor_set_layout(device, draw_cull_shader)
+    depth_descriptor_set_layout := create_descriptor_set_layout(device, depth_reduce_shader)
     
     ////////////////////////////////////////////////
     
@@ -452,30 +432,6 @@ main :: proc () {
         }
         vk.UpdateDescriptorSets(device, 1, &write_desc_set, 0, nil)
     }
-    
-    ////////////////////////////////////////////////
-    
-    generate_shader_api("shaders/api.generated.glslh")
-    
-    shader_allocator := context.allocator
-    
-    shader_files := make([dynamic] string, context.temp_allocator)
-    get_all_files_with_extension(&shader_files, "shaders", shader_allocator, ".frag", ".mesh", ".task")
-    
-    watcher_allocator := context.allocator
-    watchers := make([dynamic] Watcher, watcher_allocator)
-    
-    
-    meshlet_shaders: [dynamic] Shader
-    for file in shader_files {
-        // @speed we duplicate this watcher per shader, so that each shader can keep track of the header being changed and be recompiled independently from other shaders, without effecting their modification test.
-        common_watcher_id := watchers_make(&watchers, "shaders/common.glslh")
-        shader := init_shader_and_watchers(&watchers, common_watcher_id, file, shader_allocator)
-        append(&meshlet_shaders, shader)
-    }
-    
-    draw_cull_shader    := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/draw_cull.comp",    shader_allocator)
-    depth_reduce_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/depth_reduce.comp", shader_allocator)
     
     ////////////////////////////////////////////////
     
@@ -641,15 +597,15 @@ main :: proc () {
         watchers_check_for_modification(watchers)
         
         if reload_shaders_if_needed(watchers, shader_allocator, &draw_cull_shader) || !pipeline_is_valid(cull_pipeline) {
-            cull_pipeline = create_compute_pipeline(device, pipeline_cache, draw_cull_shader, CullingStorageBufferCount, cull_descriptor_set_layout, cull_pipeline)
+            cull_pipeline = create_compute_pipeline(device, pipeline_cache, draw_cull_shader, cull_descriptor_set_layout, cull_pipeline)
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, &depth_reduce_shader) || !pipeline_is_valid(depth_pipeline) {
-            depth_pipeline = create_compute_pipeline(device, pipeline_cache, depth_reduce_shader, 0, 0, depth_pipeline)
+            depth_pipeline = create_compute_pipeline(device, pipeline_cache, depth_reduce_shader, depth_descriptor_set_layout, depth_pipeline)
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, meshlet_shaders[:]) || !pipeline_is_valid(meshlet_pipeline) {
-            meshlet_pipeline = create_graphics_pipeline(device, pipeline_cache, swapchain, { graphics_descriptor_set_layout, textures_descriptor_set_layout }, meshlet_shaders[:], GraphicsStorageBufferCount, meshlet_pipeline)
+            meshlet_pipeline = create_graphics_pipeline(device, pipeline_cache, swapchain, { graphics_descriptor_set_layout, textures_descriptor_set_layout }, meshlet_shaders[:], meshlet_pipeline)
         }
         
         ////////////////////////////////////////////////
@@ -832,9 +788,9 @@ main :: proc () {
         
         vk.CmdBindPipeline(cb, .COMPUTE, cull_pipeline.pipeline)
         
-        if CullingStorageBufferCount != 0 {
+        if false {
             // @shader cull.comp
-            compute_descriptor_update := [CullingStorageBufferCount] DescriptorUpdateData {}
+            compute_descriptor_update := [?] DescriptorUpdateData {}
             vk.CmdPushDescriptorSetWithTemplate(cb, cull_pipeline.update_template, cull_pipeline.layout, 0, raw_data(compute_descriptor_update[:]))
         }
         
@@ -889,7 +845,7 @@ main :: proc () {
             vk.CmdBindPipeline(cb, .GRAPHICS, meshlet_pipeline.pipeline)
             
             // @shader meshlet pipeline
-            graphics_descriptor_update := [GraphicsStorageBufferCount] DescriptorUpdateData {
+            graphics_descriptor_update := [?] DescriptorUpdateData {
                 { buffer = { draw_buffer.buffer,         0, auto_cast vk.WHOLE_SIZE }},
                 { buffer = { mesh_buffer.buffer,         0, auto_cast vk.WHOLE_SIZE }},
                 { buffer = { meshlet_buffer.buffer,      0, auto_cast vk.WHOLE_SIZE }},
@@ -927,8 +883,11 @@ main :: proc () {
         vk.CmdBindPipeline(cb, .COMPUTE, depth_pipeline.pipeline)
         
         for &view, mip_level in swapchain.depth_pyramid_mips {
+            // @shaders depth_reduce.comp
+            DepthBindingCount :: 1
+            
             // @compression this setup of update template, push descriptor is repeating for each pipeline and is kind of redundant.
-            depth_descriptor_update := [DepthStorageBufferCount] DescriptorUpdateData {
+            depth_descriptor_update := [DepthBindingCount] DescriptorUpdateData {
                 { image = { imageView = view, imageLayout = .GENERAL } },
             }
             vk.CmdPushDescriptorSetWithTemplate(cb, depth_pipeline.update_template, depth_pipeline.layout, 0, &depth_descriptor_update[0])
