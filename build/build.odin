@@ -1,10 +1,10 @@
 package build
 
-optimize :: false
+optimize :: !false
 pedantic :: false
 
 main :: proc () {
-    init_build(run_from_data = true, wait = true)
+    init_build(run_from_data = true)
     
     parse_run_and_debug_arguments()
     

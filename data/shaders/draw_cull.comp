@@ -5,21 +5,15 @@
 
 #include "common.glslh"
 
-#define ComputeWidth 32
-
-layout(local_size_x = ComputeWidth, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 // @volatile
 layout(push_constant) uniform Push_Data {
     Cull_Globals globals;
 };
 
-// the ballot code assumes that the subgroup size is 32, which needs to be revised for non-NVidia architectures.
-
 void main() {
-    uint group_index  = gl_WorkGroupID.x;
-    uint thread_index = gl_LocalInvocationID.x;
-    uint draw_index   = group_index * ComputeWidth + thread_index;
+    uint draw_index = gl_GlobalInvocationID.x;
     
     if (draw_index >= globals.draw_count) return;
     
@@ -38,33 +32,13 @@ void main() {
         }
     }
     
-#if 0
-    uvec4 ballot = subgroupBallot(visible);
-    uint index   = subgroupBallotExclusiveBitCount(ballot); // how many threads, before this thread, had accept==true
-    uint count   = subgroupBallotBitCount(ballot);          // how many threads, in total, had accept==true
-    
-    if (count == 0) return;
-    
-    uint draw_command_group_index = 0;
-    if (thread_index == 0) {
-        draw_command_group_index = atomicAdd(draw_command_count.v, count);
-    }
-    
-    uint draw_command_index = subgroupBroadcastFirst(draw_command_group_index) + index;
-#else
-    uint draw_command_index = 0;
-    if (visible) draw_command_index = atomicAdd(draw_command_count.v, 1);
-#endif
-    
-    
-    // @note(viktor): when disabling culling and drawing every mesh, there was a flickering every n-th frame.
-    // The meshes were not drawn for about one frame and then it was stable again for a while. This repeated
-    // indefinitly.
     if (visible) {
+        uint draw_command_index = atomicAdd(draw_command_count.v, 1);
+        
         uint lod_index = 0;
         if (globals.lod_enabled) {
-            // @todo(viktor): The real camera world position.
             vec3 camera_position = globals.camera_p;
+            
             float lod_distance = max(1, distance(center, camera_position) - radius);
             float log_lod_distance = log2(lod_distance);
             lod_index = int(log_lod_distance);
