@@ -1,6 +1,7 @@
 #+vet explicit-allocators
 package main
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:fmt"
 import "core:time"
@@ -41,7 +42,8 @@ Pipeline :: struct {
     pipeline: vk.Pipeline,
     layout:   vk.PipelineLayout,
     update_template: vk.DescriptorUpdateTemplate,
-    // only used by the graphics pipeline
+    
+    bind_point:    vk.PipelineBindPoint,
     shader_stages: vk.ShaderStageFlags,
 }
 
@@ -509,13 +511,14 @@ recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, old_swap
         it = create_semaphore(device)
     }
     
-    
     // :Stencil: add the .STENCIL mask bit
     result.depth_buffer  = gpu_make_image(result.size,  result.depth_buffer.format, { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED }, { .DEPTH })
     result.color_buffer  = gpu_make_image(result.size,  result.format,              { .COLOR_ATTACHMENT, .TRANSFER_SRC },   { .COLOR })
-    pyramid_size := result.size/2
     
     result.depth_buffer.sampler = create_sampler(device, .NEAREST, .NEAREST)
+    
+    // Ensures that all reductions are at most 2x2 which makes sure they are conservative.
+    pyramid_size := uv2{previous_power_of_two(result.size.x), previous_power_of_two(result.size.y)} 
     
     depth_pyramid_mip_count: u32 = 1
     {
@@ -682,6 +685,7 @@ create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sha
     assert(shader.stage == .COMPUTE)
     
     result: Pipeline
+    result.bind_point = .COMPUTE
     result.shader_stages += { shader.stage }
     
     result.layout = create_pipeline_layout(device, result.shader_stages, set_layout, size_of_push_constant = size_of(PushConstant))
@@ -715,6 +719,7 @@ create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sw
     }
     
     result: Pipeline
+    result.bind_point = .GRAPHICS
     for shader in shaders {
         result.shader_stages += { shader.stage }
     }
@@ -897,6 +902,41 @@ destroy_pipeline :: proc (device: vk.Device, pipeline: Pipeline) {
 
 ////////////////////////////////////////////////
 
+bind_pipeline :: proc (cb: vk.CommandBuffer, pipeline: Pipeline) {
+    vk.CmdBindPipeline(cb, pipeline.bind_point, pipeline.pipeline)
+}
+
+push_constants :: proc { push_constants_pointer, push_constants_value }
+push_constants_pointer :: proc (cb: vk.CommandBuffer, pipeline: Pipeline, push_constant: ^Push_Constant($T)) {
+    push_constants_raw(cb, pipeline, size_of(vk.DeviceAddress), &push_constant.gpu.address)
+}
+push_constants_value :: proc (cb: vk.CommandBuffer, pipeline: Pipeline, push_constant: $T) where !intrinsics.type_is_pointer(T) {
+    value := push_constant
+    push_constants_raw(cb, pipeline, size_of(T), &value)
+}
+push_constants_raw :: proc (cb: vk.CommandBuffer, pipeline: Pipeline, size: u32, data: pmm) {
+    vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader_stages, 0, size, data)
+}
+
+
+// @todo(viktor): checking of nested, unmatched begin/end
+the_descriptor_updates: [dynamic; 32] DescriptorUpdateData
+update_descriptors_begin :: proc () {
+    clear(&the_descriptor_updates)
+}
+update_descriptor_whole_buffer :: proc (buffer: Buffer) {
+    append(&the_descriptor_updates, DescriptorUpdateData { buffer = { buffer.buffer, 0, auto_cast vk.WHOLE_SIZE } })
+}
+update_descriptor_image :: proc (sampler: vk.Sampler, view: vk.ImageView, layout: vk.ImageLayout) {
+    append(&the_descriptor_updates, DescriptorUpdateData { image = { sampler, view, layout } })
+}
+update_descriptors_end :: proc (cb: vk.CommandBuffer, pipeline: Pipeline, set: u32) {
+    assert(len(the_descriptor_updates) != 0)
+    vk.CmdPushDescriptorSetWithTemplate(cb, pipeline.update_template, pipeline.layout, set, raw_data(&the_descriptor_updates))
+}
+
+////////////////////////////////////////////////
+
 begin_rendering :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, image_index: u32, clear_color: v4, early: bool) {
     rendering_info := vk.RenderingInfo {
         sType = .RENDERING_INFO, 
@@ -948,6 +988,7 @@ queue_submit :: proc (queue: vk.Queue, swapchain: Swapchain, frame: Frame, image
         waitSemaphoreInfoCount = 1,
         pWaitSemaphoreInfos = &vk.SemaphoreSubmitInfo {
             sType = .SEMAPHORE_SUBMIT_INFO,
+         
             semaphore = frame.image_aquired,
             stageMask = { .TRANSFER },
         },

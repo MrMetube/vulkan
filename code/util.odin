@@ -335,3 +335,27 @@ pretend_to_write :: #force_inline proc "contextless" (pointer: ^$T) {
 pretend_to_read :: #force_inline proc "contextless" (pointer: ^$T) {
     asm (^T) {"", "m"} (pointer)
 }
+
+////////////////////////////////////////////////
+
+// https://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
+next_power_of_two :: proc (v: u32) -> u32 {
+    result := v
+    
+    result -= 1
+    result |= result >> 1
+    result |= result >> 2
+    result |= result >> 4
+    result |= result >> 8
+    result |= result >> 16
+    result += 1
+    
+    return result
+}
+
+previous_power_of_two :: proc (v: u32) -> u32 {
+    result := #force_inline next_power_of_two(v)
+    result >>= 1
+    
+    return result
+}

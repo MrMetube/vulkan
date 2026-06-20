@@ -747,14 +747,20 @@ main :: proc () {
                 return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
             }
             
-            // @todo(viktor): how can we record how many triangles we have rendered after culling?
-            sdl.SetWindowTitle(window, fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, cull time: %.3v, culling %v, level of detail %v", 
+            extra: string
+            if display_pyramid {
+                extra = fmt.tprintf(", displaying depth mip level %v", display_pyramid_mip_level)
+            }
+            title := fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, cull time: %.3v, culling %v, level of detail %v%v",
                 view(cpu_time), 
                 view(gpu_time), 
                 view(cull_delta), 
                 culling_enabled ? "on" : "off",
                 lod_enabled     ? "on" : "off",
-            ))
+                extra
+            )
+            // @todo(viktor): how can we record how many triangles we have rendered after culling?
+            sdl.SetWindowTitle(window, title)
         }
         
         ////////////////////////////////////////////////
@@ -772,49 +778,53 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        // @todo(viktor): is this barrier/transition before the fill necessary?
-        pipeline_barrier_begin()
-        add_buffer_barrier(&draw_command_count_buffer, {}, {}, { .TRANSFER }, { .TRANSFER_WRITE })
-        pipeline_barrier_end(cb)
-        
         gpu_labeled_region_begin(cb, "culling", {0.0, 0.6, 0.8, 1.0})
         gpu_profile_zone_begin("culling")
+            
+            ////////////////////////////////////////////////
+            
+            // @todo(viktor): is this barrier/transition before the fill necessary?
+            pipeline_barrier_begin()
+            add_buffer_barrier(&draw_command_count_buffer, {}, {}, { .TRANSFER }, { .TRANSFER_WRITE })
+            pipeline_barrier_end(cb)
+            
+            ////////////////////////////////////////////////
+            
+            vk.CmdFillBuffer(cb, draw_command_count_buffer.buffer, 0, size_of(dccb_view^), 0)
+            
+            ////////////////////////////////////////////////
+            
+            pipeline_barrier_begin()
+                // :OcclusionCull: the memory barrier for the depth pyramid had a parameters, but just for the late pass (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=10157)
+                add_buffer_barrier(&draw_command_buffer, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .INDIRECT_COMMAND_READ, .SHADER_READ }, { .COMPUTE_SHADER }, { .SHADER_WRITE, .SHADER_READ })
+                add_buffer_barrier_transition_from_last(&draw_command_count_buffer, { .COMPUTE_SHADER }, { .SHADER_WRITE, .SHADER_READ })
+            pipeline_barrier_end(cb)
+            
+            ////////////////////////////////////////////////
+            
+            bind_pipeline(cb, cull_pipeline)
+                // @shader cull.comp
+                push_constants(cb, cull_pipeline, &frame.cull_globals)
+                
+                vk.CmdDispatch(cb, get_group_count(draw_cull_shader, len(draws)))
+            
+            gpu_profile_zone_end()
+            
+            gpu_profile_zone_begin("memory barriers")
+            
+            pipeline_barrier_begin()
+            add_buffer_barrier_transition_from_last(&draw_command_buffer, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .INDIRECT_COMMAND_READ, .SHADER_READ })
+            add_buffer_barrier_transition_from_last(&draw_command_count_buffer, { .DRAW_INDIRECT }, { .INDIRECT_COMMAND_READ })
+            pipeline_barrier_end(cb)
+            
+            ////////////////////////////////////////////////
+            
+            pipeline_barrier_begin()
+                add_image_barrier(&swapchain.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL)
+                add_image_barrier(&swapchain.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
+            pipeline_barrier_end(cb)
         
-        vk.CmdFillBuffer(cb, draw_command_count_buffer.buffer, 0, size_of(dccb_view^), 0)
-        
-        pipeline_barrier_begin()
-            // :OcclusionCull: the memory barrier for the depth pyramid had a parameters, but just for the late pass (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=10157)
-            add_buffer_barrier(&draw_command_buffer, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .INDIRECT_COMMAND_READ, .SHADER_READ }, { .COMPUTE_SHADER }, { .SHADER_WRITE, .SHADER_READ })
-            add_buffer_barrier_transition_from_last(&draw_command_count_buffer, { .COMPUTE_SHADER }, { .SHADER_WRITE, .SHADER_READ })
-        pipeline_barrier_end(cb)
-        
-        vk.CmdBindPipeline(cb, .COMPUTE, cull_pipeline.pipeline)
-        
-        if false {
-            // @shader cull.comp
-            compute_descriptor_update := [?] DescriptorUpdateData {}
-            vk.CmdPushDescriptorSetWithTemplate(cb, cull_pipeline.update_template, cull_pipeline.layout, 0, raw_data(compute_descriptor_update[:]))
-        }
-        
-        vk.CmdPushConstants(cb, cull_pipeline.layout, cull_pipeline.shader_stages, 0, size_of(frame.cull_globals.gpu.address), &frame.cull_globals.gpu.address)
-        
-        vk.CmdDispatch(cb, get_group_count(draw_cull_shader, len(draws)))
-        
-        gpu_profile_zone_end()
-        
-        gpu_profile_zone_begin("memory barriers")
-        
-        pipeline_barrier_begin()
-        add_buffer_barrier_transition_from_last(&draw_command_buffer, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .INDIRECT_COMMAND_READ, .SHADER_READ })
-        add_buffer_barrier_transition_from_last(&draw_command_count_buffer, { .DRAW_INDIRECT }, { .INDIRECT_COMMAND_READ })
-        pipeline_barrier_end(cb)
-        
-        ////////////////////////////////////////////////
-        
-        pipeline_barrier_begin()
-            add_image_barrier(&swapchain.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL)
-            add_image_barrier(&swapchain.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
-        pipeline_barrier_end(cb)
+            ////////////////////////////////////////////////
         
         gpu_profile_zone_end()
         gpu_labeled_region_end(cb)
@@ -842,24 +852,23 @@ main :: proc () {
             gpu_labeled_region_begin(cb, "meshlets", {0.0, 0.6, 0.8, 1.0})
             gpu_profile_zone_begin("meshlets")
             
-            vk.CmdBindPipeline(cb, .GRAPHICS, meshlet_pipeline.pipeline)
-            
-            // @shader meshlet pipeline
-            graphics_descriptor_update := [?] DescriptorUpdateData {
-                { buffer = { draw_buffer.buffer,         0, auto_cast vk.WHOLE_SIZE }},
-                { buffer = { mesh_buffer.buffer,         0, auto_cast vk.WHOLE_SIZE }},
-                { buffer = { meshlet_buffer.buffer,      0, auto_cast vk.WHOLE_SIZE }},
-                { buffer = { meshlet_data_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
-                { buffer = { vertex_buffer.buffer,       0, auto_cast vk.WHOLE_SIZE }},
-                { buffer = { draw_command_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
-            }
-            vk.CmdPushDescriptorSetWithTemplate(cb, meshlet_pipeline.update_template, meshlet_pipeline.layout, 0, &graphics_descriptor_update[0])
-            
-            vk.CmdBindDescriptorSets(cb, .GRAPHICS, meshlet_pipeline.layout, 1, 1, &textures_descriptor_set, 0, nil)
-            
-            
-            vk.CmdPushConstants(cb, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(frame.draw_globals.gpu.address), &frame.draw_globals.gpu.address)
-            vk.CmdDrawMeshTasksIndirectCountEXT(cb, draw_command_buffer.buffer, auto_cast offset_of(Draw_Command, command), draw_command_count_buffer.buffer, 0, len(draws), size_of(Draw_Command))
+            // @shader meshlet.task meshlet.mesh meshlet.frag
+            bind_pipeline(cb, meshlet_pipeline)
+                
+                update_descriptors_begin()
+                    update_descriptor_whole_buffer(draw_buffer)
+                    update_descriptor_whole_buffer(mesh_buffer)
+                    update_descriptor_whole_buffer(meshlet_buffer)
+                    update_descriptor_whole_buffer(meshlet_data_buffer)
+                    update_descriptor_whole_buffer(vertex_buffer)
+                    update_descriptor_whole_buffer(draw_command_buffer)
+                update_descriptors_end(cb, meshlet_pipeline, 0)
+                
+                vk.CmdBindDescriptorSets(cb, meshlet_pipeline.bind_point, meshlet_pipeline.layout, 1, 1, &textures_descriptor_set, 0, nil)
+                
+                push_constants(cb, meshlet_pipeline, &frame.draw_globals)
+                
+                vk.CmdDrawMeshTasksIndirectCountEXT(cb, draw_command_buffer.buffer, auto_cast offset_of(Draw_Command, command), draw_command_count_buffer.buffer, 0, len(draws), size_of(Draw_Command))
             
             gpu_profile_zone_end()
             gpu_labeled_region_end(cb)
@@ -885,34 +894,28 @@ main :: proc () {
         
         gpu_profile_zone_begin("depth pyramid building")
         gpu_labeled_region_begin(cb, "depth pyramid building", {0.4, 0.8, 0, 1.0})
-        vk.CmdBindPipeline(cb, .COMPUTE, depth_pipeline.pipeline)
         
-        // @shaders depth_reduce.comp
-        DepthBindingCount :: 2
-        
-        // @compression this setup of update template, push descriptor is repeating for each pipeline and is kind of redundant.
-        depth_descriptor_update := [DepthBindingCount] DescriptorUpdateData {
-            { image = { sampler = swapchain.depth_buffer.sampler, imageView = swapchain.depth_buffer.view, imageLayout = swapchain.depth_buffer.last_transition.layout } },
-            { image = { sampler = swapchain.depth_buffer.sampler, imageView = 0,                           imageLayout = .GENERAL } },
-        }
-        for &mip, mip_level in swapchain.depth_pyramid_mips {
-            depth_descriptor_update[1].image.imageView = mip.view
-            defer depth_descriptor_update[0] = depth_descriptor_update[1]
+        bind_pipeline(cb, depth_pipeline)
             
-            
-            depth_globals := Depth_Globals {
-                size = cast(v2) mip.size,
+            for &mip, mip_level in swapchain.depth_pyramid_mips {
+                // @shaders depth_reduce.comp
+                push_constants_value(cb, depth_pipeline, Depth_Globals { size = cast(v2) mip.size })
+                
+                update_descriptors_begin()
+                    if mip_level == 0 {
+                        update_descriptor_image(swapchain.depth_buffer.sampler, swapchain.depth_buffer.view, swapchain.depth_buffer.last_transition.layout)
+                    } else {
+                        update_descriptor_image(swapchain.depth_buffer.sampler, swapchain.depth_pyramid_mips[mip_level-1].view,  .GENERAL)
+                    }
+                    update_descriptor_image(swapchain.depth_buffer.sampler, mip.view,  .GENERAL)
+                update_descriptors_end(cb, depth_pipeline, 0)
+                
+                vk.CmdDispatch(cb, get_group_count(depth_reduce_shader, **mip.size, 1))
+                
+                pipeline_barrier_begin()
+                    add_image_barrier_transition_from_last(&swapchain.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
+                pipeline_barrier_end(cb, { .BY_REGION })
             }
-            vk.CmdPushConstants(cb, depth_pipeline.layout, depth_pipeline.shader_stages, 0, size_of(depth_globals), &depth_globals)
-            
-            vk.CmdPushDescriptorSetWithTemplate(cb, depth_pipeline.update_template, depth_pipeline.layout, 0, &depth_descriptor_update[0])
-            
-            vk.CmdDispatch(cb, get_group_count(depth_reduce_shader, **mip.size, 1))
-            
-            pipeline_barrier_begin()
-                add_image_barrier_transition_from_last(&swapchain.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
-            pipeline_barrier_end(cb, { .BY_REGION })
-        }
         
         gpu_labeled_region_end(cb)
         gpu_profile_zone_end()
@@ -960,12 +963,7 @@ main :: proc () {
             source := swapchain.depth_pyramid
             destination := swapchain.images[image_index]
             
-            // @cleanup just store/read the size on the mip view at the display_pyramid_mip_level index.
-            mip_size := cast(iv2) swapchain.size / 2
-            mip_size.x >>= cast(u32) display_pyramid_mip_level
-            mip_size.y >>= cast(u32) display_pyramid_mip_level
-            mip_size = vec_max(mip_size, 1)
-            
+            mip_size  := cast(iv2) swapchain.depth_pyramid_mips[display_pyramid_mip_level].size
             dest_size := cast(iv2) swapchain.size
             
             vk.CmdBlitImage(cb, source.image, source.last_transition.layout, destination, .TRANSFER_DST_OPTIMAL, 1, &vk.ImageBlit {
