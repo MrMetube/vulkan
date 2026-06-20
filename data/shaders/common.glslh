@@ -5,9 +5,6 @@
 #extension GL_EXT_buffer_reference   : require
 #extension GL_EXT_scalar_block_layout: require
 
-// @todo(viktor): should a ^uint be aligned by 8 or by 4, or should it be the align_of(T) of the cpu type
-#define Pointer(T) layout(buffer_reference, buffer_reference_align = 8, std430, scalar) buffer T##_p { T v; }
-
 #include "api.generated.glslh"
 
 #define Debug false

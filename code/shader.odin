@@ -89,14 +89,16 @@ generate_shader_api :: proc (output_file: string) {
         info := type_info_of(runtime.typeid_base(type))
         s :=  info.variant.(runtime.Type_Info_Struct)
         
+        // @todo(viktor): currently all fields are vk.DeviceAddress, but that hides the type for this metaprogram. Can we make a wrapper like GPU_Pointer(T) so that we can read the inner type here and not have to specify it in the tag string?
         for field in soa_zip(name = s.names[:s.field_count], tag = s.tags[:s.field_count]) {
             if field.tag != "" {
-                type, _, _ := strings.partition(field.tag, " ")
-                fmt.sbprintf(builder, "Pointer(%v);\n", type)
+                type_name, _, _ := strings.partition(field.tag, " ")
+                // @todo(viktor): unhardcode the alignment once we know the inner type
+                fmt.sbprintf(builder, "layout(buffer_reference, buffer_reference_align = %v, std430, scalar) buffer %v_p {{ %v v; };\n", 4, type_name, type_name)
             }
         }
         
-        fmt.sbprintf(builder, "layout(buffer_reference, buffer_reference_align=%v, std430, scalar) ", align_of(pmm))
+        fmt.sbprintf(builder, "layout(buffer_reference, buffer_reference_align = %v, std430, scalar) ", align_of(pmm))
         fmt.sbprintf(builder, "buffer %v {{\n", type)
         
         append_struct_fields(builder, type)

@@ -64,11 +64,12 @@ Cull_Globals :: struct #all_or_none {
     draw_command:       vk.DeviceAddress "Draw_Command draw_command_buffer",
     draw_command_count: vk.DeviceAddress "uint draw_command_count",
 
-    frustum_culling_enabled: b32,
-    lod_enabled:             b32,
-    draw_count:              u32,
     // @cleanup
     camera_p: v3,
+    draw_count:              u32,
+    
+    frustum_culling_enabled: b32,
+    lod_enabled:             b32,
 }
 
 // @shader
@@ -111,6 +112,7 @@ Draw_Command :: struct {
     draw_id:   u32,
     lod_index: u32,
     command:   vk.DrawMeshTasksIndirectCommandEXT,
+    // _pad: u32, // @cleanup it seems the buffer is not correctly written to by the cull.comp shader. the values assuming another padding byte, which the cpu did not assume. CmdDrawMeshTasksIndirectCountEXT then failed to read the correct values as it was given the cpu's alignments and offsets.
 }
 
 // @shader
