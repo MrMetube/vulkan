@@ -460,20 +460,21 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     stats_pool: vk.QueryPool
-    stats_bits := vk.QueryPipelineStatisticFlags {
-        .FRAGMENT_SHADER_INVOCATIONS,
-        .COMPUTE_SHADER_INVOCATIONS,
-        .TASK_SHADER_INVOCATIONS_EXT,
-        .MESH_SHADER_INVOCATIONS_EXT,
-    }
-    
+    stats_count: u32
     {
+        stats_bits := vk.QueryPipelineStatisticFlags {
+            .FRAGMENT_SHADER_INVOCATIONS,
+            .COMPUTE_SHADER_INVOCATIONS,
+            .TASK_SHADER_INVOCATIONS_EXT,
+            .MESH_SHADER_INVOCATIONS_EXT,
+        }
+        stats_count = cast(u32) card(stats_bits)
         StatsSize :: 1
         create_info := vk.QueryPoolCreateInfo {
             sType = .QUERY_POOL_CREATE_INFO,
-            queryType = .PIPELINE_STATISTICS,
+            queryType          = .PIPELINE_STATISTICS,
             pipelineStatistics = stats_bits,
-            queryCount = cast(u32) card(stats_bits),
+            queryCount         = stats_count,
         }
         check(vk.CreateQueryPool(device, &create_info, nil, &stats_pool))
         defer_destroy(vk.DestroyQueryPool, stats_pool)
@@ -527,7 +528,9 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        print_profile: bool
+        // @speed collecting stats can impact performance significantly, so we should not need them to be collected when measuring performance timestamps.
+        // @speed similarly the timestamps should only be collected if we need them. As we currently only look at the last rendered frame, we should only take them if we then also print them. In the future we may want to store more than one frame, but for now this would be better.
+        print_profile_and_stats: bool
         
         mouse_delta: v2
         mouse_wheel_delta: f32
@@ -555,7 +558,7 @@ main :: proc () {
                 case sdl.K_SPACE: space_down = true
                 case sdl.K_C:     culling_enabled = !culling_enabled
                 case sdl.K_L:     lod_enabled = !lod_enabled
-                case sdl.K_P:     print_profile = true
+                case sdl.K_P:     print_profile_and_stats = true
                 }
             case .KEY_UP:
                 if event.key.key == sdl.K_SPACE {
@@ -650,13 +653,13 @@ main :: proc () {
         
         entropy := seed_random_series(54654)
         when true {
-            @(static) draws: [500] Draw
+            @(static) draws: [20000] Draw
             global_rotation := la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX)
             for &draw in draws {
                 p := random_bilateral(&entropy, v3) * {10, 10, 10} - {0, 0, 20}
                 
                 draw.p           = p
-                draw.scale       = linear_blend(cast(f32) .1, .4, square(random_unilateral(&entropy, f32)))
+                draw.scale       = linear_blend(cast(f32) .1, .4, square(random_unilateral(&entropy, f32))) / 2
                 rotation        := la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
                 draw.orientation = rotation * global_rotation
                 
@@ -768,9 +771,10 @@ main :: proc () {
         
         check(vk.BeginCommandBuffer(cb, &vk.CommandBufferBeginInfo { sType = .COMMAND_BUFFER_BEGIN_INFO, flags = { .ONE_TIME_SUBMIT } }))
         
-        vk.ResetQueryPool(device, stats_pool, 0, cast(u32) card(stats_bits))
-        
-        vk.CmdBeginQuery(cb, stats_pool, 0, {})
+        if print_profile_and_stats {
+            vk.ResetQueryPool(device, stats_pool, 0, stats_count)
+            vk.CmdBeginQuery(cb, stats_pool, 0, {})
+        }
         gpu_profile_frame_begin(device, cb)
         
         ////////////////////////////////////////////////
@@ -887,7 +891,9 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         gpu_profile_frame_end()
-        vk.CmdEndQuery(cb, stats_pool, 0)
+        if print_profile_and_stats {
+            vk.CmdEndQuery(cb, stats_pool, 0)
+        }
         
         vk.EndCommandBuffer(cb)
         
@@ -913,7 +919,7 @@ main :: proc () {
             check(present_result)
         }
         
-        gpu_profile_collate_times(ips, device, print_profile)
+        gpu_profile_collate_times(ips, device, print_profile_and_stats)
         
         gpu_delta  := gpu_profile_get_zone("frame").total_time_with_children
         cull_delta  = gpu_profile_get_zone("culling").total_time
@@ -924,22 +930,24 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        {
+        if print_profile_and_stats {
             stats_result: [128] u64
             size := cast(int) size_of_slice(stats_result[:])
             query_result := vk.GetQueryPoolResults(device, stats_pool, 0, 1, size, &stats_result[0], size_of(stats_result[0]), { ._64, .WAIT })
             check(query_result)
             
-            if print_profile {    
-                fmt.println("------------------------------------\nStats:")
-                index: int
-                for bit in stats_bits { defer index += 1
-                    stat_value := stats_result[index]
-                    fmt.printfln("  %v = %v", bit, stat_value)
-                    
-                }
-                fmt.printfln("-------------------------------------")
+            fmt.println("------------------------------------\nStats:")
+            bits := [?] vk.QueryPipelineStatisticFlag {
+                .COMPUTE_SHADER_INVOCATIONS,
+                .TASK_SHADER_INVOCATIONS_EXT,
+                .MESH_SHADER_INVOCATIONS_EXT,
+                .FRAGMENT_SHADER_INVOCATIONS,
             }
+            
+            for bit, index in bits {
+                fmt.printfln("  %v = %v", bit, view_magnitude(stats_result[index]))
+            }
+            fmt.printfln("-------------------------------------")
         }
     }
     
