@@ -7,7 +7,7 @@ import "core:fmt"
 
 import vk "vendor:vulkan"
 
-import "lib:ktx"
+import "../lib/ktx"
 
 Loaded_Texture :: struct {
     format: vk.Format,

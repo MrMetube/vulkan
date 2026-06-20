@@ -233,9 +233,9 @@ main :: proc () {
             }
             check(vk.BeginCommandBuffer(cb_once, &cb_once_begin_info))
             
-            begin_pipeline_barrier()
+            pipeline_barrier_begin()
                 add_image_barrier(&texture, {}, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
-            end_pipeline_barrier(cb_once)
+            pipeline_barrier_end(cb_once)
             
             copy_regions := make([dynamic] vk.BufferImageCopy, context.temp_allocator)
             for level in 0..<loaded_texture.mip_levels {
@@ -250,9 +250,9 @@ main :: proc () {
             
             vk.CmdCopyBufferToImage(cb_once, source_buffer.buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
             
-            begin_pipeline_barrier()
+            pipeline_barrier_begin()
                 add_image_barrier_transition_from_last(&texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
-            end_pipeline_barrier(cb_once)
+            pipeline_barrier_end(cb_once)
             
             check(vk.EndCommandBuffer(cb_once))
             
@@ -284,7 +284,6 @@ main :: proc () {
     }
     
     ////////////////////////////////////////////////
-    
     // @todo put all buffer addresses into the push constant and remove these bindings
     // @shader needs to match the bindings in shaders
     GraphicsStorageBufferCount :: 6
@@ -341,12 +340,14 @@ main :: proc () {
         defer_destroy(vk.DestroyDescriptorSetLayout, graphics_descriptor_set_layout)
     }
     
-    // @shader cull.comp
-    ComputeStorageBufferCount :: 0
+    ////////////////////////////////////////////////
+    // @shader draw_cull.comp
     
-    compute_descriptor_set_layout: vk.DescriptorSetLayout
+    CullingStorageBufferCount :: 0
+    
+    cull_descriptor_set_layout: vk.DescriptorSetLayout
     {
-        bindings := [ComputeStorageBufferCount] vk.DescriptorSetLayoutBinding {
+        bindings := [CullingStorageBufferCount] vk.DescriptorSetLayoutBinding {
         }
         
         create_info := vk.DescriptorSetLayoutCreateInfo {
@@ -356,8 +357,35 @@ main :: proc () {
             pBindings    = raw_data(bindings[:]),
         }
         
-        check(vk.CreateDescriptorSetLayout(device, &create_info, nil, &compute_descriptor_set_layout))
-        defer_destroy(vk.DestroyDescriptorSetLayout, compute_descriptor_set_layout)
+        check(vk.CreateDescriptorSetLayout(device, &create_info, nil, &cull_descriptor_set_layout))
+        defer_destroy(vk.DestroyDescriptorSetLayout, cull_descriptor_set_layout)
+    }
+    
+    ////////////////////////////////////////////////
+    // @shader depth_reduce.comp
+    
+    DepthStorageBufferCount :: 1
+    depth_descriptor_set_layout: vk.DescriptorSetLayout
+    {
+        // @todo get the stage flags from the shader itself, i.e. depth_reduce.stage
+        bindings := [DepthStorageBufferCount] vk.DescriptorSetLayoutBinding {
+            { // output
+                binding = 0,
+                descriptorType  = .STORAGE_IMAGE,
+                descriptorCount = 1,
+                stageFlags      = { .COMPUTE },
+            },
+        }
+        
+        create_info := vk.DescriptorSetLayoutCreateInfo {
+            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            flags        = { .PUSH_DESCRIPTOR },
+            bindingCount = len(bindings),
+            pBindings    = raw_data(bindings[:]),
+        }
+        
+        check(vk.CreateDescriptorSetLayout(device, &create_info, nil, &cull_descriptor_set_layout))
+        defer_destroy(vk.DestroyDescriptorSetLayout, cull_descriptor_set_layout)
     }
     
     ////////////////////////////////////////////////
@@ -446,7 +474,8 @@ main :: proc () {
         append(&meshlet_shaders, shader)
     }
     
-    draw_cull_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/draw_cull.comp", shader_allocator)
+    draw_cull_shader    := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/draw_cull.comp",    shader_allocator)
+    depth_reduce_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/depth_reduce.comp", shader_allocator)
     
     ////////////////////////////////////////////////
     
@@ -485,8 +514,9 @@ main :: proc () {
     // @speed is a pipeline cache still a good optimization?
     pipeline_cache: vk.PipelineCache = 0
     
-    meshlet_pipeline: Pipeline
     cull_pipeline:    Pipeline
+    depth_pipeline:   Pipeline
+    meshlet_pipeline: Pipeline
     
     ////////////////////////////////////////////////
     
@@ -611,7 +641,11 @@ main :: proc () {
         watchers_check_for_modification(watchers)
         
         if reload_shaders_if_needed(watchers, shader_allocator, &draw_cull_shader) || !pipeline_is_valid(cull_pipeline) {
-            cull_pipeline = create_compute_pipeline(device, pipeline_cache, draw_cull_shader, ComputeStorageBufferCount, compute_descriptor_set_layout, cull_pipeline)
+            cull_pipeline = create_compute_pipeline(device, pipeline_cache, draw_cull_shader, CullingStorageBufferCount, cull_descriptor_set_layout, cull_pipeline)
+        }
+        
+        if reload_shaders_if_needed(watchers, shader_allocator, &depth_reduce_shader) || !pipeline_is_valid(depth_pipeline) {
+            depth_pipeline = create_compute_pipeline(device, pipeline_cache, depth_reduce_shader, 0, 0, depth_pipeline)
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, meshlet_shaders[:]) || !pipeline_is_valid(meshlet_pipeline) {
@@ -781,58 +815,56 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         // @todo(viktor): is this barrier/transition before the fill necessary?
-        begin_pipeline_barrier()
-            add_buffer_barrier(&draw_command_count_buffer, {}, {}, { .TRANSFER }, { .TRANSFER_WRITE })
-        end_pipeline_barrier(cb)
+        pipeline_barrier_begin()
+        add_buffer_barrier(&draw_command_count_buffer, {}, {}, { .TRANSFER }, { .TRANSFER_WRITE })
+        pipeline_barrier_end(cb)
         
-        vk.CmdFillBuffer(cb, draw_command_count_buffer.buffer, 0, size_of(dccb_view^), 0)
+        gpu_labeled_region_begin(cb, "culling", {0.0, 0.6, 0.8, 1.0})
         gpu_profile_zone_begin("culling")
         
-        begin_pipeline_barrier()
+        vk.CmdFillBuffer(cb, draw_command_count_buffer.buffer, 0, size_of(dccb_view^), 0)
+        
+        pipeline_barrier_begin()
             // :OcclusionCull: the memory barrier for the depth pyramid had a parameters, but just for the late pass (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=10157)
             add_buffer_barrier(&draw_command_buffer, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .INDIRECT_COMMAND_READ, .SHADER_READ }, { .COMPUTE_SHADER }, { .SHADER_WRITE, .SHADER_READ })
             add_buffer_barrier_transition_from_last(&draw_command_count_buffer, { .COMPUTE_SHADER }, { .SHADER_WRITE, .SHADER_READ })
-        end_pipeline_barrier(cb)
+        pipeline_barrier_end(cb)
         
         vk.CmdBindPipeline(cb, .COMPUTE, cull_pipeline.pipeline)
         
-        if ComputeStorageBufferCount != 0 {
+        if CullingStorageBufferCount != 0 {
             // @shader cull.comp
-            compute_descriptor_update := [ComputeStorageBufferCount] DescriptorUpdateData {}
+            compute_descriptor_update := [CullingStorageBufferCount] DescriptorUpdateData {}
             vk.CmdPushDescriptorSetWithTemplate(cb, cull_pipeline.update_template, cull_pipeline.layout, 0, raw_data(compute_descriptor_update[:]))
         }
         
         vk.CmdPushConstants(cb, cull_pipeline.layout, cull_pipeline.shader_stages, 0, size_of(frame.cull_globals.gpu.address), &frame.cull_globals.gpu.address)
         
-        draw_count := get_group_count(draw_cull_shader, len(draws))
-        vk.CmdDispatch(cb, draw_count, 1, 1)
+        vk.CmdDispatch(cb, get_group_count(draw_cull_shader, len(draws)))
         
         gpu_profile_zone_end()
         
         gpu_profile_zone_begin("memory barriers")
         
-        begin_pipeline_barrier()
-            add_buffer_barrier_transition_from_last(&draw_command_buffer, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .INDIRECT_COMMAND_READ, .SHADER_READ })
-            add_buffer_barrier_transition_from_last(&draw_command_count_buffer, { .DRAW_INDIRECT }, { .INDIRECT_COMMAND_READ })
-        end_pipeline_barrier(cb)
+        pipeline_barrier_begin()
+        add_buffer_barrier_transition_from_last(&draw_command_buffer, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .INDIRECT_COMMAND_READ, .SHADER_READ })
+        add_buffer_barrier_transition_from_last(&draw_command_count_buffer, { .DRAW_INDIRECT }, { .INDIRECT_COMMAND_READ })
+        pipeline_barrier_end(cb)
         
         ////////////////////////////////////////////////
         
         // :OcclusionCull: the barrier before the depth pyramid was missing the barrier for the pyramid.image itself (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=11592)
         
-        begin_pipeline_barrier()
+        pipeline_barrier_begin()
             add_image_barrier(&swapchain.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL)
             add_image_barrier(&swapchain.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
-        end_pipeline_barrier(cb)
+        pipeline_barrier_end(cb)
         
         gpu_profile_zone_end()
+        gpu_labeled_region_end(cb)
         
         ////////////////////////////////////////////////
-        
-        begin_rendering(cb, swapchain, swapchain.color_buffer, image_index, {0.07, 0.07, 0.07, 1})
-        
-        gpu_profile_zone_begin("rendering")
-        
+        // Setting these outside of rendering-sections means they persist across all sections.
         vk.CmdSetViewport(cb, 0, 1, &vk.Viewport {
             x      = 0,
             y      = 0,
@@ -844,38 +876,97 @@ main :: proc () {
         
         vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D { extent = to_extent(swapchain.size) })
         
-        gpu_profile_zone_begin("meshlets")
-        vk.CmdBindPipeline(cb, .GRAPHICS, meshlet_pipeline.pipeline)
+        ////////////////////////////////////////////////
         
-        // @shader meshlet pipeline
-        graphics_descriptor_update := [GraphicsStorageBufferCount] DescriptorUpdateData {
-            { buffer = { draw_buffer.buffer,         0, auto_cast vk.WHOLE_SIZE }},
-            { buffer = { mesh_buffer.buffer,         0, auto_cast vk.WHOLE_SIZE }},
-            { buffer = { meshlet_buffer.buffer,      0, auto_cast vk.WHOLE_SIZE }},
-            { buffer = { meshlet_data_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
-            { buffer = { vertex_buffer.buffer,       0, auto_cast vk.WHOLE_SIZE }},
-            { buffer = { draw_command_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
-        }
-        vk.CmdPushDescriptorSetWithTemplate(cb, meshlet_pipeline.update_template, meshlet_pipeline.layout, 0, &graphics_descriptor_update[0])
-        
-        vk.CmdBindDescriptorSets(cb, .GRAPHICS, meshlet_pipeline.layout, 1, 1, &textures_descriptor_set, 0, nil)
-        
-        
-        vk.CmdPushConstants(cb, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(frame.draw_globals.gpu.address), &frame.draw_globals.gpu.address)
-        vk.CmdDrawMeshTasksIndirectCountEXT(cb, draw_command_buffer.buffer, auto_cast offset_of(Draw_Command, command), draw_command_count_buffer.buffer, 0, len(draws), size_of(Draw_Command))
-        gpu_profile_zone_end()
+        begin_rendering(cb, swapchain, image_index, {0.07, 0.07, 0.07, 1})
+            gpu_profile_zone_begin("rendering early pass")
+            gpu_labeled_region_begin(cb, "rendering early pass", {0.6, 0.1, 07, 1.0})
+            
+            
+            gpu_labeled_region_begin(cb, "meshlets", {0.0, 0.6, 0.8, 1.0})
+            gpu_profile_zone_begin("meshlets")
+            
+            vk.CmdBindPipeline(cb, .GRAPHICS, meshlet_pipeline.pipeline)
+            
+            // @shader meshlet pipeline
+            graphics_descriptor_update := [GraphicsStorageBufferCount] DescriptorUpdateData {
+                { buffer = { draw_buffer.buffer,         0, auto_cast vk.WHOLE_SIZE }},
+                { buffer = { mesh_buffer.buffer,         0, auto_cast vk.WHOLE_SIZE }},
+                { buffer = { meshlet_buffer.buffer,      0, auto_cast vk.WHOLE_SIZE }},
+                { buffer = { meshlet_data_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
+                { buffer = { vertex_buffer.buffer,       0, auto_cast vk.WHOLE_SIZE }},
+                { buffer = { draw_command_buffer.buffer, 0, auto_cast vk.WHOLE_SIZE }},
+            }
+            vk.CmdPushDescriptorSetWithTemplate(cb, meshlet_pipeline.update_template, meshlet_pipeline.layout, 0, &graphics_descriptor_update[0])
+            
+            vk.CmdBindDescriptorSets(cb, .GRAPHICS, meshlet_pipeline.layout, 1, 1, &textures_descriptor_set, 0, nil)
+            
+            
+            vk.CmdPushConstants(cb, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(frame.draw_globals.gpu.address), &frame.draw_globals.gpu.address)
+            vk.CmdDrawMeshTasksIndirectCountEXT(cb, draw_command_buffer.buffer, auto_cast offset_of(Draw_Command, command), draw_command_count_buffer.buffer, 0, len(draws), size_of(Draw_Command))
+            
+            gpu_profile_zone_end()
+            gpu_labeled_region_end(cb)
+            
+            if print_profile_and_stats {
+                vk.CmdEndQuery(cb, stats_pool, 0)
+            }
+            
+            gpu_labeled_region_end(cb)
+            gpu_profile_zone_end()
+        end_rendering(cb)
         
         ////////////////////////////////////////////////
         
-        vk.CmdEndRendering(cb)
-        gpu_profile_zone_end()
+        pipeline_barrier_begin()
+            add_image_barrier_transition_from_last(&swapchain.depth_buffer, { .COMPUTE_SHADER }, { .SHADER_READ }, .SHADER_READ_ONLY_OPTIMAL, { .DEPTH })
+        pipeline_barrier_end(cb)
+        
+        ////////////////////////////////////////////////
+        
+        vk.CmdBindPipeline(cb, .COMPUTE, depth_pipeline.pipeline)
+        
+        for &view, mip_level in swapchain.depth_pyramid_mips {
+            // @compression this setup of update template, push descriptor is repeating for each pipeline and is kind of redundant.
+            depth_descriptor_update := [DepthStorageBufferCount] DescriptorUpdateData {
+                { image = { imageView = view, imageLayout = .GENERAL } },
+            }
+            vk.CmdPushDescriptorSetWithTemplate(cb, depth_pipeline.update_template, depth_pipeline.layout, 0, &depth_descriptor_update[0])
+            
+            // @volatile could be stored on swapchain creation
+            level_size := swapchain.size/2
+            level_size.x >>= cast(u32) mip_level
+            level_size.y >>= cast(u32) mip_level
+            level_size = vec_max(level_size, 1)
+            
+            vk.CmdDispatch(cb, get_group_count(depth_reduce_shader, **level_size, 1))
+        }
+        
+        // @todo(viktor): build depth pyramid
+        ////////////////////////////////////////////////
+        
+        pipeline_barrier_begin()
+            add_image_barrier_transition_from_last(&swapchain.depth_buffer, {.EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH })
+        pipeline_barrier_end(cb)
+        
+        ////////////////////////////////////////////////
+        
+        begin_rendering_late(cb, swapchain, image_index)
+            gpu_profile_zone_begin("rendering late pass")
+            gpu_labeled_region_begin(cb, "rendering late pass", {0.6, 0.1, 07, 1.0})
+            
+            gpu_labeled_region_end(cb)
+            gpu_profile_zone_end()
+        end_rendering(cb)
+        
+        ////////////////////////////////////////////////
         
         gpu_profile_zone_begin("copy to swapchain")
         
-        begin_pipeline_barrier()
+        pipeline_barrier_begin()
             add_image_barrier_transition_from_last(&swapchain.color_buffer, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
             add_image_barrier(swapchain.images[image_index], { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
-        end_pipeline_barrier(cb)
+        pipeline_barrier_end(cb)
         
         vk.CmdCopyImage(cb, swapchain.color_buffer.image, .TRANSFER_SRC_OPTIMAL, swapchain.images[image_index], .TRANSFER_DST_OPTIMAL, 1, &vk.ImageCopy {
             srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
@@ -883,18 +974,16 @@ main :: proc () {
             extent         = to_extent(swapchain.size, 1),
         })
         
-        begin_pipeline_barrier()
+        pipeline_barrier_begin()
             add_image_barrier(swapchain.images[image_index], { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, {}, {}, .PRESENT_SRC_KHR)
-        end_pipeline_barrier(cb)
+        pipeline_barrier_end(cb)
         
         gpu_profile_zone_end()
         
         ////////////////////////////////////////////////
         
         gpu_profile_frame_end()
-        if print_profile_and_stats {
-            vk.CmdEndQuery(cb, stats_pool, 0)
-        }
+        
         
         vk.EndCommandBuffer(cb)
         

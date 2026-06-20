@@ -172,40 +172,22 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
     
     output_path, _ := os.join_path({input_directory, output_directory, input_file}, context.temp_allocator)
     
-    shader_output := fmt.tprintf("%v%v", output_path, output_extension)
-    
-    append(&cmd, "C:/tools/VulkanSDK/1.4.350.0/Bin/glslc.exe")
-    append(&cmd, "--target-env=vulkan1.4")
-    append(&cmd, "-o", shader_output)
-    if ODIN_DEBUG {
-        append(&cmd, "-g") // embed shader source code for renderdoc
-    }
-    if Optimized {
-        append(&cmd, "-O")
-    }
-    append(&cmd, input_path)
-    
     result: Shader
     if old != nil {
         result = old^
     }
     result.input = input_path
     
-    stdout: string
-    stderr: string
-    if !run_command(&cmd, or_exit = false, stdout = &stdout, stderr = &stderr) {
-        fmt.eprintfln("Failed to run command to compile shader '%v'")
-        return result, false
-    }
+    shader_output := fmt.tprintf("%v%v", output_path, output_extension)
     
-    if stdout != "" {
-        fmt.printfln("Hotreload output:\n\n%v\n", stdout)
-    }
+    compile_shader_begin(&cmd, shader_output)
     
-    if stderr != "" {
-        fmt.printfln("Hotreload error:\n\n%v\n", stderr)
-        return result, false
-    }
+    // embed shader source code for renderdoc
+    if ODIN_DEBUG { append(&cmd, "-g") }
+    if Optimized  { append(&cmd, "-O") }
+    
+    ok := compile_shader_end(&cmd, input_path)
+    if !ok { return result, false }
     
     shader_bytes, err := os.read_entire_file(shader_output, bytes_allocator)
     if err != nil {
@@ -359,9 +341,37 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
     return result, true
 }
 
-get_group_count :: proc (shader: Shader, total_count: u32) -> u32 {
-    result := (total_count + shader.local_size.x-1) / shader.local_size.x
-    return result
+compile_shader_begin :: proc (cmd: ^Cmd, shader_output: string) {
+    append(cmd, "C:/tools/VulkanSDK/1.4.350.0/Bin/glslc.exe")
+    append(cmd, "--target-env=vulkan1.4")
+    append(cmd, "-o", shader_output)
+}
+
+compile_shader_end :: proc (cmd: ^Cmd, shader_input: string) -> bool {
+    append(cmd, shader_input)
+    
+    stdout: string
+    stderr: string
+    if !run_command(cmd, or_exit = false, stdout = &stdout, stderr = &stderr) {
+        fmt.eprintfln("Failed to run command to compile shader '%v'")
+        return false
+    }
+    
+    
+    if stdout != "" { fmt.printfln("Shader compilation output:\n\n%v\n", stdout) }
+    
+    if stderr != "" {
+        fmt.printfln("Shader compilation error:\n\n%v\n", stderr)
+        return false
+    }
+    
+    return true
+}
+
+get_group_count :: proc (shader: Shader, count_x: u32 = 1, count_y: u32 = 1, count_z: u32 = 1) -> (x, y, z: u32) {
+    total_count := uv3{ count_x, count_y, count_z }
+    result := (total_count + shader.local_size-1) / shader.local_size
+    return **result
 }
 
 ////////////////////////////////////////////////

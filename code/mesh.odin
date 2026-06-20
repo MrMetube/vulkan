@@ -1,8 +1,8 @@
 #+vet explicit-allocators
 package main
 
-import "lib:meshoptimizer"
-import "lib:tobj"
+import "../lib/meshoptimizer"
+import "../lib/tobj"
 
 load_mesh :: proc (geometry: ^Geometry, filepath: string, _allocator: Allocator) -> bool {
     models, _, error := tobj.load_obj_filename(filepath, allocator = context.temp_allocator)

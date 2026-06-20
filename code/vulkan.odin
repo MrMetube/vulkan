@@ -24,8 +24,10 @@ Swapchain :: struct {
     size:   uv2,
     format: vk.Format, // @cleanup this is redundant with the color buffer's format
     
-    color_buffer: Image,
-    depth_buffer: Image,
+    color_buffer:  Image,
+    depth_buffer:  Image,
+    depth_pyramid: Image,
+    depth_pyramid_mips: [dynamic; 16] vk.ImageView,
 }
 
 Pipeline :: struct {
@@ -498,9 +500,29 @@ recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, old_swap
         it = create_semaphore(device)
     }
     
+    
     // :Stencil: add the .STENCIL mask bit
-    result.depth_buffer = gpu_make_image(result.size, result.depth_buffer.format, { .DEPTH_STENCIL_ATTACHMENT },         { .DEPTH })
-    result.color_buffer = gpu_make_image(result.size, result.format,              { .COLOR_ATTACHMENT , .TRANSFER_SRC }, { .COLOR })
+    result.depth_buffer  = gpu_make_image(result.size,  result.depth_buffer.format, { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED }, { .DEPTH })
+    result.color_buffer  = gpu_make_image(result.size,  result.format,              { .COLOR_ATTACHMENT , .TRANSFER_SRC },   { .COLOR })
+    pyramid_size := result.size/2
+    
+    depth_pyramid_mip_count: u32 = 1
+    {
+        size := pyramid_size
+        for size.x > 1 || size.y > 1 {
+            depth_pyramid_mip_count += 1
+            size /= 2
+        }
+    }
+    
+    // @waste this makes an image view over all mips, which we never use. its creation could be skipped. the aspect mask parameter is only relevant when in image view is requested.
+    result.depth_pyramid = gpu_make_image(pyramid_size, .R32_SFLOAT, { .SAMPLED, .STORAGE }, { .COLOR }, mip_levels = depth_pyramid_mip_count)
+    
+    for i in 0..<depth_pyramid_mip_count {
+        view := create_image_view(device, result.depth_pyramid, i, 1, { .COLOR })
+        append(&result.depth_pyramid_mips, view)
+    }
+    
     
     old_swapchain ^= result
 }
@@ -510,11 +532,17 @@ destroy_swapchain :: proc (device: vk.Device, swapchain: ^Swapchain) {
         vk.DestroySemaphore(device, it, nil)
     }
     clear(&swapchain.render_completes)
-    // the images are allocated for us, so we can just drop the handles
+    // The swapchain's images are allocated for us, so we can just drop the handles.
     clear(&swapchain.images)
     
     gpu_delete(swapchain.depth_buffer)
     gpu_delete(swapchain.color_buffer)
+    gpu_delete(swapchain.depth_pyramid)
+    
+    for &it in swapchain.depth_pyramid_mips {
+        vk.DestroyImageView(device, it, nil)
+    }
+    clear(&swapchain.depth_pyramid_mips)
     
     vk.DestroySwapchainKHR(device, swapchain.swapchain, nil)
 }
@@ -528,7 +556,7 @@ barrier_state: struct {
     buffer_barriers: [dynamic] vk.BufferMemoryBarrier2,
 }
 
-begin_pipeline_barrier :: proc () {
+pipeline_barrier_begin :: proc () {
     assert(!barrier_state.is_open)
     
     barrier_state.is_open = true
@@ -581,7 +609,7 @@ add_buffer_barrier_transition_from_last :: proc (buffer: ^Buffer, dst_stage: vk.
     add_buffer_barrier(buffer, last.stage, last.access, dst_stage, dst_access)
 }
 
-end_pipeline_barrier :: proc (command_buffer: vk.CommandBuffer) {
+pipeline_barrier_end :: proc (command_buffer: vk.CommandBuffer) {
     assert(barrier_state.is_open)
     
     vk.CmdPipelineBarrier2(command_buffer, &vk.DependencyInfo {
@@ -637,7 +665,7 @@ create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sha
     result: Pipeline
     result.shader_stages += { shader.stage }
     
-    result.layout = create_pipeline_layout(device, result.shader_stages, set_layout, with_push_data_which_is_an_address = true)
+    result.layout = create_pipeline_layout(device, result.shader_stages, set_layout, with_push_data_which_is_an_address = shader.use_push_constants)
     
     create_info := vk.ComputePipelineCreateInfo {
         sType = .COMPUTE_PIPELINE_CREATE_INFO,
@@ -794,7 +822,7 @@ destroy_pipeline :: proc (device: vk.Device, pipeline: Pipeline) {
 
 ////////////////////////////////////////////////
 
-begin_rendering :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, color_buffer: Image, image_index: u32, clear_color: v4) {
+begin_rendering :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, image_index: u32, clear_color: v4) {
     rendering_info := vk.RenderingInfo {
         sType = .RENDERING_INFO, 
         renderArea = { extent = to_extent(swapchain.size) },
@@ -802,7 +830,7 @@ begin_rendering :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, color_buffe
         colorAttachmentCount = 1,
         pColorAttachments = &vk.RenderingAttachmentInfo {
             sType = .RENDERING_ATTACHMENT_INFO,
-            imageView   = color_buffer.view,
+            imageView   = swapchain.color_buffer.view,
             imageLayout = .ATTACHMENT_OPTIMAL,
             loadOp      = .CLEAR,
             storeOp     = .STORE,
@@ -813,12 +841,41 @@ begin_rendering :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, color_buffe
             imageView   = swapchain.depth_buffer.view,
             imageLayout = .ATTACHMENT_OPTIMAL,
             loadOp      = .CLEAR,
-            storeOp     = .DONT_CARE,
+            storeOp     = .STORE,
             clearValue  = { depthStencil = { 0, 0 } }, // :ReversedZ: 0 is the maximal value
         },
     }
     
     vk.CmdBeginRendering(cb, &rendering_info)
+}
+
+begin_rendering_late :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, image_index: u32) {
+    rendering_info := vk.RenderingInfo {
+        sType = .RENDERING_INFO, 
+        renderArea = { extent = to_extent(swapchain.size) },
+        layerCount = 1,
+        colorAttachmentCount = 1,
+        pColorAttachments = &vk.RenderingAttachmentInfo {
+            sType = .RENDERING_ATTACHMENT_INFO,
+            imageView   = swapchain.color_buffer.view,
+            imageLayout = .ATTACHMENT_OPTIMAL,
+            loadOp      = .LOAD,
+            storeOp     = .STORE,
+        },
+        pDepthAttachment  = &vk.RenderingAttachmentInfo {
+            sType = .RENDERING_ATTACHMENT_INFO,
+            imageView   = swapchain.depth_buffer.view,
+            imageLayout = .ATTACHMENT_OPTIMAL,
+            loadOp      = .LOAD,
+            storeOp     = .DONT_CARE,
+        },
+    }
+    
+    vk.CmdBeginRendering(cb, &rendering_info)
+}
+
+end_rendering :: proc (cb: vk.CommandBuffer) {
+    vk.CmdEndRendering(cb)
 }
 
 queue_submit :: proc (queue: vk.Queue, swapchain: Swapchain, frame: Frame, image_index: u32, signal_value: u64, timeline_semaphore: vk.Semaphore) {
@@ -959,14 +1016,22 @@ gpu_make_image :: proc (size: uv2, format: vk.Format, usage: vk.ImageUsageFlags,
     
     check(vk.BindImageMemory(device, result.image, result.memory, 0))
     
+    result.view = create_image_view(device, result, 0, mip_levels, aspect_mask)
+    
+    return result
+}
+
+create_image_view :: proc (device: vk.Device, image: Image, mip_base: u32, mip_count: u32, aspect_mask: vk.ImageAspectFlags) -> vk.ImageView {
     view_create_info := vk.ImageViewCreateInfo {
         sType = .IMAGE_VIEW_CREATE_INFO,
-        image    = result.image,
+        image    = image.image,
         viewType = .D2,
-        format   = format,
-        subresourceRange = { aspectMask = aspect_mask, levelCount = mip_levels, layerCount = 1 },
+        format   = image.format,
+        subresourceRange = { aspectMask = aspect_mask, baseMipLevel = mip_base, levelCount = mip_count, layerCount = 1 },
     }
-    check(vk.CreateImageView(device, &view_create_info, nil, &result.view))
+    
+    result: vk.ImageView
+    check(vk.CreateImageView(device, &view_create_info, nil, &result))
     
     return result
 }
@@ -1235,6 +1300,19 @@ peek :: proc (s: [] $T) -> (T, bool) {
         ok = true
     }
     return result, ok
+}
+
+////////////////////////////////////////////////
+
+gpu_labeled_region_begin :: proc (cb: vk.CommandBuffer, label: cstring, color: v4) {
+    if !Optimized {
+        vk.CmdBeginDebugUtilsLabelEXT(cb, &vk.DebugUtilsLabelEXT { sType = .DEBUG_UTILS_LABEL_EXT, pLabelName = label, color = color} )
+    }
+}
+gpu_labeled_region_end :: proc (cb: vk.CommandBuffer) {
+    if !Optimized {
+        vk.CmdEndDebugUtilsLabelEXT(cb)
+    }
 }
 
 ////////////////////////////////////////////////
