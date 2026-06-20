@@ -26,8 +26,15 @@ Swapchain :: struct {
     
     color_buffer:  Image,
     depth_buffer:  Image,
+    
+    // @todo(viktor): if sampler are not affiliated with images, then why store them together?
+    depth_sampler: vk.Sampler,
     depth_pyramid: Image,
-    depth_pyramid_mips: [dynamic; 16] vk.ImageView,
+    depth_pyramid_mips: [dynamic; 16] Depth_Pyramid_Mip,
+}
+Depth_Pyramid_Mip :: struct {
+    view: vk.ImageView,
+    size: uv2,
 }
 
 Pipeline :: struct {
@@ -369,8 +376,8 @@ create_device_queue_frames_and_command_pool_and_init_gpu_allocator :: proc (ips:
     
     // @waste there are a lot of buffers here, each of which is very small
     for &frame in frames {
-        frame.draw_globals.gpu, frame.draw_globals.cpu = gpu_make_buffer_type(Draw_Globals, { .SHADER_DEVICE_ADDRESS })
-        frame.cull_globals.gpu, frame.cull_globals.cpu = gpu_make_buffer_type(Cull_Globals, { .SHADER_DEVICE_ADDRESS })
+        frame.draw_globals.gpu,  frame.draw_globals.cpu  = gpu_make_buffer_type(Draw_Globals,  { .SHADER_DEVICE_ADDRESS })
+        frame.cull_globals.gpu,  frame.cull_globals.cpu  = gpu_make_buffer_type(Cull_Globals,  { .SHADER_DEVICE_ADDRESS })
         
         frame.image_aquired = create_semaphore(device)
         defer_destroy(vk.DestroySemaphore, frame.image_aquired)
@@ -505,8 +512,10 @@ recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, old_swap
     
     // :Stencil: add the .STENCIL mask bit
     result.depth_buffer  = gpu_make_image(result.size,  result.depth_buffer.format, { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED }, { .DEPTH })
-    result.color_buffer  = gpu_make_image(result.size,  result.format,              { .COLOR_ATTACHMENT , .TRANSFER_SRC },   { .COLOR })
+    result.color_buffer  = gpu_make_image(result.size,  result.format,              { .COLOR_ATTACHMENT, .TRANSFER_SRC },   { .COLOR })
     pyramid_size := result.size/2
+    
+    result.depth_buffer.sampler = create_sampler(device, .NEAREST, .NEAREST)
     
     depth_pyramid_mip_count: u32 = 1
     {
@@ -518,13 +527,16 @@ recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, old_swap
     }
     
     // @waste this makes an image view over all mips, which we never use. its creation could be skipped. the aspect mask parameter is only relevant when in image view is requested.
-    result.depth_pyramid = gpu_make_image(pyramid_size, .R32_SFLOAT, { .SAMPLED, .STORAGE }, { .COLOR }, mip_levels = depth_pyramid_mip_count)
+    result.depth_pyramid = gpu_make_image(pyramid_size, .R32_SFLOAT, { .SAMPLED, .STORAGE, .TRANSFER_SRC }, { .COLOR }, mip_levels = depth_pyramid_mip_count)
     
     for i in 0..<depth_pyramid_mip_count {
-        view := create_image_view(device, result.depth_pyramid, i, 1, { .COLOR })
-        append(&result.depth_pyramid_mips, view)
+        mip := append_into(&result.depth_pyramid_mips)
+        mip.view = create_image_view(device, result.depth_pyramid, i, 1, { .COLOR })
+        mip.size = pyramid_size
+        mip.size.x >>= i
+        mip.size.y >>= i
+        mip.size = vec_max(mip.size, 1)
     }
-    
     
     old_swapchain ^= result
 }
@@ -540,9 +552,10 @@ destroy_swapchain :: proc (device: vk.Device, swapchain: ^Swapchain) {
     gpu_delete(swapchain.depth_buffer)
     gpu_delete(swapchain.color_buffer)
     gpu_delete(swapchain.depth_pyramid)
+    gpu_delete(swapchain.depth_pyramid)
     
     for &it in swapchain.depth_pyramid_mips {
-        vk.DestroyImageView(device, it, nil)
+        vk.DestroyImageView(device, it.view, nil)
     }
     clear(&swapchain.depth_pyramid_mips)
     
@@ -611,11 +624,13 @@ add_buffer_barrier_transition_from_last :: proc (buffer: ^Buffer, dst_stage: vk.
     add_buffer_barrier(buffer, last.stage, last.access, dst_stage, dst_access)
 }
 
-pipeline_barrier_end :: proc (command_buffer: vk.CommandBuffer) {
+// @todo(viktor): check where niagara uses flags and add it
+pipeline_barrier_end :: proc (command_buffer: vk.CommandBuffer, flags := vk.DependencyFlags {}) {
     assert(barrier_state.is_open)
     
     vk.CmdPipelineBarrier2(command_buffer, &vk.DependencyInfo {
         sType = .DEPENDENCY_INFO,
+        dependencyFlags          = flags, 
         imageMemoryBarrierCount  = auto_cast len(barrier_state.image_barriers),
         pImageMemoryBarriers     = raw_data(barrier_state.image_barriers),
         bufferMemoryBarrierCount = auto_cast len(barrier_state.buffer_barriers),
@@ -634,7 +649,7 @@ pipeline_is_valid :: proc (pipeline: Pipeline) -> bool {
     return result
 }
 
-create_pipeline_layout :: proc (device: vk.Device, stage_flags: vk.ShaderStageFlags, set_layouts: ..vk.DescriptorSetLayout, with_push_data_which_is_an_address := false) -> vk.PipelineLayout {
+create_pipeline_layout :: proc (device: vk.Device, stage_flags: vk.ShaderStageFlags, set_layouts: ..vk.DescriptorSetLayout, size_of_push_constant: u32 = 0) -> vk.PipelineLayout {
     info := vk.PipelineLayoutCreateInfo { sType = .PIPELINE_LAYOUT_CREATE_INFO }
     
     if len(set_layouts) > 0 {
@@ -642,11 +657,11 @@ create_pipeline_layout :: proc (device: vk.Device, stage_flags: vk.ShaderStageFl
         info.pSetLayouts    = &set_layouts[0]
     }
     
-    if with_push_data_which_is_an_address {
+    if size_of_push_constant != 0 {
         info.pushConstantRangeCount = 1
         info.pPushConstantRanges = &vk.PushConstantRange {
             stageFlags = stage_flags,
-            size       = size_of(vk.DeviceAddress),
+            size       = size_of_push_constant,
         }
     }
     
@@ -656,7 +671,9 @@ create_pipeline_layout :: proc (device: vk.Device, stage_flags: vk.ShaderStageFl
     return result
 }
 
-create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, shader: Shader, set_layout: vk.DescriptorSetLayout, old: Pipeline = {}) -> Pipeline {
+
+// @todo(viktor): store type of pushconstant in the pipeline, so that cmdpushconstants can validate usage, then also differentiate if its a pointer type to use vk.DeviceAddress's size or a struct type
+create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, shader: Shader, set_layout: vk.DescriptorSetLayout, old: Pipeline = {}, $PushConstant: typeid) -> Pipeline {
     if pipeline_is_valid(old) {
         check(vk.DeviceWaitIdle(device))
         destroy_pipeline(device, old)
@@ -667,7 +684,7 @@ create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sha
     result: Pipeline
     result.shader_stages += { shader.stage }
     
-    result.layout = create_pipeline_layout(device, result.shader_stages, set_layout, with_push_data_which_is_an_address = shader.use_push_constants)
+    result.layout = create_pipeline_layout(device, result.shader_stages, set_layout, size_of_push_constant = size_of(PushConstant))
     
     create_info := vk.ComputePipelineCreateInfo {
         sType = .COMPUTE_PIPELINE_CREATE_INFO,
@@ -691,7 +708,7 @@ create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sha
     return result
 }
 
-create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, swapchain: Swapchain, set_layouts: [] vk.DescriptorSetLayout, shaders: [] Shader, old: Pipeline = {}) -> Pipeline {
+create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, swapchain: Swapchain, set_layouts: [] vk.DescriptorSetLayout, shaders: [] Shader, old: Pipeline = {}, $PushConstant: typeid) -> Pipeline {
     if pipeline_is_valid(old) {
         check(vk.DeviceWaitIdle(device))
         destroy_pipeline(device, old)
@@ -702,7 +719,7 @@ create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sw
         result.shader_stages += { shader.stage }
     }
     
-    result.layout = create_pipeline_layout(device, result.shader_stages, ..set_layouts, with_push_data_which_is_an_address = true)
+    result.layout = create_pipeline_layout(device, result.shader_stages, ..set_layouts, size_of_push_constant = size_of(PushConstant))
     
     shader_stages: [dynamic; 16] vk.PipelineShaderStageCreateInfo
     module_infos:  [dynamic; 16] vk.ShaderModuleCreateInfo
@@ -880,7 +897,7 @@ destroy_pipeline :: proc (device: vk.Device, pipeline: Pipeline) {
 
 ////////////////////////////////////////////////
 
-begin_rendering :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, image_index: u32, clear_color: v4) {
+begin_rendering :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, image_index: u32, clear_color: v4, early: bool) {
     rendering_info := vk.RenderingInfo {
         sType = .RENDERING_INFO, 
         renderArea = { extent = to_extent(swapchain.size) },
@@ -890,7 +907,7 @@ begin_rendering :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, image_index
             sType = .RENDERING_ATTACHMENT_INFO,
             imageView   = swapchain.color_buffer.view,
             imageLayout = .ATTACHMENT_OPTIMAL,
-            loadOp      = .CLEAR,
+            loadOp      = early ? .CLEAR : .LOAD,
             storeOp     = .STORE,
             clearValue  = { color = { float32 = clear_color } },
         },
@@ -898,34 +915,9 @@ begin_rendering :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, image_index
             sType = .RENDERING_ATTACHMENT_INFO,
             imageView   = swapchain.depth_buffer.view,
             imageLayout = .ATTACHMENT_OPTIMAL,
-            loadOp      = .CLEAR,
-            storeOp     = .STORE,
+            loadOp      = early ? .CLEAR : .LOAD,
+            storeOp     = early ? .STORE : .DONT_CARE,
             clearValue  = { depthStencil = { 0, 0 } }, // :ReversedZ: 0 is the maximal value
-        },
-    }
-    
-    vk.CmdBeginRendering(cb, &rendering_info)
-}
-
-begin_rendering_late :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, image_index: u32) {
-    rendering_info := vk.RenderingInfo {
-        sType = .RENDERING_INFO, 
-        renderArea = { extent = to_extent(swapchain.size) },
-        layerCount = 1,
-        colorAttachmentCount = 1,
-        pColorAttachments = &vk.RenderingAttachmentInfo {
-            sType = .RENDERING_ATTACHMENT_INFO,
-            imageView   = swapchain.color_buffer.view,
-            imageLayout = .ATTACHMENT_OPTIMAL,
-            loadOp      = .LOAD,
-            storeOp     = .STORE,
-        },
-        pDepthAttachment  = &vk.RenderingAttachmentInfo {
-            sType = .RENDERING_ATTACHMENT_INFO,
-            imageView   = swapchain.depth_buffer.view,
-            imageLayout = .ATTACHMENT_OPTIMAL,
-            loadOp      = .LOAD,
-            storeOp     = .DONT_CARE,
         },
     }
     
@@ -1094,6 +1086,29 @@ create_image_view :: proc (device: vk.Device, image: Image, mip_base: u32, mip_c
     return result
 }
 
+create_sampler :: proc (device: vk.Device, filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, max_lod: f32 = 16, anisotropy: b32 = false) -> vk.Sampler {
+    sampler_create_info := vk.SamplerCreateInfo {
+        sType = .SAMPLER_CREATE_INFO,
+        
+        magFilter  = filter,
+        minFilter  = filter,
+        mipmapMode = mipmap_mode,
+        
+        addressModeU = .CLAMP_TO_EDGE,
+        addressModeV = .CLAMP_TO_EDGE,
+        addressModeW = .CLAMP_TO_EDGE,
+        
+        anisotropyEnable = anisotropy,
+        maxAnisotropy    = anisotropy ? 8 : 0,
+        maxLod           = max_lod,
+    }
+    
+    result: vk.Sampler
+    check(vk.CreateSampler(device, &sampler_create_info, nil, &result))
+    
+    return result
+}
+
 select_memory_type_and_allocate :: proc (requirements: vk.MemoryRequirements, flags: vk.MemoryPropertyFlags, add_device_address_flag := false) -> vk.DeviceMemory {
     assert(gpu_allocator_state.initialized)
     
@@ -1188,6 +1203,7 @@ gpu_delete_image :: proc (image: Image) {
     assert(gpu_allocator_state.initialized)
     device := gpu_allocator_state.device
     
+    vk.DestroySampler(device,   image.sampler, nil)
     vk.DestroyImageView(device, image.view, nil)
     vk.DestroyImage(device,     image.image, nil)
     vk.FreeMemory(device,       image.memory, nil)
@@ -1326,7 +1342,7 @@ gpu_profile_collate_times :: proc (ips: IPS, device: vk.Device, print: bool) {
         for zone in gpu_profiler.zones {
             xx :: proc (seconds: f64) -> time.Duration { return cast(time.Duration) (seconds * cast(f64) time.Second) }
             
-            fmt.printf("  %12v: %v", zone.label, xx(zone.total_time))
+            fmt.printf("  %25v: %v", zone.label, xx(zone.total_time))
             if zone.total_time_with_children != zone.total_time {
                 fmt.printf(" (with children %v)", xx(zone.total_time_with_children))
             }

@@ -80,6 +80,11 @@ Draw_Globals :: struct {
 }
 
 // @shader
+Depth_Globals :: struct {
+    size: v2,
+}
+
+// @shader
 Draw :: struct {
     orientation: q32,
     p:           v3,
@@ -266,17 +271,7 @@ main :: proc () {
             
             check(vk.WaitForFences(device, 1, &fence_once, waitAll = true, timeout = MaxTimeout))
             
-            sampler_create_info := vk.SamplerCreateInfo {
-                sType = .SAMPLER_CREATE_INFO,
-                magFilter  = .LINEAR,
-                minFilter  = .LINEAR,
-                mipmapMode = .LINEAR,
-                anisotropyEnable = true,
-                maxAnisotropy = 8,
-                maxLod = cast(f32) loaded_texture.mip_levels,
-            }
-            
-            check(vk.CreateSampler(device, &sampler_create_info, nil, &texture.sampler))
+            texture.sampler = create_sampler(device, .LINEAR, .LINEAR, cast(f32) loaded_texture.mip_levels, true)
             defer_destroy(vk.DestroySampler, texture.sampler)
             
             texture_descriptors[index] = vk.DescriptorImageInfo{ sampler = texture.sampler, imageView = texture.view, imageLayout = .READ_ONLY_OPTIMAL }
@@ -503,8 +498,11 @@ main :: proc () {
         return result
     }
     
+    // @cleanup into a debug struct
     culling_enabled: bool = true
     lod_enabled:     bool = true
+    display_pyramid: bool
+    display_pyramid_mip_level: i32 = 0
     
     cull_delta: f64
     cpu_time: f64
@@ -543,7 +541,10 @@ main :: proc () {
                 switch event.key.key {
                 case sdl.K_SPACE: space_down = true
                 case sdl.K_C:     culling_enabled = !culling_enabled
-                case sdl.K_L:     lod_enabled = !lod_enabled
+                case sdl.K_L:     lod_enabled     = !lod_enabled
+                case sdl.K_O:     display_pyramid = !display_pyramid
+                case sdl.K_PLUS:  display_pyramid_mip_level = clamp(display_pyramid_mip_level+1, 0, cast(i32) len(swapchain.depth_pyramid_mips)-1)
+                case sdl.K_MINUS: display_pyramid_mip_level = clamp(display_pyramid_mip_level-1, 0, cast(i32) len(swapchain.depth_pyramid_mips)-1)
                 case sdl.K_P:     print_profile_and_stats = true
                 }
             case .KEY_UP:
@@ -597,15 +598,15 @@ main :: proc () {
         watchers_check_for_modification(watchers)
         
         if reload_shaders_if_needed(watchers, shader_allocator, &draw_cull_shader) || !pipeline_is_valid(cull_pipeline) {
-            cull_pipeline = create_compute_pipeline(device, pipeline_cache, draw_cull_shader, cull_descriptor_set_layout, cull_pipeline)
+            cull_pipeline = create_compute_pipeline(device, pipeline_cache, draw_cull_shader, cull_descriptor_set_layout, cull_pipeline, vk.DeviceAddress)
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, &depth_reduce_shader) || !pipeline_is_valid(depth_pipeline) {
-            depth_pipeline = create_compute_pipeline(device, pipeline_cache, depth_reduce_shader, depth_descriptor_set_layout, depth_pipeline)
+            depth_pipeline = create_compute_pipeline(device, pipeline_cache, depth_reduce_shader, depth_descriptor_set_layout, depth_pipeline, Depth_Globals)
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, meshlet_shaders[:]) || !pipeline_is_valid(meshlet_pipeline) {
-            meshlet_pipeline = create_graphics_pipeline(device, pipeline_cache, swapchain, { graphics_descriptor_set_layout, textures_descriptor_set_layout }, meshlet_shaders[:], meshlet_pipeline)
+            meshlet_pipeline = create_graphics_pipeline(device, pipeline_cache, swapchain, { graphics_descriptor_set_layout, textures_descriptor_set_layout }, meshlet_shaders[:], meshlet_pipeline, vk.DeviceAddress)
         }
         
         ////////////////////////////////////////////////
@@ -694,7 +695,8 @@ main :: proc () {
             return result
         }
         
-        projection := projection_reversed_z_infinite_far_plane(70 * RadPerDeg, cast(f32) swapchain.size.x / cast(f32) swapchain.size.y, 0.01)
+        // @important @todo once we are satisfied with the occlusion culling the near plane should be set to a more reasonable value like 0.01. the 0.1 value is just useful for debugging, as the depth values lie in a more visible range.
+        projection := projection_reversed_z_infinite_far_plane(70 * RadPerDeg, cast(f32) swapchain.size.x / cast(f32) swapchain.size.y, 0.1)
         view       := translate(1, -cam_pos)
         draw_globals.projection = projection
         draw_globals.view       = view
@@ -809,8 +811,6 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        // :OcclusionCull: the barrier before the depth pyramid was missing the barrier for the pyramid.image itself (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=11592)
-        
         pipeline_barrier_begin()
             add_image_barrier(&swapchain.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL)
             add_image_barrier(&swapchain.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
@@ -834,9 +834,9 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        begin_rendering(cb, swapchain, image_index, {0.07, 0.07, 0.07, 1})
-            gpu_profile_zone_begin("rendering early pass")
-            gpu_labeled_region_begin(cb, "rendering early pass", {0.6, 0.1, 07, 1.0})
+        gpu_profile_zone_begin("rendering early pass")
+        gpu_labeled_region_begin(cb, "rendering early pass", {0.6, 0.1, 07, 1.0})
+        begin_rendering(cb, swapchain, image_index, {0.07, 0.07, 0.07, 1}, early = true)
             
             
             gpu_labeled_region_begin(cb, "meshlets", {0.0, 0.6, 0.8, 1.0})
@@ -868,40 +868,55 @@ main :: proc () {
                 vk.CmdEndQuery(cb, stats_pool, 0)
             }
             
-            gpu_labeled_region_end(cb)
-            gpu_profile_zone_end()
         end_rendering(cb)
+        gpu_labeled_region_end(cb)
+        gpu_profile_zone_end()
         
         ////////////////////////////////////////////////
         
+        // :OcclusionCull: the barrier before the depth pyramid was missing the barrier for the pyramid.image itself (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=11592)
+        
         pipeline_barrier_begin()
             add_image_barrier_transition_from_last(&swapchain.depth_buffer, { .COMPUTE_SHADER }, { .SHADER_READ }, .SHADER_READ_ONLY_OPTIMAL, { .DEPTH })
+            add_image_barrier(&swapchain.depth_pyramid, {}, {}, .UNDEFINED,  { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL)
         pipeline_barrier_end(cb)
         
         ////////////////////////////////////////////////
         
+        gpu_profile_zone_begin("depth pyramid building")
+        gpu_labeled_region_begin(cb, "depth pyramid building", {0.4, 0.8, 0, 1.0})
         vk.CmdBindPipeline(cb, .COMPUTE, depth_pipeline.pipeline)
         
-        for &view, mip_level in swapchain.depth_pyramid_mips {
-            // @shaders depth_reduce.comp
-            DepthBindingCount :: 1
+        // @shaders depth_reduce.comp
+        DepthBindingCount :: 2
+        
+        // @compression this setup of update template, push descriptor is repeating for each pipeline and is kind of redundant.
+        depth_descriptor_update := [DepthBindingCount] DescriptorUpdateData {
+            { image = { sampler = swapchain.depth_buffer.sampler, imageView = swapchain.depth_buffer.view, imageLayout = swapchain.depth_buffer.last_transition.layout } },
+            { image = { sampler = swapchain.depth_buffer.sampler, imageView = 0,                           imageLayout = .GENERAL } },
+        }
+        for &mip, mip_level in swapchain.depth_pyramid_mips {
+            depth_descriptor_update[1].image.imageView = mip.view
+            defer depth_descriptor_update[0] = depth_descriptor_update[1]
             
-            // @compression this setup of update template, push descriptor is repeating for each pipeline and is kind of redundant.
-            depth_descriptor_update := [DepthBindingCount] DescriptorUpdateData {
-                { image = { imageView = view, imageLayout = .GENERAL } },
+            
+            depth_globals := Depth_Globals {
+                size = cast(v2) mip.size,
             }
+            vk.CmdPushConstants(cb, depth_pipeline.layout, depth_pipeline.shader_stages, 0, size_of(depth_globals), &depth_globals)
+            
             vk.CmdPushDescriptorSetWithTemplate(cb, depth_pipeline.update_template, depth_pipeline.layout, 0, &depth_descriptor_update[0])
             
-            // @volatile could be stored on swapchain creation
-            level_size := swapchain.size/2
-            level_size.x >>= cast(u32) mip_level
-            level_size.y >>= cast(u32) mip_level
-            level_size = vec_max(level_size, 1)
+            vk.CmdDispatch(cb, get_group_count(depth_reduce_shader, **mip.size, 1))
             
-            vk.CmdDispatch(cb, get_group_count(depth_reduce_shader, **level_size, 1))
+            pipeline_barrier_begin()
+                add_image_barrier_transition_from_last(&swapchain.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
+            pipeline_barrier_end(cb, { .BY_REGION })
         }
         
-        // @todo(viktor): build depth pyramid
+        gpu_labeled_region_end(cb)
+        gpu_profile_zone_end()
+        
         ////////////////////////////////////////////////
         
         pipeline_barrier_begin()
@@ -910,28 +925,56 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        begin_rendering_late(cb, swapchain, image_index)
-            gpu_profile_zone_begin("rendering late pass")
-            gpu_labeled_region_begin(cb, "rendering late pass", {0.6, 0.1, 07, 1.0})
+        gpu_profile_zone_begin("rendering late pass")
+        gpu_labeled_region_begin(cb, "rendering late pass", {0.6, 0.1, 07, 1.0})
+        begin_rendering(cb, swapchain, image_index, {}, early = false)
             
-            gpu_labeled_region_end(cb)
-            gpu_profile_zone_end()
         end_rendering(cb)
+        gpu_labeled_region_end(cb)
+        gpu_profile_zone_end()
         
         ////////////////////////////////////////////////
         
         gpu_profile_zone_begin("copy to swapchain")
         
         pipeline_barrier_begin()
-            add_image_barrier_transition_from_last(&swapchain.color_buffer, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
             add_image_barrier(swapchain.images[image_index], { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
+            if !display_pyramid {
+                add_image_barrier_transition_from_last(&swapchain.color_buffer, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
+            } else {
+                add_image_barrier_transition_from_last(&swapchain.depth_pyramid, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
+            }
         pipeline_barrier_end(cb)
-        
-        vk.CmdCopyImage(cb, swapchain.color_buffer.image, .TRANSFER_SRC_OPTIMAL, swapchain.images[image_index], .TRANSFER_DST_OPTIMAL, 1, &vk.ImageCopy {
-            srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
-            dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
-            extent         = to_extent(swapchain.size, 1),
-        })
+            
+        // @todo(viktor): we could also just store a whole Image for the swapchain.images. then we could use the last transitioned to layout instead of duplicating that information here
+        if !display_pyramid {
+            source := swapchain.color_buffer
+            destination := swapchain.images[image_index]
+            
+            vk.CmdCopyImage(cb, source.image, source.last_transition.layout, destination, .TRANSFER_DST_OPTIMAL, 1, &vk.ImageCopy {
+                srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
+                dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
+                extent         = to_extent(swapchain.size, 1),
+            })
+        } else {
+            source := swapchain.depth_pyramid
+            destination := swapchain.images[image_index]
+            
+            // @cleanup just store/read the size on the mip view at the display_pyramid_mip_level index.
+            mip_size := cast(iv2) swapchain.size / 2
+            mip_size.x >>= cast(u32) display_pyramid_mip_level
+            mip_size.y >>= cast(u32) display_pyramid_mip_level
+            mip_size = vec_max(mip_size, 1)
+            
+            dest_size := cast(iv2) swapchain.size
+            
+            vk.CmdBlitImage(cb, source.image, source.last_transition.layout, destination, .TRANSFER_DST_OPTIMAL, 1, &vk.ImageBlit {
+                srcSubresource = { aspectMask = { .COLOR }, layerCount = 1, mipLevel = cast(u32) display_pyramid_mip_level },
+                dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
+                srcOffsets = { {0, 0, 0}, {mip_size.x, mip_size.y,   1}},
+                dstOffsets = { {0, 0, 0}, {dest_size.x, dest_size.y, 1}},
+            }, .NEAREST)
+        }
         
         pipeline_barrier_begin()
             add_image_barrier(swapchain.images[image_index], { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, {}, {}, .PRESENT_SRC_KHR)

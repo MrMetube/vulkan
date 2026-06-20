@@ -33,6 +33,7 @@ generate_shader_api :: proc (output_file: string) {
     append_simple_struct(&builder, Mesh)
     append_simple_struct(&builder, Meshlet)
     append_simple_struct(&builder, Vertex)
+    append_simple_struct(&builder, Depth_Globals)
     
     append_buffer_reference_struct(&builder, Cull_Globals)
     append_buffer_reference_struct(&builder, Draw_Globals)
@@ -203,6 +204,12 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
     result.bytes = shader_bytes
     
     {
+        // @cleanup wrap into a using parse: struct xx
+        result.resource_mask      = {}
+        result.resource_types     = {}
+        result.use_push_constants = {}
+        result.local_size         = {}
+        
         shader_code := slice_from_parts(u32, raw_data(shader_bytes), len(shader_bytes) / 4)
         
         assert(shader_code[0] == SpvMagicNumber)

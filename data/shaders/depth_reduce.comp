@@ -6,13 +6,22 @@
 
 layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
 
-// @volatile
 
-// layout(binding = 0) sampler2D Input;
-layout(binding = 0, r32f) uniform writeonly image2D Output;
+// @volatile
+layout(binding = 0)       uniform           sampler2D Input;
+layout(binding = 1, r32f) uniform writeonly image2D   Output;
+
+// @volatile
+layout(push_constant) uniform Push_Data {
+    Depth_Globals globals;
+};
+
 
 void main() {
     uvec2 pixel = gl_GlobalInvocationID.xy;
     
-    imageStore(Output, ivec2(pixel), vec4(0));
+    vec4 depth4 = textureGather(Input, (vec2(pixel)+0.5) / globals.size);
+    float depth = min( min(depth4.x, depth4.y), min(depth4.z, depth4.w) );
+    
+    imageStore(Output, ivec2(pixel), vec4(depth));
 }
