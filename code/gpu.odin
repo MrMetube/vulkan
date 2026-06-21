@@ -57,21 +57,9 @@ Gpu :: struct {
     render_completes: [dynamic] vk.Semaphore,
     
     swapchain_size:   uv2,
-    swapchain_format: vk.Format,
-    
-    // @cleanup the app want to know when it's swapchain relatated stuff needs to also be recreated, but the gpu should not depend on that
-    using stuff: Stuff_With_The_Same_Lifetime_As_The_Swapchain,
-    
-}
-
-Stuff_With_The_Same_Lifetime_As_The_Swapchain :: struct {
-    color_buffer:  Image,
-    depth_buffer:  Image,
-    
-    // @todo(viktor): if sampler are not affiliated with images, then why store them together?
-    depth_sampler: vk.Sampler,
-    depth_pyramid: Image,
-    depth_pyramid_mips: [dynamic; 16] Depth_Pyramid_Mip,
+    swapchain_format: vk.Format, // @cleanup is this always just the color_buffers format?
+    color_buffer: Image,
+    depth_buffer: Image,
 }
 
 ////////////////////////////////////////////////
@@ -561,7 +549,6 @@ gpu_delete_buffer :: proc (gpu: ^Gpu, buffer: Buffer) {
 gpu_delete_image :: proc (gpu: ^Gpu, image: Image) {
     assert(gpu.device != nil)
     
-    vk.DestroySampler(gpu.device,   image.sampler, nil)
     vk.DestroyImageView(gpu.device, image.view, nil)
     vk.DestroyImage(gpu.device,     image.image, nil)
     vk.FreeMemory(gpu.device,       image.memory, nil)

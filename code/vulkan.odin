@@ -49,8 +49,6 @@ Image :: struct {
     view:   vk.ImageView,
     memory: vk.DeviceMemory,
     
-	sampler: vk.Sampler,
-    
     last_transition: Transition,
 }
 
@@ -185,36 +183,9 @@ recreate_swapchain :: proc (gpu: ^Gpu, new_size: uv2) {
         it = create_semaphore(gpu.device)
     }
     
-    // @cleanup this is app related code
     // :Stencil: add the .STENCIL mask bit
     gpu.depth_buffer  = gpu_make_image(gpu, gpu.swapchain_size,  gpu.depth_buffer.format, { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED }, { .DEPTH })
     gpu.color_buffer  = gpu_make_image(gpu, gpu.swapchain_size,  gpu.swapchain_format,    { .COLOR_ATTACHMENT, .TRANSFER_SRC },   { .COLOR })
-    
-    gpu.depth_buffer.sampler = create_sampler(gpu.device, .NEAREST, .NEAREST)
-    
-    // Ensures that all reductions are at most 2x2 which makes sure they are conservative.
-    pyramid_size := uv2{previous_power_of_two(gpu.swapchain_size.x), previous_power_of_two(gpu.swapchain_size.y)} 
-    
-    depth_pyramid_mip_count: u32 = 1
-    {
-        size := pyramid_size
-        for size.x > 1 || size.y > 1 {
-            depth_pyramid_mip_count += 1
-            size /= 2
-        }
-    }
-    
-    // @waste this makes an image view over all mips, which we never use. its creation could be skipped. the aspect mask parameter is only relevant when in image view is requested.
-    gpu.depth_pyramid = gpu_make_image(gpu, pyramid_size, .R32_SFLOAT, { .SAMPLED, .STORAGE, .TRANSFER_SRC }, { .COLOR }, mip_levels = depth_pyramid_mip_count)
-    
-    for i in 0..<depth_pyramid_mip_count {
-        mip := append_into(&gpu.depth_pyramid_mips)
-        mip.view = create_image_view(gpu.device, gpu.depth_pyramid, i, 1, { .COLOR })
-        mip.size = pyramid_size
-        mip.size.x >>= i
-        mip.size.y >>= i
-        mip.size = vec_max(mip.size, 1)
-    }
 }
 
 destroy_swapchain :: proc (gpu: ^Gpu) {
@@ -222,19 +193,10 @@ destroy_swapchain :: proc (gpu: ^Gpu) {
         vk.DestroySemaphore(gpu.device, it, nil)
     }
     clear(&gpu.render_completes)
-    // The swapchain's images are allocated for us, so we can just drop the handles.
-    clear(&gpu.swapchain_images)
+    clear(&gpu.swapchain_images) // The swapchain's images are allocated for us, so we can just drop the handles.
     
     gpu_delete(gpu, gpu.depth_buffer)
     gpu_delete(gpu, gpu.color_buffer)
-    
-    // @todo(viktor): split off app data
-    gpu_delete(gpu, gpu.depth_pyramid)
-    
-    for &it in gpu.depth_pyramid_mips {
-        vk.DestroyImageView(gpu.device, it.view, nil)
-    }
-    clear(&gpu.depth_pyramid_mips)
     
     vk.DestroySwapchainKHR(gpu.device, gpu.swapchain, nil)
 }

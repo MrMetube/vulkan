@@ -42,6 +42,12 @@ Geometry :: struct {
     meshes: [dynamic] Mesh,
 }
 
+Stuff_With_The_Same_Lifetime_As_The_Swapchain :: struct {
+    depth_sampler: vk.Sampler, // well except you of course..
+    depth_pyramid: Image,
+    depth_pyramid_mips: [dynamic; 16] Depth_Pyramid_Mip,
+}
+
 ////////////////////////////////////////////////
 
 // @shader meshlet.mesh
@@ -155,6 +161,9 @@ main :: proc () {
     gpu := gpu_init(window)
     // @cleanup
     device := gpu.device
+    
+    stuff: Stuff_With_The_Same_Lifetime_As_The_Swapchain
+    recreate_stuff(&gpu, &stuff)
     
     frames := make([] Frame, MaxFramesInFlight, context.allocator)
     // @waste there are a lot of buffers here, each of which is very small
@@ -274,10 +283,10 @@ main :: proc () {
             
             check(vk.WaitForFences(device, 1, &fence_once, waitAll = true, timeout = MaxTimeout))
             
-            texture.sampler = create_sampler(device, .LINEAR, .LINEAR, cast(f32) loaded_texture.mip_levels, true)
-            defer_destroy(vk.DestroySampler, texture.sampler)
+            sampler := create_sampler(device, .LINEAR, .LINEAR, cast(f32) loaded_texture.mip_levels, true)
+            defer_destroy(vk.DestroySampler, sampler)
             
-            texture_descriptors[index] = vk.DescriptorImageInfo{ sampler = texture.sampler, imageView = texture.view, imageLayout = .READ_ONLY_OPTIMAL }
+            texture_descriptors[index] = vk.DescriptorImageInfo{ sampler = sampler, imageView = texture.view, imageLayout = .READ_ONLY_OPTIMAL }
         }
     }
     
@@ -306,63 +315,9 @@ main :: proc () {
     depth_reduce_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/depth_reduce.comp", shader_allocator)
     
     ////////////////////////////////////////////////
-    // @todo put all buffer addresses into the push constant and remove these bindings
-    // @shader needs to match the bindings in shaders
     
+    // @todo if we reach true bindless this and the functions can gladly be deleted
     graphics_descriptor_set_layout := create_descriptor_set_layout(device, ..meshlet_shaders[:])
-    if false {
-        bindings := [?] vk.DescriptorSetLayoutBinding {
-            { // draw
-                binding = 0,
-                descriptorType  = .STORAGE_BUFFER,
-                descriptorCount = 1,
-                stageFlags      = { .MESH_EXT, .TASK_EXT },
-            },
-            { // mesh
-                binding = 1,
-                descriptorType  = .STORAGE_BUFFER,
-                descriptorCount = 1,
-                stageFlags      = { .TASK_EXT },
-            },
-            { // meshlet
-                binding = 2,
-                descriptorType  = .STORAGE_BUFFER,
-                descriptorCount = 1,
-                stageFlags      = { .MESH_EXT, .TASK_EXT },
-            },
-            { // meshlet data
-                binding = 3,
-                descriptorType  = .STORAGE_BUFFER,
-                descriptorCount = 1,
-                stageFlags      = { .MESH_EXT, .TASK_EXT },
-            },
-            { // vertex
-                binding = 4,
-                descriptorType  = .STORAGE_BUFFER,
-                descriptorCount = 1,
-                stageFlags      = { .MESH_EXT },
-            },
-            { // draw_command
-                binding = 5,
-                descriptorType  = .STORAGE_BUFFER,
-                descriptorCount = 1,
-                stageFlags      = { .TASK_EXT },
-            },
-        }
-        
-        create_info := vk.DescriptorSetLayoutCreateInfo {
-            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            flags        = { .PUSH_DESCRIPTOR },
-            bindingCount = len(bindings),
-            pBindings    = &bindings[0],
-        }
-        
-        check(vk.CreateDescriptorSetLayout(device, &create_info, nil, &graphics_descriptor_set_layout))
-        defer_destroy(vk.DestroyDescriptorSetLayout, graphics_descriptor_set_layout)
-    }
-    
-    ////////////////////////////////////////////////
-    
     cull_descriptor_set_layout  := create_descriptor_set_layout(device, draw_cull_shader)
     depth_descriptor_set_layout := create_descriptor_set_layout(device, depth_reduce_shader)
     
@@ -495,6 +450,7 @@ main :: proc () {
     display_pyramid: bool
     display_pyramid_mip_level: i32 = 0
     
+    
     cull_delta: f64
     cpu_time: f64
     gpu_time: f64
@@ -503,7 +459,6 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        // @speed collecting stats can impact performance significantly, so we should not need them to be collected when measuring performance timestamps.
         // @speed similarly the timestamps should only be collected if we need them. As we currently only look at the last rendered frame, we should only take them if we then also print them. In the future we may want to store more than one frame, but for now this would be better.
         print_profile_and_stats: bool
         
@@ -534,8 +489,8 @@ main :: proc () {
                 case sdl.K_C:     culling_enabled = !culling_enabled
                 case sdl.K_L:     lod_enabled     = !lod_enabled
                 case sdl.K_O:     display_pyramid = !display_pyramid
-                case sdl.K_PLUS:  display_pyramid_mip_level = clamp(display_pyramid_mip_level+1, 0, cast(i32) len(gpu.depth_pyramid_mips)-1)
-                case sdl.K_MINUS: display_pyramid_mip_level = clamp(display_pyramid_mip_level-1, 0, cast(i32) len(gpu.depth_pyramid_mips)-1)
+                case sdl.K_PLUS:  display_pyramid_mip_level = clamp(display_pyramid_mip_level+1, 0, cast(i32) len(stuff.depth_pyramid_mips)-1)
+                case sdl.K_MINUS: display_pyramid_mip_level = clamp(display_pyramid_mip_level-1, 0, cast(i32) len(stuff.depth_pyramid_mips)-1)
                 case sdl.K_P:     print_profile_and_stats = true
                 }
             case .KEY_UP:
@@ -584,6 +539,7 @@ main :: proc () {
             
             vk.DeviceWaitIdle(device)
             recreate_swapchain(&gpu, sdl_get_window_size(window))
+            recreate_stuff(&gpu, &stuff)
         }
         
         watchers_check_for_modification(watchers)
@@ -830,7 +786,7 @@ main :: proc () {
         
         pipeline_barrier_begin()
             add_image_barrier_transition_from_last(&gpu.depth_buffer, { .COMPUTE_SHADER }, { .SHADER_READ }, .SHADER_READ_ONLY_OPTIMAL, { .DEPTH })
-            add_image_barrier(&gpu.depth_pyramid, {}, {}, .UNDEFINED,  { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL)
+            add_image_barrier(&stuff.depth_pyramid, {}, {}, .UNDEFINED,  { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL)
         pipeline_barrier_end(cb)
         
         ////////////////////////////////////////////////
@@ -842,19 +798,19 @@ main :: proc () {
             
             updates: [dynamic; 32] DescriptorUpdateData
             prev_mip: ^Depth_Pyramid_Mip
-            for &mip, mip_level in gpu.depth_pyramid_mips {
+            for &mip, mip_level in stuff.depth_pyramid_mips {
                 // @shaders depth_reduce.comp
                 push_constants_value(cb, depth_pipeline, Depth_Globals { size = cast(v2) mip.size })
                 
                 clear(&updates)
                 append(&updates, DescriptorUpdateData { image = { 
-                    gpu.depth_buffer.sampler,
+                    stuff.depth_sampler,
                     mip_level == 0 ? gpu.depth_buffer.view                   : prev_mip.view,
                     mip_level == 0 ? gpu.depth_buffer.last_transition.layout : .GENERAL,
                 } })
                 prev_mip = &mip
                 append(&updates, DescriptorUpdateData { image = { 
-                    gpu.depth_buffer.sampler,
+                    stuff.depth_sampler,
                     mip.view,
                     .GENERAL,
                 } })
@@ -863,7 +819,7 @@ main :: proc () {
                 vk.CmdDispatch(cb, get_group_count(depth_reduce_shader, **mip.size))
                 
                 pipeline_barrier_begin()
-                    add_image_barrier_transition_from_last(&gpu.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
+                    add_image_barrier_transition_from_last(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
                 pipeline_barrier_end(cb, { .BY_REGION })
             }
         
@@ -895,7 +851,7 @@ main :: proc () {
                 if !display_pyramid {
                     add_image_barrier_transition_from_last(&gpu.color_buffer, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
                 } else {
-                    add_image_barrier_transition_from_last(&gpu.depth_pyramid, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
+                    add_image_barrier_transition_from_last(&stuff.depth_pyramid, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
                 }
             pipeline_barrier_end(cb)
                 
@@ -909,9 +865,9 @@ main :: proc () {
                     extent         = to_extent(gpu.swapchain_size, 1),
                 })
             } else {
-                source := gpu.depth_pyramid
+                source := stuff.depth_pyramid
                 
-                mip_size  := cast(iv2) gpu.depth_pyramid_mips[display_pyramid_mip_level].size
+                mip_size  := cast(iv2) stuff.depth_pyramid_mips[display_pyramid_mip_level].size
                 dest_size := cast(iv2) gpu.swapchain_size
                 
                 vk.CmdBlitImage(cb, source.image, source.last_transition.layout, destination.image, destination.last_transition.layout, 1, &vk.ImageBlit {
@@ -997,6 +953,47 @@ main :: proc () {
     }
     
     gpu_deinit(&gpu)
+}
+
+////////////////////////////////////////////////
+
+recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain) {
+    gpu_delete(gpu, stuff.depth_pyramid)
+    
+    for &it in stuff.depth_pyramid_mips {
+        vk.DestroyImageView(gpu.device, it.view, nil)
+    }
+    clear(&stuff.depth_pyramid_mips)
+    
+    ////////////////////////////////////////////////
+    
+    if stuff.depth_sampler == 0 {
+        stuff.depth_sampler = create_sampler(gpu.device, .NEAREST, .NEAREST)
+    }
+    
+    // Ensures that all reductions are at most 2x2 which makes sure they are conservative.
+    pyramid_size := uv2{previous_power_of_two(gpu.swapchain_size.x), previous_power_of_two(gpu.swapchain_size.y)} 
+    
+    depth_pyramid_mip_count: u32 = 1
+    { // @cleanup if size is a power of two then this is just min(log2(x), log2(y)) right?
+        size := pyramid_size
+        for size.x > 1 || size.y > 1 {
+            depth_pyramid_mip_count += 1
+            size /= 2
+        }
+    }
+    
+    // @waste this makes an image view over all mips, which we never use. its creation could be skipped. the aspect mask parameter is only relevant when in image view is requested.
+    stuff.depth_pyramid = gpu_make_image(gpu, pyramid_size, .R32_SFLOAT, { .SAMPLED, .STORAGE, .TRANSFER_SRC }, { .COLOR }, mip_levels = depth_pyramid_mip_count)
+    
+    for i in 0..<depth_pyramid_mip_count {
+        mip := append_into(&stuff.depth_pyramid_mips)
+        mip.view = create_image_view(gpu.device, stuff.depth_pyramid, i, 1, { .COLOR })
+        mip.size = pyramid_size
+        mip.size.x >>= i
+        mip.size.y >>= i
+        mip.size = vec_max(mip.size, 1)
+    }
 }
 
 ////////////////////////////////////////////////
