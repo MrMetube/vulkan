@@ -88,44 +88,6 @@ destroy_all_handles :: proc (device: vk.Device) {
 
 ////////////////////////////////////////////////
 
-get_swapchain_format :: proc (gpu: ^Gpu) -> vk.Format {
-    format_count: u32
-    check(vk.GetPhysicalDeviceSurfaceFormatsKHR(gpu.physical_device, gpu.surface, &format_count, nil))
-    formats := make([] vk.SurfaceFormatKHR, format_count, context.temp_allocator)
-    check(vk.GetPhysicalDeviceSurfaceFormatsKHR(gpu.physical_device, gpu.surface, &format_count, raw_data(formats)))
-    
-    if len(formats) == 1 && formats[0].format == .UNDEFINED {
-        return .R8G8B8A8_SRGB
-    }
-    
-    for format in formats {
-        if format.format == .R8G8B8A8_SRGB || format.format == .B8G8R8A8_SRGB {
-            return format.format
-        }
-    }
-    
-    return formats[0].format
-}
-
-get_depth_buffer_format :: proc (gpu: ^Gpu) -> vk.Format {
-    result: vk.Format
-    
-    // :Stencil: Switch to .D32_SFLOAT_S8_UINT if we actually make use of the stencil buffer.
-    depth_format_list := [] vk.Format { .D32_SFLOAT }
-    for it in depth_format_list {
-        format_properties := vk.FormatProperties2 { sType = .FORMAT_PROPERTIES_2 }
-        vk.GetPhysicalDeviceFormatProperties2(gpu.physical_device, it, &format_properties)
-        
-        if .DEPTH_STENCIL_ATTACHMENT in format_properties.formatProperties.optimalTilingFeatures {
-            result = it
-            break
-        }
-    }
-    assert(result != .UNDEFINED)
-    
-    return result
-}
-
 recreate_swapchain :: proc (gpu: ^Gpu, new_size: uv2) {
     surface_capabilities: vk.SurfaceCapabilitiesKHR
     check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(gpu.physical_device, gpu.surface, &surface_capabilities))
@@ -163,7 +125,7 @@ recreate_swapchain :: proc (gpu: ^Gpu, new_size: uv2) {
     gpu.swapchain_size = new_size
     
     check(vk.CreateSwapchainKHR(gpu.device, &swapchain_create_info, nil, &gpu.swapchain))
-    if old_swapchain != 0 { destroy_swapchain(gpu) }
+    if old_swapchain != 0 { destroy_swapchain(gpu, old_swapchain) }
     
     // @waste semaphores only need to be deleted and recreated, if the image_count changes up or down respectively
     
@@ -188,7 +150,8 @@ recreate_swapchain :: proc (gpu: ^Gpu, new_size: uv2) {
     gpu.color_buffer  = gpu_make_image(gpu, gpu.swapchain_size,  gpu.swapchain_format,    { .COLOR_ATTACHMENT, .TRANSFER_SRC },   { .COLOR })
 }
 
-destroy_swapchain :: proc (gpu: ^Gpu) {
+// @cleanup this isnt a good design
+destroy_swapchain :: proc (gpu: ^Gpu, old_swapchain: vk.SwapchainKHR = 0) { 
     for &it in gpu.render_completes {
         vk.DestroySemaphore(gpu.device, it, nil)
     }
@@ -198,7 +161,7 @@ destroy_swapchain :: proc (gpu: ^Gpu) {
     gpu_delete(gpu, gpu.depth_buffer)
     gpu_delete(gpu, gpu.color_buffer)
     
-    vk.DestroySwapchainKHR(gpu.device, gpu.swapchain, nil)
+    vk.DestroySwapchainKHR(gpu.device, old_swapchain != 0 ? old_swapchain : gpu.swapchain, nil)
 }
 
 ////////////////////////////////////////////////
@@ -311,7 +274,6 @@ create_pipeline_layout :: proc (device: vk.Device, stage_flags: vk.ShaderStageFl
 }
 
 
-// @todo(viktor): store type of pushconstant in the pipeline, so that cmdpushconstants can validate usage, then also differentiate if its a pointer type to use vk.DeviceAddress's size or a struct type
 create_compute_pipeline :: proc (gpu: ^Gpu, shader: Shader, set_layout: vk.DescriptorSetLayout, old: Pipeline_pc($PC)) -> Pipeline_pc(PC) {
     if pipeline_is_valid(old) {
         check(vk.DeviceWaitIdle(gpu.device))
@@ -329,7 +291,12 @@ create_compute_pipeline :: proc (gpu: ^Gpu, shader: Shader, set_layout: vk.Descr
     } else {
         size := cast(u32) size_of(PC)
     }
-    result.layout = create_pipeline_layout(gpu.device, result.shader_stages, set_layout, size_of_push_constant = size)
+    
+    if set_layout == 0 {
+        result.layout = create_pipeline_layout(gpu.device, result.shader_stages, size_of_push_constant = size)
+    } else {
+        result.layout = create_pipeline_layout(gpu.device, result.shader_stages, set_layout, size_of_push_constant = size)
+    }
     
     create_info := vk.ComputePipelineCreateInfo {
         sType = .COMPUTE_PIPELINE_CREATE_INFO,
@@ -461,6 +428,7 @@ gather_descriptor_resources :: proc (shaders: ..Shader) -> ([32] vk.DescriptorTy
     return resource_types, resource_mask
 }
 
+// @todo if we reach true bindless this and the functions can gladly be deleted
 create_descriptor_set_layout :: proc (device: vk.Device, shaders: ..Shader) -> vk.DescriptorSetLayout {
     bindings: [dynamic; 32] vk.DescriptorSetLayoutBinding
     resource_types, resource_mask := gather_descriptor_resources(..shaders)
@@ -492,7 +460,6 @@ create_descriptor_set_layout :: proc (device: vk.Device, shaders: ..Shader) -> v
     result: vk.DescriptorSetLayout
     
     check(vk.CreateDescriptorSetLayout(device, &create_info, nil, &result))
-    defer_destroy(vk.DestroyDescriptorSetLayout, result)
     
     return result
 }

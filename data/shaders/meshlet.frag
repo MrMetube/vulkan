@@ -10,7 +10,7 @@
 layout(location = 0) flat   in Mesh_Result_Flat mesh_result_flat_fs;
 layout(location = 1) smooth in Mesh_Result_Smooth mesh_result_smooth_fs;
 
-layout(set = 1, binding = 0) uniform sampler2D textures[];
+layout(binding = 0) uniform sampler2D textures[];
 
 layout(location = 0) out vec4 pixel_result;
 

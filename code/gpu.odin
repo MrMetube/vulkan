@@ -355,7 +355,45 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
     }
     
     ////////////////////////////////////////////////
-    
+        
+    get_swapchain_format :: proc (gpu: ^Gpu) -> vk.Format {
+        format_count: u32
+        check(vk.GetPhysicalDeviceSurfaceFormatsKHR(gpu.physical_device, gpu.surface, &format_count, nil))
+        formats := make([] vk.SurfaceFormatKHR, format_count, context.temp_allocator)
+        check(vk.GetPhysicalDeviceSurfaceFormatsKHR(gpu.physical_device, gpu.surface, &format_count, raw_data(formats)))
+        
+        if len(formats) == 1 && formats[0].format == .UNDEFINED {
+            return .R8G8B8A8_SRGB
+        }
+        
+        for format in formats {
+            if format.format == .R8G8B8A8_SRGB || format.format == .B8G8R8A8_SRGB {
+                return format.format
+            }
+        }
+        
+        return formats[0].format
+    }
+
+    get_depth_buffer_format :: proc (gpu: ^Gpu) -> vk.Format {
+        result: vk.Format
+        
+        // :Stencil: Switch to .D32_SFLOAT_S8_UINT if we actually make use of the stencil buffer.
+        depth_format_list := [] vk.Format { .D32_SFLOAT }
+        for it in depth_format_list {
+            format_properties := vk.FormatProperties2 { sType = .FORMAT_PROPERTIES_2 }
+            vk.GetPhysicalDeviceFormatProperties2(gpu.physical_device, it, &format_properties)
+            
+            if .DEPTH_STENCIL_ATTACHMENT in format_properties.formatProperties.optimalTilingFeatures {
+                result = it
+                break
+            }
+        }
+        assert(result != .UNDEFINED)
+        
+        return result
+    }
+
     result.swapchain_format    = get_swapchain_format(&result)
     result.depth_buffer.format = get_depth_buffer_format(&result)
     

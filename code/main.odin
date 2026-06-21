@@ -258,12 +258,12 @@ main :: proc () {
             
             copy_regions := make([dynamic] vk.BufferImageCopy, context.temp_allocator)
             for level in 0..<loaded_texture.mip_levels {
-                mip_offset: uint = loaded_texture.mip_offsets[level]
+                mip_offset := loaded_texture.mip_offsets[level]
                 
                 append(&copy_regions, vk.BufferImageCopy {
-                    bufferOffset = auto_cast mip_offset,
+                    bufferOffset     = auto_cast mip_offset,
                     imageSubresource = { aspectMask = { .COLOR }, mipLevel = level, layerCount = 1 },
-                    imageExtent = { width = loaded_texture.width >> level, height = loaded_texture.height >> level, depth = 1 },
+                    imageExtent      = { width = loaded_texture.width >> level, height = loaded_texture.height >> level, depth = 1 },
                 })
             }
             
@@ -319,13 +319,6 @@ main :: proc () {
     
     draw_cull_shader    := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/draw_cull.comp",    shader_allocator)
     depth_reduce_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/depth_reduce.comp", shader_allocator)
-    
-    ////////////////////////////////////////////////
-    
-    // @todo if we reach true bindless this and the functions can gladly be deleted
-    graphics_descriptor_set_layout := create_descriptor_set_layout(device, ..meshlet_shaders[:])
-    cull_descriptor_set_layout  := create_descriptor_set_layout(device, draw_cull_shader)
-    depth_descriptor_set_layout := create_descriptor_set_layout(device, depth_reduce_shader)
     
     ////////////////////////////////////////////////
     
@@ -396,6 +389,14 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     gpu_profile_make_query_pool(device)
+    
+    ////////////////////////////////////////////////
+    
+    // @todo(viktor): migrate the depth_pyramid image into the textures array. make it manage all textures, and let stuff just hold onto a handle inside that array.
+    // @study does this setup allow us to add more textures as needed and leave slots empty in the mean time?
+    // @study how many textures can we index into like this? is there a limit defined by the gpu?
+    depth_descriptor_set_layout := create_descriptor_set_layout(device, depth_reduce_shader)
+    defer_destroy(vk.DestroyDescriptorSetLayout, depth_descriptor_set_layout)
     
     ////////////////////////////////////////////////
     
@@ -553,7 +554,7 @@ main :: proc () {
         
         // @api should this be begin pipeline, which just always takes in the dependencies and does a reload and recreate itself?
         if reload_shaders_if_needed(watchers, shader_allocator, &draw_cull_shader) || !pipeline_is_valid(cull_pipeline) {
-            cull_pipeline = create_compute_pipeline(&gpu, draw_cull_shader, cull_descriptor_set_layout, cull_pipeline)
+            cull_pipeline = create_compute_pipeline(&gpu, draw_cull_shader, 0, cull_pipeline)
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, &depth_reduce_shader) || !pipeline_is_valid(depth_pipeline) {
@@ -561,7 +562,7 @@ main :: proc () {
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, meshlet_shaders[:]) || !pipeline_is_valid(meshlet_pipeline) {
-            meshlet_pipeline = create_graphics_pipeline(&gpu, { graphics_descriptor_set_layout, textures_descriptor_set_layout }, meshlet_shaders[:], meshlet_pipeline)
+            meshlet_pipeline = create_graphics_pipeline(&gpu, { textures_descriptor_set_layout }, meshlet_shaders[:], meshlet_pipeline)
         }
         
         ////////////////////////////////////////////////
@@ -644,10 +645,6 @@ main :: proc () {
         
         check(vk.BeginCommandBuffer(cb, &vk.CommandBufferBeginInfo { sType = .COMMAND_BUFFER_BEGIN_INFO, flags = { .ONE_TIME_SUBMIT } }))
         
-        if print_profile_and_stats {
-            vk.ResetQueryPool(device, stats_pool, 0, stats_count)
-            vk.CmdBeginQuery(cb, stats_pool, 0, {})
-        }
         gpu_profile_frame_begin(device, cb)
         
         ////////////////////////////////////////////////
@@ -768,13 +765,18 @@ main :: proc () {
         gpu_profile_zone_begin("rendering early pass")
         gpu_labeled_region_begin(cb, "rendering early pass", {0.6, 0.1, 07, 1.0})
         begin_rendering(cb, &gpu, {0.07, 0.07, 0.07, 1}, early = true)
+                
+            if print_profile_and_stats {
+                vk.ResetQueryPool(device, stats_pool, 0, stats_count)
+                vk.CmdBeginQuery(cb, stats_pool, 0, {})
+            }
             
             gpu_labeled_region_begin(cb, "meshlets", {0.0, 0.6, 0.8, 1.0})
             gpu_profile_zone_begin("meshlets")
             
             // @shader meshlet.task meshlet.mesh meshlet.frag
             bind_pipeline(cb, meshlet_pipeline)
-                vk.CmdBindDescriptorSets(cb, meshlet_pipeline.bind_point, meshlet_pipeline.layout, 1, 1, &textures_descriptor_set, 0, nil)
+                vk.CmdBindDescriptorSets(cb, meshlet_pipeline.bind_point, meshlet_pipeline.layout, 0, 1, &textures_descriptor_set, 0, nil)
                 
                 push_constants(cb, meshlet_pipeline, &frame.draw_globals)
                 
@@ -958,17 +960,20 @@ main :: proc () {
     
     destroy_pipeline(gpu.device, meshlet_pipeline)
     destroy_pipeline(gpu.device, cull_pipeline)
+    destroy_pipeline(gpu.device, depth_pipeline)
     
     for texture in textures {
         gpu_delete(&gpu, texture)
     }
+    
+    delete_stuff(&gpu, &stuff, final = true)
     
     gpu_deinit(&gpu)
 }
 
 ////////////////////////////////////////////////
 
-recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain) {
+delete_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain, final := false) {
     gpu_delete(gpu, stuff.depth_pyramid)
     
     for &it in stuff.depth_pyramid_mips {
@@ -976,7 +981,13 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_S
     }
     clear(&stuff.depth_pyramid_mips)
     
-    ////////////////////////////////////////////////
+    if final {
+        vk.DestroySampler(gpu.device, stuff.depth_sampler, nil)
+    }
+}
+
+recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain) {
+    delete_stuff(gpu, stuff)
     
     if stuff.depth_sampler == 0 {
         stuff.depth_sampler = create_sampler(gpu.device, .NEAREST, .NEAREST)
