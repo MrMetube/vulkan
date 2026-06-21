@@ -899,33 +899,25 @@ main :: proc () {
         
         bind_pipeline(cb, depth_pipeline)
             
-            the_descriptor_updates: [dynamic; 32] DescriptorUpdateData
+            updates: [dynamic; 32] DescriptorUpdateData
             prev_mip: ^Depth_Pyramid_Mip
             for &mip, mip_level in swapchain.depth_pyramid_mips {
                 // @shaders depth_reduce.comp
                 push_constants_value(cb, depth_pipeline, Depth_Globals { size = cast(v2) mip.size })
                 
-                clear(&the_descriptor_updates)
-                if mip_level == 0 {
-                    append(&the_descriptor_updates, DescriptorUpdateData { image = { 
-                        swapchain.depth_buffer.sampler,
-                        swapchain.depth_buffer.view,
-                        swapchain.depth_buffer.last_transition.layout,
-                    } })
-                } else {
-                    append(&the_descriptor_updates, DescriptorUpdateData { image = { 
-                        swapchain.depth_buffer.sampler,
-                        prev_mip.view,
-                        .GENERAL,
-                    } })
-                }
+                clear(&updates)
+                append(&updates, DescriptorUpdateData { image = { 
+                    swapchain.depth_buffer.sampler,
+                    mip_level == 0 ? swapchain.depth_buffer.view                   : prev_mip.view,
+                    mip_level == 0 ? swapchain.depth_buffer.last_transition.layout : .GENERAL,
+                } })
                 prev_mip = &mip
-                append(&the_descriptor_updates, DescriptorUpdateData { image = { 
+                append(&updates, DescriptorUpdateData { image = { 
                     swapchain.depth_buffer.sampler,
                     mip.view,
                     .GENERAL,
                 } })
-                vk.CmdPushDescriptorSetWithTemplate(cb, depth_pipeline.update_template, depth_pipeline.layout, 0, raw_data(&the_descriptor_updates))
+                vk.CmdPushDescriptorSetWithTemplate(cb, depth_pipeline.update_template, depth_pipeline.layout, 0, raw_data(&updates))
                 
                 vk.CmdDispatch(cb, get_group_count(depth_reduce_shader, **mip.size, 1))
                 
@@ -957,50 +949,47 @@ main :: proc () {
         
         gpu_profile_zone_begin("copy to swapchain")
         
-        pipeline_barrier_begin()
-            add_image_barrier(swapchain.images[image_index], { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
+            pipeline_barrier_begin()
+                add_image_barrier(&swapchain.images[image_index], { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
+                if !display_pyramid {
+                    add_image_barrier_transition_from_last(&swapchain.color_buffer, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
+                } else {
+                    add_image_barrier_transition_from_last(&swapchain.depth_pyramid, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
+                }
+            pipeline_barrier_end(cb)
+                
+            destination := swapchain.images[image_index]
             if !display_pyramid {
-                add_image_barrier_transition_from_last(&swapchain.color_buffer, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
+                source := swapchain.color_buffer
+                
+                vk.CmdCopyImage(cb, source.image, source.last_transition.layout, destination.image, destination.last_transition.layout, 1, &vk.ImageCopy {
+                    srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
+                    dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
+                    extent         = to_extent(swapchain.size, 1),
+                })
             } else {
-                add_image_barrier_transition_from_last(&swapchain.depth_pyramid, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
+                source := swapchain.depth_pyramid
+                
+                mip_size  := cast(iv2) swapchain.depth_pyramid_mips[display_pyramid_mip_level].size
+                dest_size := cast(iv2) swapchain.size
+                
+                vk.CmdBlitImage(cb, source.image, source.last_transition.layout, destination.image, destination.last_transition.layout, 1, &vk.ImageBlit {
+                    srcSubresource = { aspectMask = { .COLOR }, layerCount = 1, mipLevel = cast(u32) display_pyramid_mip_level },
+                    dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
+                    srcOffsets = { {0, 0, 0}, {mip_size.x, mip_size.y,   1}},
+                    dstOffsets = { {0, 0, 0}, {dest_size.x, dest_size.y, 1}},
+                }, .NEAREST)
             }
-        pipeline_barrier_end(cb)
             
-        // @todo(viktor): we could also just store a whole Image for the swapchain.images. then we could use the last transitioned to layout instead of duplicating that information here
-        if !display_pyramid {
-            source := swapchain.color_buffer
-            destination := swapchain.images[image_index]
-            
-            vk.CmdCopyImage(cb, source.image, source.last_transition.layout, destination, .TRANSFER_DST_OPTIMAL, 1, &vk.ImageCopy {
-                srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
-                dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
-                extent         = to_extent(swapchain.size, 1),
-            })
-        } else {
-            source := swapchain.depth_pyramid
-            destination := swapchain.images[image_index]
-            
-            mip_size  := cast(iv2) swapchain.depth_pyramid_mips[display_pyramid_mip_level].size
-            dest_size := cast(iv2) swapchain.size
-            
-            vk.CmdBlitImage(cb, source.image, source.last_transition.layout, destination, .TRANSFER_DST_OPTIMAL, 1, &vk.ImageBlit {
-                srcSubresource = { aspectMask = { .COLOR }, layerCount = 1, mipLevel = cast(u32) display_pyramid_mip_level },
-                dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
-                srcOffsets = { {0, 0, 0}, {mip_size.x, mip_size.y,   1}},
-                dstOffsets = { {0, 0, 0}, {dest_size.x, dest_size.y, 1}},
-            }, .NEAREST)
-        }
-        
-        pipeline_barrier_begin()
-            add_image_barrier(swapchain.images[image_index], { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL, {}, {}, .PRESENT_SRC_KHR)
-        pipeline_barrier_end(cb)
+            pipeline_barrier_begin()
+                add_image_barrier_transition_from_last(&swapchain.images[image_index], {}, {}, .PRESENT_SRC_KHR)
+            pipeline_barrier_end(cb)
         
         gpu_profile_zone_end()
         
         ////////////////////////////////////////////////
         
         gpu_profile_frame_end()
-        
         
         vk.EndCommandBuffer(cb)
         

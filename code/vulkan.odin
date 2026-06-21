@@ -19,7 +19,7 @@ IPS :: struct {
 
 Swapchain :: struct {
     swapchain: vk.SwapchainKHR,
-    images:           [dynamic] vk.Image,
+    images:           [dynamic] Image,
     render_completes: [dynamic] vk.Semaphore,
     
     size:   uv2,
@@ -505,10 +505,16 @@ recreate_swapchain :: proc (ips: IPS, device: vk.Device, new_size: uv2, old_swap
     }
     
     image_count: u32
+    images: [dynamic; 64] vk.Image
     check(vk.GetSwapchainImagesKHR(device, result.swapchain, &image_count, nil))
+    resize(&images, image_count)
+    check(vk.GetSwapchainImagesKHR(device, result.swapchain, &image_count, &images[0]))
+    
     resize(&result.images, image_count)
     resize(&result.render_completes, image_count)
-    check(vk.GetSwapchainImagesKHR(device, result.swapchain, &image_count, &result.images[0]))
+    for image, index in images {
+        result.images[index].image = image
+    }
     
     for &it in result.render_completes {
         it = create_semaphore(device)
@@ -960,7 +966,7 @@ end_rendering :: proc (cb: vk.CommandBuffer) {
 }
 
 queue_submit :: proc (queue: vk.Queue, swapchain: Swapchain, frame: Frame, image_index: u32, signal_value: u64, timeline_semaphore: vk.Semaphore) {
-    render_complete_and_timeline_submit_info := [] vk.SemaphoreSubmitInfo {
+    semaphore_info := [?] vk.SemaphoreSubmitInfo {
         {
             sType = .SEMAPHORE_SUBMIT_INFO,
             semaphore = swapchain.render_completes[image_index],
@@ -988,8 +994,8 @@ queue_submit :: proc (queue: vk.Queue, swapchain: Swapchain, frame: Frame, image
             sType = .COMMAND_BUFFER_SUBMIT_INFO,
             commandBuffer = frame.command_buffer,
         },
-        signalSemaphoreInfoCount = auto_cast len(render_complete_and_timeline_submit_info),
-        pSignalSemaphoreInfos    = raw_data(render_complete_and_timeline_submit_info),
+        signalSemaphoreInfoCount = len(semaphore_info),
+        pSignalSemaphoreInfos    = raw_data(&semaphore_info),
     }
     vk.QueueSubmit2(queue, 1, &submit_info, 0)
 }
