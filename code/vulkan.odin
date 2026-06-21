@@ -926,23 +926,6 @@ push_constants_raw :: proc (cb: vk.CommandBuffer, pipeline: Pipeline, size: u32,
     vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader_stages, 0, size, data)
 }
 
-
-// @todo(viktor): checking of nested, unmatched begin/end
-the_descriptor_updates: [dynamic; 32] DescriptorUpdateData
-update_descriptors_begin :: proc () {
-    clear(&the_descriptor_updates)
-}
-update_descriptor_whole_buffer :: proc (buffer: Buffer) {
-    append(&the_descriptor_updates, DescriptorUpdateData { buffer = { buffer.buffer, 0, auto_cast vk.WHOLE_SIZE } })
-}
-update_descriptor_image :: proc (sampler: vk.Sampler, view: vk.ImageView, layout: vk.ImageLayout) {
-    append(&the_descriptor_updates, DescriptorUpdateData { image = { sampler, view, layout } })
-}
-update_descriptors_end :: proc (cb: vk.CommandBuffer, pipeline: Pipeline, set: u32) {
-    assert(len(the_descriptor_updates) != 0)
-    vk.CmdPushDescriptorSetWithTemplate(cb, pipeline.update_template, pipeline.layout, set, raw_data(&the_descriptor_updates))
-}
-
 ////////////////////////////////////////////////
 
 begin_rendering :: proc (cb: vk.CommandBuffer, swapchain: Swapchain, image_index: u32, clear_color: v4, early: bool) {

@@ -899,18 +899,33 @@ main :: proc () {
         
         bind_pipeline(cb, depth_pipeline)
             
+            the_descriptor_updates: [dynamic; 32] DescriptorUpdateData
+            prev_mip: ^Depth_Pyramid_Mip
             for &mip, mip_level in swapchain.depth_pyramid_mips {
                 // @shaders depth_reduce.comp
                 push_constants_value(cb, depth_pipeline, Depth_Globals { size = cast(v2) mip.size })
                 
-                update_descriptors_begin()
-                    if mip_level == 0 {
-                        update_descriptor_image(swapchain.depth_buffer.sampler, swapchain.depth_buffer.view, swapchain.depth_buffer.last_transition.layout)
-                    } else {
-                        update_descriptor_image(swapchain.depth_buffer.sampler, swapchain.depth_pyramid_mips[mip_level-1].view,  .GENERAL)
-                    }
-                    update_descriptor_image(swapchain.depth_buffer.sampler, mip.view,  .GENERAL)
-                update_descriptors_end(cb, depth_pipeline, 0)
+                clear(&the_descriptor_updates)
+                if mip_level == 0 {
+                    append(&the_descriptor_updates, DescriptorUpdateData { image = { 
+                        swapchain.depth_buffer.sampler,
+                        swapchain.depth_buffer.view,
+                        swapchain.depth_buffer.last_transition.layout,
+                    } })
+                } else {
+                    append(&the_descriptor_updates, DescriptorUpdateData { image = { 
+                        swapchain.depth_buffer.sampler,
+                        prev_mip.view,
+                        .GENERAL,
+                    } })
+                }
+                prev_mip = &mip
+                append(&the_descriptor_updates, DescriptorUpdateData { image = { 
+                    swapchain.depth_buffer.sampler,
+                    mip.view,
+                    .GENERAL,
+                } })
+                vk.CmdPushDescriptorSetWithTemplate(cb, depth_pipeline.update_template, depth_pipeline.layout, 0, raw_data(&the_descriptor_updates))
                 
                 vk.CmdDispatch(cb, get_group_count(depth_reduce_shader, **mip.size, 1))
                 
