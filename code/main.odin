@@ -97,6 +97,7 @@ Draw :: struct {
     
     mesh_index:    u32,
     vertex_offset: u32,
+    texture_index: u32,
 }
 
 // @shader
@@ -213,6 +214,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
+    // this will hold literally all textures, expand if needed and let the shader index into it via Draw.texture_index
     textures: [3] Image
     texture_descriptors: [len(textures)] vk.DescriptorImageInfo
     
@@ -276,7 +278,7 @@ main :: proc () {
             once_submit_info := vk.SubmitInfo {
                 sType = .SUBMIT_INFO,
                 commandBufferCount = 1,
-                pCommandBuffers = &cb_once,
+                pCommandBuffers    = &cb_once,
             }
             
             check(vk.QueueSubmit(gpu.queue, 1, &once_submit_info, fence_once))
@@ -286,7 +288,11 @@ main :: proc () {
             sampler := create_sampler(device, .LINEAR, .LINEAR, cast(f32) loaded_texture.mip_levels, true)
             defer_destroy(vk.DestroySampler, sampler)
             
-            texture_descriptors[index] = vk.DescriptorImageInfo{ sampler = sampler, imageView = texture.view, imageLayout = .READ_ONLY_OPTIMAL }
+            texture_descriptors[index] = vk.DescriptorImageInfo{ 
+                sampler = sampler, 
+                imageView = texture.view, 
+                imageLayout = texture.last_transition.layout
+            }
         }
     }
     
@@ -325,9 +331,10 @@ main :: proc () {
     
     textures_descriptor_set_layout: vk.DescriptorSetLayout
     textures_descriptor_set:        vk.DescriptorSet
-    textures_descriptor_pool:       vk.DescriptorPool
     {
-        desc_layout_textures_create_info := vk.DescriptorSetLayoutCreateInfo {
+        pool: vk.DescriptorPool
+        
+        descriptor_layout_create_info := vk.DescriptorSetLayoutCreateInfo {
             sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             pNext = &vk.DescriptorSetLayoutBindingFlagsCreateInfo {
                 sType = .DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
@@ -343,10 +350,10 @@ main :: proc () {
             },
         }
         
-        check(vk.CreateDescriptorSetLayout(device, &desc_layout_textures_create_info, nil, &textures_descriptor_set_layout))
+        check(vk.CreateDescriptorSetLayout(device, &descriptor_layout_create_info, nil, &textures_descriptor_set_layout))
         defer_destroy(vk.DestroyDescriptorSetLayout, textures_descriptor_set_layout)
         
-        desc_pool_create_info := vk.DescriptorPoolCreateInfo {
+        descriptor_pool_create_info := vk.DescriptorPoolCreateInfo {
             sType = .DESCRIPTOR_POOL_CREATE_INFO,
             maxSets       = 1,
             poolSizeCount = 1,
@@ -356,19 +363,19 @@ main :: proc () {
             },
         }
         
-        check(vk.CreateDescriptorPool(device, &desc_pool_create_info, nil, &textures_descriptor_pool))
-        defer_destroy(vk.DestroyDescriptorPool, textures_descriptor_pool)
+        check(vk.CreateDescriptorPool(device, &descriptor_pool_create_info, nil, &pool))
+        defer_destroy(vk.DestroyDescriptorPool, pool)
         
-        variable_desc_count := cast(u32) len(textures)
+        descriptor_count := cast(u32) len(textures)
         
         textures_desc_set_allocate_info := vk.DescriptorSetAllocateInfo {
             sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
             pNext = &vk.DescriptorSetVariableDescriptorCountAllocateInfo {
                 sType = .DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO,
                 descriptorSetCount = 1,
-                pDescriptorCounts  = &variable_desc_count,
+                pDescriptorCounts  = &descriptor_count,
             },
-            descriptorPool     = textures_descriptor_pool,
+            descriptorPool     = pool,
             descriptorSetCount = 1,
             pSetLayouts        = &textures_descriptor_set_layout,
         }
@@ -578,6 +585,8 @@ main :: proc () {
                 rotation        := la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
                 draw.orientation = rotation * global_rotation
                 
+                draw.texture_index = random_index(&entropy, textures[:])
+                
                 mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
                 
                 draw.mesh_index    = mesh_index
@@ -591,6 +600,8 @@ main :: proc () {
                 draw.p           = p
                 draw.scale       = 1
                 draw.orientation = 0
+                
+                draw.texture_index = 2
                 
                 mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
                 

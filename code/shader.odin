@@ -382,7 +382,7 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
 }
 
 compile_shader_begin :: proc (cmd: ^Cmd, shader_output: string) {
-    append(cmd, "C:/tools/VulkanSDK/1.4.350.0/Bin/glslc.exe")
+    append(cmd, "glslc.exe")
     append(cmd, "--target-env=vulkan1.4")
     append(cmd, "-o", shader_output)
 }

@@ -38,7 +38,8 @@ uint hash(uint a) {
 layout(local_size_x = MeshWidth, local_size_y = 1, local_size_z = 1) in;
 layout(triangles, max_vertices = MaxVertices, max_primitives = MaxTriangles) out;
 
-layout(location = 0) out Mesh_Result mesh_result[];
+layout(location = 0) flat   out Mesh_Result_Flat mesh_result_flat[];
+layout(location = 1) smooth out Mesh_Result_Smooth mesh_result_smooth[];
 
 void main() {
     uint thread_index  = gl_LocalInvocationID.x;
@@ -78,7 +79,7 @@ void main() {
         
         vec3 n = vec3(vertex.v.n[0], vertex.v.n[1], vertex.v.n[2]) / 127.0 - 1.0;
         
-        Mesh_Result result;
+        Mesh_Result_Smooth result;
         view_p = globals.view * view_p;
         
         vec4 position = globals.projection * (globals.view * view_p);
@@ -97,7 +98,9 @@ void main() {
         
         // vulkan uses a inverted y-axis, so we invert it back to the regular y+ = up here
         gl_MeshVerticesEXT[i].gl_Position = position * vec4(1, -1, 1, 1);
-        mesh_result[i] = result;
+        
+        mesh_result_smooth[i] = result;
+        mesh_result_flat[i].texture_index = draw.v.texture_index;
     }
     
     uint group_count = (triangle_count * 3 + 3) / 4;

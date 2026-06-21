@@ -18,13 +18,16 @@ struct Task_Result {
 };
 
 
-struct Mesh_Result {
+struct Mesh_Result_Smooth {
     vec3 normal;
     vec2 uv;
     vec3 light_vec[4];
     vec3 view_vec;
-
     vec3 debug_color; // @cleanup
+};
+
+struct Mesh_Result_Flat {
+    uint texture_index;
 };
 
 ////////////////////////////////////////////////

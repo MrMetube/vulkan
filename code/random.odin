@@ -71,13 +71,20 @@ random_choice_integer_min_max :: proc(series: ^RandomSeries, min, max: u32) -> u
     return result
 }
 random_choice_data :: proc(series: ^RandomSeries, data: [] $T) -> ^T {
-    result := &data[random_choice(series, auto_cast len(data))]
+    index := random_index(series, data)
+    result := &data[index]
     return result
 }
+
 random_choice_index :: proc(series: ^RandomSeries, data: [] $T) -> (^T, u32) {
-    index := random_choice(series, auto_cast len(data))
+    index := random_index(series, data)
     result := &data[index]
     return result, index
+}
+
+random_index :: proc(series: ^RandomSeries, data: [] $T) -> (u32) {
+    result := random_choice(series, auto_cast len(data))
+    return result
 }
 
 random_choice_bitset :: proc (series: ^RandomSeries, set: bit_set[$E]) -> E {
