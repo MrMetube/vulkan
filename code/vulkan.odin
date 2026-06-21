@@ -31,12 +31,13 @@ Shader :: struct {
     stage: vk.ShaderStageFlag,
     bytes:  [] u8,
     
-    // @todo(viktor): these are unused right now, but should be used in pipeline creation and usage to make it less volatile
-    resource_mask:      Shader_Resource_Mask,
-    resource_types:     [32] vk.DescriptorType,
-    use_push_constants: bool,
-    local_size:         [3] u32,
-    
+    parsed: struct {
+        resource_mask:      Shader_Resource_Mask,
+        resource_types:     [32] vk.DescriptorType,
+        use_push_constants: bool,
+        local_size:         [3] u32,
+    },
+        
     source_watcher: Watcher_Id,
     common_watcher: Watcher_Id,
 }
@@ -226,7 +227,7 @@ add_buffer_barrier_transition_from_last :: proc (buffer: ^Buffer, dst_stage: vk.
     add_buffer_barrier(buffer, last.stage, last.access, dst_stage, dst_access)
 }
 
-// @todo(viktor): check where niagara uses flags and add it
+// @todo(viktor): check where niagara uses dependency flags and add it
 pipeline_barrier_end :: proc (command_buffer: vk.CommandBuffer, flags := vk.DependencyFlags {}) {
     assert(barrier_state.is_open)
     
@@ -415,11 +416,11 @@ gather_descriptor_resources :: proc (shaders: ..Shader) -> ([32] vk.DescriptorTy
     resource_mask: Shader_Resource_Mask
     
     for shader in shaders {
-        for i in shader.resource_mask {
+        for i in shader.parsed.resource_mask {
             if i in resource_mask {
-                assert(resource_types[i] == shader.resource_types[i], "Mismatching binding types in shaders")
+                assert(resource_types[i] == shader.parsed.resource_types[i], "Mismatching binding types in shaders")
             } else {
-                resource_types[i] = shader.resource_types[i]
+                resource_types[i] = shader.parsed.resource_types[i]
                 resource_mask += { i }
             }
         }
@@ -428,7 +429,7 @@ gather_descriptor_resources :: proc (shaders: ..Shader) -> ([32] vk.DescriptorTy
     return resource_types, resource_mask
 }
 
-// @todo if we reach true bindless this and the functions can gladly be deleted
+// @todo if we reach true bindless these functions and most of the Shader.parsed can gladly be deleted
 create_descriptor_set_layout :: proc (device: vk.Device, shaders: ..Shader) -> vk.DescriptorSetLayout {
     bindings: [dynamic; 32] vk.DescriptorSetLayoutBinding
     resource_types, resource_mask := gather_descriptor_resources(..shaders)
@@ -444,7 +445,7 @@ create_descriptor_set_layout :: proc (device: vk.Device, shaders: ..Shader) -> v
         }
         
         for shader in shaders {
-            if i in shader.resource_mask {
+            if i in shader.parsed.resource_mask {
                 binding.stageFlags += { shader.stage }
             }
         }
@@ -559,7 +560,6 @@ end_rendering :: proc (cb: vk.CommandBuffer) {
 
 ////////////////////////////////////////////////
 
-// @cleanup what else should be in here?
 gpu_begin_the_command_buffer_of_the_current_frame :: proc (gpu: ^Gpu, frame_index: u32) -> vk.CommandBuffer {
     result := gpu.command_buffers[frame_index]
     
@@ -765,7 +765,7 @@ gpu_profile_collate_times :: proc (gpu: ^Gpu, device: vk.Device, print: bool) {
 }
 
 gpu_profile_get_zone :: proc (label: string) -> (Profile_Zone, bool) #optional_ok {
-    // @speed
+    // @speed zones could have been a hashmap, or copied into one if needed
     result: Profile_Zone
     ok: bool
     for it in gpu_profiler.zones {

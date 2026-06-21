@@ -222,11 +222,7 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
     result.bytes = shader_bytes
     
     {
-        // @cleanup wrap into a using parse: struct xx
-        result.resource_mask      = {}
-        result.resource_types     = {}
-        result.use_push_constants = {}
-        result.local_size         = {}
+        result.parsed = {}
         
         shader_code := slice_from_parts(u32, raw_data(shader_bytes), len(shader_bytes) / 4)
         
@@ -272,9 +268,9 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
                 mode := cast(SpvExecutionMode) code[2]
                 #partial switch mode {
                 case .LocalSize:
-                    result.local_size.x = code[3]
-                    result.local_size.y = code[4]
-                    result.local_size.z = code[5]
+                    result.parsed.local_size.x = code[3]
+                    result.parsed.local_size.y = code[4]
+                    result.parsed.local_size.z = code[5]
                 }
                 
             case .ExecutionModeId:
@@ -337,32 +333,32 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
                     assert(id.binding < 32)
                     assert(ids[id.type_id].opcode == .TypePointer)
                     
-                    assert(id.binding not_in result.resource_mask)
+                    assert(id.binding not_in result.parsed.resource_mask)
                     
                     type_kind := ids[ids[id.type_id].type_id].opcode
                     
                     #partial switch type_kind {
                     case .TypeStruct:       
-                        result.resource_types[id.binding] = .STORAGE_BUFFER
-                        result.resource_mask += { id.binding }
+                        result.parsed.resource_types[id.binding] = .STORAGE_BUFFER
+                        result.parsed.resource_mask += { id.binding }
                         
                     case .TypeImage:        
-                        result.resource_types[id.binding] = .STORAGE_IMAGE
-                        result.resource_mask += { id.binding }
+                        result.parsed.resource_types[id.binding] = .STORAGE_IMAGE
+                        result.parsed.resource_mask += { id.binding }
                         
                     case .TypeSampler:      
-                        result.resource_types[id.binding] = .SAMPLER
-                        result.resource_mask += { id.binding }
+                        result.parsed.resource_types[id.binding] = .SAMPLER
+                        result.parsed.resource_mask += { id.binding }
                         
                     case .TypeSampledImage: 
-                        result.resource_types[id.binding] = .COMBINED_IMAGE_SAMPLER
-                        result.resource_mask += { id.binding }
+                        result.parsed.resource_types[id.binding] = .COMBINED_IMAGE_SAMPLER
+                        result.parsed.resource_mask += { id.binding }
                     }
                 }
             }
             
             if id.opcode == .Variable && id.storage_class == .PushConstant {
-                result.use_push_constants = true
+                result.parsed.use_push_constants = true
             }
         }
         
@@ -370,11 +366,11 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
             for it in 0..<3 {
                 if local_size[it] >= 0 {
                     assert(ids[local_size[it]].opcode == .Constant)
-                    result.local_size[it] = ids[local_size[it]].constant
+                    result.parsed.local_size[it] = ids[local_size[it]].constant
                 }
             }
             
-            assert(result.local_size != 0)
+            assert(result.parsed.local_size != 0)
         }
     }
     
@@ -410,7 +406,7 @@ compile_shader_end :: proc (cmd: ^Cmd, shader_input: string) -> bool {
 
 get_group_count :: proc (shader: Shader, count_x: u32 = 1, count_y: u32 = 1, count_z: u32 = 1) -> (x, y, z: u32) {
     total_count := uv3{ count_x, count_y, count_z }
-    result := (total_count + shader.local_size-1) / shader.local_size
+    result := (total_count + shader.parsed.local_size-1) / shader.parsed.local_size
     return **result
 }
 

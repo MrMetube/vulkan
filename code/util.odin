@@ -359,3 +359,7 @@ previous_power_of_two :: proc (v: u32) -> u32 {
     
     return result
 }
+
+integer_log2 :: proc (x: u32) -> u32 {
+	return (32-1) - intrinsics.count_leading_zeros(x)
+}

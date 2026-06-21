@@ -10,7 +10,7 @@ import win "core:sys/windows"
 
 ////////////////////////////////////////////////
 
-// @todo(viktor): explain the args parsing syntax (run|debug):<target.exe in build dir>
+// @todo(viktor): this is just here for the run_command related code. it should not also contain all the build related code.
 
 cmd   := &the_state.cmd
 procs := &the_state.procs

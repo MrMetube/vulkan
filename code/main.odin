@@ -62,9 +62,8 @@ Cull_Globals :: struct #all_or_none {
     draw_command_buffer: vk.DeviceAddress "Draw_Command",
     draw_command_count:  vk.DeviceAddress "uint",
     
-    // @cleanup
-    camera_p: v3,
-    draw_count:              u32,
+    camera_p:   v3,
+    draw_count: u32,
     
     frustum_culling_enabled: b32,
     lod_enabled:             b32,
@@ -160,8 +159,6 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     gpu := gpu_init(window)
-    // @cleanup
-    device := gpu.device
     
     stuff: Stuff_With_The_Same_Lifetime_As_The_Swapchain
     recreate_stuff(&gpu, &stuff)
@@ -172,12 +169,6 @@ main :: proc () {
         frame.draw_globals.gpu, frame.draw_globals.cpu = gpu_make_buffer_type(&gpu, Draw_Globals,  { .SHADER_DEVICE_ADDRESS })
         frame.cull_globals.gpu, frame.cull_globals.cpu = gpu_make_buffer_type(&gpu, Cull_Globals,  { .SHADER_DEVICE_ADDRESS })
     }
-    
-    ////////////////////////////////////////////////
-    
-    // @placement
-    gpu.timeline_semaphore = create_semaphore(device, timeline_initial_value = MaxFramesInFlight)
-    defer_destroy(vk.DestroySemaphore, gpu.timeline_semaphore)
     
     ////////////////////////////////////////////////
     
@@ -235,8 +226,8 @@ main :: proc () {
             
             ////////////////////////////////////////////////
             
-            fence_once := create_fence(device)
-            defer vk.DestroyFence(device, fence_once, nil)
+            fence_once := create_fence(gpu.device)
+            defer vk.DestroyFence(gpu.device, fence_once, nil)
             
             cb_once: vk.CommandBuffer
             cb_once_allocate_info := vk.CommandBufferAllocateInfo {
@@ -244,7 +235,7 @@ main :: proc () {
                 commandPool        = gpu.command_pool,
                 commandBufferCount = 1,
             }
-            check(vk.AllocateCommandBuffers(device, &cb_once_allocate_info, &cb_once))
+            check(vk.AllocateCommandBuffers(gpu.device, &cb_once_allocate_info, &cb_once))
             
             cb_once_begin_info := vk.CommandBufferBeginInfo {
                 sType = .COMMAND_BUFFER_BEGIN_INFO,
@@ -283,9 +274,9 @@ main :: proc () {
             
             check(vk.QueueSubmit(gpu.queue, 1, &once_submit_info, fence_once))
             
-            check(vk.WaitForFences(device, 1, &fence_once, waitAll = true, timeout = MaxTimeout))
+            check(vk.WaitForFences(gpu.device, 1, &fence_once, waitAll = true, timeout = MaxTimeout))
             
-            sampler := create_sampler(device, .LINEAR, .LINEAR, cast(f32) loaded_texture.mip_levels, true)
+            sampler := create_sampler(gpu.device, .LINEAR, .LINEAR, cast(f32) loaded_texture.mip_levels, true)
             defer_destroy(vk.DestroySampler, sampler)
             
             texture_descriptors[index] = vk.DescriptorImageInfo{ 
@@ -343,7 +334,7 @@ main :: proc () {
             },
         }
         
-        check(vk.CreateDescriptorSetLayout(device, &descriptor_layout_create_info, nil, &textures_descriptor_set_layout))
+        check(vk.CreateDescriptorSetLayout(gpu.device, &descriptor_layout_create_info, nil, &textures_descriptor_set_layout))
         defer_destroy(vk.DestroyDescriptorSetLayout, textures_descriptor_set_layout)
         
         descriptor_pool_create_info := vk.DescriptorPoolCreateInfo {
@@ -356,7 +347,7 @@ main :: proc () {
             },
         }
         
-        check(vk.CreateDescriptorPool(device, &descriptor_pool_create_info, nil, &pool))
+        check(vk.CreateDescriptorPool(gpu.device, &descriptor_pool_create_info, nil, &pool))
         defer_destroy(vk.DestroyDescriptorPool, pool)
         
         descriptor_count := cast(u32) len(textures)
@@ -373,7 +364,7 @@ main :: proc () {
             pSetLayouts        = &textures_descriptor_set_layout,
         }
         
-        check(vk.AllocateDescriptorSets(device, &textures_desc_set_allocate_info, &textures_descriptor_set))
+        check(vk.AllocateDescriptorSets(gpu.device, &textures_desc_set_allocate_info, &textures_descriptor_set))
         
         write_desc_set := vk.WriteDescriptorSet {
             sType = .WRITE_DESCRIPTOR_SET,
@@ -383,19 +374,19 @@ main :: proc () {
             descriptorType = .COMBINED_IMAGE_SAMPLER,
             pImageInfo = &texture_descriptors[0],
         }
-        vk.UpdateDescriptorSets(device, 1, &write_desc_set, 0, nil)
+        vk.UpdateDescriptorSets(gpu.device, 1, &write_desc_set, 0, nil)
     }
     
     ////////////////////////////////////////////////
     
-    gpu_profile_make_query_pool(device)
+    gpu_profile_make_query_pool(gpu.device)
     
     ////////////////////////////////////////////////
     
     // @todo(viktor): migrate the depth_pyramid image into the textures array. make it manage all textures, and let stuff just hold onto a handle inside that array.
     // @study does this setup allow us to add more textures as needed and leave slots empty in the mean time?
     // @study how many textures can we index into like this? is there a limit defined by the gpu?
-    depth_descriptor_set_layout := create_descriptor_set_layout(device, depth_reduce_shader)
+    depth_descriptor_set_layout := create_descriptor_set_layout(gpu.device, depth_reduce_shader)
     defer_destroy(vk.DestroyDescriptorSetLayout, depth_descriptor_set_layout)
     
     ////////////////////////////////////////////////
@@ -417,7 +408,7 @@ main :: proc () {
             pipelineStatistics = stats_bits,
             queryCount         = stats_count,
         }
-        check(vk.CreateQueryPool(device, &create_info, nil, &stats_pool))
+        check(vk.CreateQueryPool(gpu.device, &create_info, nil, &stats_pool))
         defer_destroy(vk.DestroyQueryPool, stats_pool)
     }
     
@@ -442,15 +433,6 @@ main :: proc () {
     object_rotation: v3
     quit: bool
     last_time := time.tick_now()
-    
-    time_smoothed_blend :: proc (frame_time: f64, last_value: f64, value: f64) -> f64 {
-        // @speed We could precompute ks if needed as it only depends on h and frame time, not the smooth itself.
-        h :: 3.0 // = the amount of time it takes for the filter to converge to 90% of a fixed input value
-        k := power(power(cast(f64) .1, 1 / h), frame_time)
-        
-        result := linear_blend(value, last_value, k)
-        return result
-    }
     
     // @cleanup into a debug struct
     culling_enabled: bool = true
@@ -545,7 +527,7 @@ main :: proc () {
         if gpu.should_recreate_swapchain {
             gpu.should_recreate_swapchain = false
             
-            vk.DeviceWaitIdle(device)
+            vk.DeviceWaitIdle(gpu.device)
             recreate_swapchain(&gpu, sdl_get_window_size(window))
             recreate_stuff(&gpu, &stuff)
         }
@@ -645,7 +627,7 @@ main :: proc () {
         
         check(vk.BeginCommandBuffer(cb, &vk.CommandBufferBeginInfo { sType = .COMMAND_BUFFER_BEGIN_INFO, flags = { .ONE_TIME_SUBMIT } }))
         
-        gpu_profile_frame_begin(device, cb)
+        gpu_profile_frame_begin(gpu.device, cb)
         
         ////////////////////////////////////////////////
         
@@ -674,7 +656,6 @@ main :: proc () {
             projection := projection_reversed_z_infinite_far_plane(70 * RadPerDeg, cast(f32) gpu.swapchain_size.x / cast(f32) gpu.swapchain_size.y, 0.1)
             view       := translate(1, -cam_pos)
             
-            // @todo(viktor): we also need to take the view matrix into account
             draw_distance: f32 = 100
             
             frustum_planes: [6] v4
@@ -767,15 +748,15 @@ main :: proc () {
         begin_rendering(cb, &gpu, {0.07, 0.07, 0.07, 1}, early = true)
                 
             if print_profile_and_stats {
-                vk.ResetQueryPool(device, stats_pool, 0, stats_count)
+                vk.ResetQueryPool(gpu.device, stats_pool, 0, stats_count)
                 vk.CmdBeginQuery(cb, stats_pool, 0, {})
             }
             
             gpu_labeled_region_begin(cb, "meshlets", {0.0, 0.6, 0.8, 1.0})
             gpu_profile_zone_begin("meshlets")
             
-            // @shader meshlet.task meshlet.mesh meshlet.frag
             bind_pipeline(cb, meshlet_pipeline)
+                // @shader meshlet.task meshlet.mesh meshlet.frag
                 vk.CmdBindDescriptorSets(cb, meshlet_pipeline.bind_point, meshlet_pipeline.layout, 0, 1, &textures_descriptor_set, 0, nil)
                 
                 push_constants(cb, meshlet_pipeline, &frame.draw_globals)
@@ -908,11 +889,11 @@ main :: proc () {
         // @cleanup dont pass the frameindex, this is a place that could cause mistakes
         gpu_end_the_command_buffer_and_submit_and_present_the_queue(&gpu, frame_index, &cb)
         
-        gpu_profile_collate_times(&gpu, device, print_profile_and_stats)
+        gpu_profile_collate_times(&gpu, gpu.device, print_profile_and_stats)
         
         gpu_delta  := gpu_profile_get_zone("frame").total_time_with_children
         cull_delta  = gpu_profile_get_zone("culling").total_time
-        // @note(viktor): this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
+        // this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
         if gpu_delta >= 0 {
             gpu_time = time_smoothed_blend(delta_time_64, gpu_time, gpu_delta)
         }
@@ -922,7 +903,7 @@ main :: proc () {
         if print_profile_and_stats {
             stats_result: [128] u64
             size := cast(int) size_of_slice(stats_result[:])
-            query_result := vk.GetQueryPoolResults(device, stats_pool, 0, 1, size, &stats_result[0], size_of(stats_result[0]), { ._64, .WAIT })
+            query_result := vk.GetQueryPoolResults(gpu.device, stats_pool, 0, 1, size, &stats_result[0], size_of(stats_result[0]), { ._64, .WAIT })
             check(query_result)
             
             fmt.println("------------------------------------\nStats:")
@@ -995,20 +976,13 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_S
     
     // Ensures that all reductions are at most 2x2 which makes sure they are conservative.
     pyramid_size := uv2{previous_power_of_two(gpu.swapchain_size.x), previous_power_of_two(gpu.swapchain_size.y)} 
-    
-    depth_pyramid_mip_count: u32 = 1
-    { // @cleanup if size is a power of two then this is just min(log2(x), log2(y)) right?
-        size := pyramid_size
-        for size.x > 1 || size.y > 1 {
-            depth_pyramid_mip_count += 1
-            size /= 2
-        }
-    }
+    // Each mip level is a quarter of the size of the previous, as we half both dimensions each time.
+    mip_count := 1 + max(integer_log2(pyramid_size.x), integer_log2(pyramid_size.y))
     
     // @waste this makes an image view over all mips, which we never use. its creation could be skipped. the aspect mask parameter is only relevant when in image view is requested.
-    stuff.depth_pyramid = gpu_make_image(gpu, pyramid_size, .R32_SFLOAT, { .SAMPLED, .STORAGE, .TRANSFER_SRC }, { .COLOR }, mip_levels = depth_pyramid_mip_count)
+    stuff.depth_pyramid = gpu_make_image(gpu, pyramid_size, .R32_SFLOAT, { .SAMPLED, .STORAGE, .TRANSFER_SRC }, { .COLOR }, mip_levels = mip_count)
     
-    for i in 0..<depth_pyramid_mip_count {
+    for i in 0..<mip_count {
         mip := append_into(&stuff.depth_pyramid_mips)
         mip.view = create_image_view(gpu.device, stuff.depth_pyramid, i, 1, { .COLOR })
         mip.size = pyramid_size

@@ -27,7 +27,6 @@ Gpu :: struct {
     ////////////////////////////////////////////////
     // stuff that exists only once
     
-    // @cleanup does anyone even need access to this?
     instance:          vk.Instance,
     physical_device:   vk.PhysicalDevice,
     surface:           vk.SurfaceKHR,
@@ -354,6 +353,9 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
         }
     }
     
+    result.timeline_semaphore = create_semaphore(result.device, timeline_initial_value = MaxFramesInFlight)
+    defer_destroy(vk.DestroySemaphore, result.timeline_semaphore)
+        
     ////////////////////////////////////////////////
         
     get_swapchain_format :: proc (gpu: ^Gpu) -> vk.Format {

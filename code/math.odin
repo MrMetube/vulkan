@@ -139,6 +139,15 @@ barycentric_blend_s :: proc (a: $V/ [$N] $E, b, c: V, u, v: E) -> V {
     return result
 }
 
+time_smoothed_blend :: proc (frame_time: f64, last_value: f64, value: f64) -> f64 {
+    h :: 3.0 // = the amount of time it takes for the filter to converge to 90% of a fixed input value
+    // @speed We could precompute k if needed as it only depends on h and frame time, not the smoothed value itself.
+    k := power(power(cast(f64) .1, 1 / h), frame_time)
+    
+    result := linear_blend(value, last_value, k)
+    return result
+}
+
 
 safe_ratio_or_else :: proc { safe_ratio_or_else_s, safe_ratio_or_else_v }
 safe_ratio_or_else_s :: proc(numerator: $T, divisor: T) -> (T, bool) where !intrinsics.type_is_array(T) {

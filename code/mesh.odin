@@ -54,7 +54,6 @@ load_mesh :: proc (geometry: ^Geometry, filepath: string, _allocator: Allocator)
         meshoptimizer.remapVertexBuffer(&result_vertices[0], &mesh_vertices[0], len(mesh_vertices), size_of(Vertex), &remap[0])
         meshoptimizer.remapIndexBuffer(&result_indices[0],   &mesh_indices[0],  len(mesh_indices), &remap[0])
         
-        // @speed The indices themselves are not used, as me only support meshlet based rendering. Does this still make a performance difference, or are we wasting time with this optimization?
         meshoptimizer.optimizeVertexCache(&result_indices[0], &result_indices[0], len(result_indices), len(result_vertices))
         meshoptimizer.optimizeVertexFetch(&result_vertices[0], &result_indices[0], len(result_indices), &result_vertices[0], len(result_vertices), size_of(Vertex)) 
         
