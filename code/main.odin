@@ -56,11 +56,11 @@ MaxTriangles :: 84
 // @shader cull.comp
 Cull_Globals :: struct #all_or_none {
     frustum_planes: [6] v4,
-    draw:               vk.DeviceAddress "Draw draw_buffer",
-    mesh:               vk.DeviceAddress "Mesh mesh_buffer",
-    draw_command:       vk.DeviceAddress "Draw_Command draw_command_buffer",
-    draw_command_count: vk.DeviceAddress "uint draw_command_count",
-
+    draw_buffer:         vk.DeviceAddress "Draw",
+    mesh_buffer:         vk.DeviceAddress "Mesh",
+    draw_command_buffer: vk.DeviceAddress "Draw_Command",
+    draw_command_count:  vk.DeviceAddress "uint",
+    
     // @cleanup
     camera_p: v3,
     draw_count:              u32,
@@ -74,6 +74,13 @@ Draw_Globals :: struct {
     view:       m4,
     projection: m4,
     light_pos:  [4] v4,
+    
+    draw_command_buffer: vk.DeviceAddress "Draw_Command",
+    draw_buffer:         vk.DeviceAddress "Draw",
+    mesh_buffer:         vk.DeviceAddress "Mesh",
+    meshlet_buffer:      vk.DeviceAddress "Meshlet",
+    meshlet_data_buffer: vk.DeviceAddress "uint",
+    vertex_buffer:       vk.DeviceAddress "Vertex",
 }
 
 // @shader
@@ -167,9 +174,9 @@ main :: proc () {
     
     // @todo(viktor): currently all are allocated to be host visible, so that we can simplify copying into them.
     // Rethink if any of these should be copied to device_local memory
-    vertex_buffer,       vb_view  := gpu_make_buffer([] Vertex,    256 * Megabyte / size_of(Vertex),  { .STORAGE_BUFFER })
-    meshlet_buffer,      mlb_view := gpu_make_buffer([] Meshlet,   256 * Megabyte / size_of(Meshlet), { .STORAGE_BUFFER })
-    meshlet_data_buffer, mdb_view := gpu_make_buffer([] u32,       256 * Megabyte / size_of(u32),     { .STORAGE_BUFFER })
+    vertex_buffer,       vb_view  := gpu_make_buffer([] Vertex,    256 * Megabyte / size_of(Vertex),  { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
+    meshlet_buffer,      mlb_view := gpu_make_buffer([] Meshlet,   256 * Megabyte / size_of(Meshlet), { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
+    meshlet_data_buffer, mdb_view := gpu_make_buffer([] u32,       256 * Megabyte / size_of(u32),     { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
     draw_buffer,         db_view  := gpu_make_buffer([] Draw,      256 * Megabyte / size_of(Draw),    { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
     mesh_buffer,         mb_view  := gpu_make_buffer([] Mesh,      256 * Megabyte / size_of(Mesh),    { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
     // @todo(viktor): this buffer is never seen by the cpu, its filled by compute and used by task+mesh shader
@@ -676,67 +683,6 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        projection_reversed_z_infinite_far_plane :: proc (fov_y, aspect_w_h, near_z: f32) -> m4 { // :ReversedZ:
-            f := 1 / tan(fov_y / 2)
-            x := f / aspect_w_h
-            y := f
-            n := near_z
-            
-            result := m4 {
-                x,  0,  0,  0,
-                0,  y,  0,  0,
-                0,  0,  0,  n,
-                0,  0, -1,  0,
-            }
-            
-            return result
-        }
-        
-        // @important @todo once we are satisfied with the occlusion culling the near plane should be set to a more reasonable value like 0.01. the 0.1 value is just useful for debugging, as the depth values lie in a more visible range.
-        projection := projection_reversed_z_infinite_far_plane(70 * RadPerDeg, cast(f32) swapchain.size.x / cast(f32) swapchain.size.y, 0.1)
-        view       := translate(1, -cam_pos)
-        draw_globals.projection = projection
-        draw_globals.view       = view
-        
-        // @todo(viktor): we also need to take the view matrix into account
-        draw_distance: f32 = 100
-        
-        frustum_planes: [6] v4
-        if culling_enabled {
-            view_projection := projection * view
-            cam_forward := v3{0, 0, -1}
-            
-            frustum_planes[0] = get_row_v4(view_projection, 3) + get_row_v4(view_projection, 0) // x + w < 0
-            frustum_planes[1] = get_row_v4(view_projection, 3) - get_row_v4(view_projection, 0) // x - w > 0
-            frustum_planes[2] = get_row_v4(view_projection, 3) + get_row_v4(view_projection, 1) // y + w < 0
-            frustum_planes[3] = get_row_v4(view_projection, 3) - get_row_v4(view_projection, 1) // y - w > 0
-            frustum_planes[4] = get_row_v4(view_projection, 3) - get_row_v4(view_projection, 2) // z - w > 0 -- :ReversedZ:
-            // @todo(viktor): also reenable in the compute shader
-            // frustum_planes[5] = v4{**cam_forward, draw_distance + dot(cam_forward, cam_pos)}          // :ReversedZ: infinite far plane
-            
-            for &plane in frustum_planes {
-                plane /= length(plane.xyz)
-            }
-        }
-        
-        cull_globals := Cull_Globals {
-            frustum_planes     = frustum_planes,
-            draw               = draw_buffer.address,
-            mesh               = mesh_buffer.address,
-            draw_command       = draw_command_buffer.address,
-            draw_command_count = draw_command_count_buffer.address,
-            
-            lod_enabled             = cast(b32) lod_enabled,
-            frustum_culling_enabled = cast(b32) culling_enabled,
-            draw_count              = len(draws),
-            camera_p                = cam_pos,
-        }
-        
-        frame.draw_globals.cpu^ = draw_globals
-        frame.cull_globals.cpu^ = cull_globals
-        
-        ////////////////////////////////////////////////
-        
         cpu_time = time_smoothed_blend(delta_time_64, cpu_time, delta_time_64)
         
         {
@@ -775,8 +721,26 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
+        projection_reversed_z_infinite_far_plane :: proc (fov_y, aspect_w_h, near_z: f32) -> m4 { // :ReversedZ:
+            f := 1 / tan(fov_y / 2)
+            x := f / aspect_w_h
+            y := f
+            n := near_z
+            
+            result := m4 {
+                x,  0,  0,  0,
+                0,  y,  0,  0,
+                0,  0,  0,  n,
+                0,  0, -1,  0,
+            }
+            
+            return result
+        }
+        
+        ////////////////////////////////////////////////
+        
         gpu_labeled_region_begin(cb, "culling", {0.0, 0.6, 0.8, 1.0})
-        gpu_profile_zone_begin("culling")
+            gpu_profile_zone_begin("culling")
             
             ////////////////////////////////////////////////
             
@@ -798,6 +762,45 @@ main :: proc () {
             pipeline_barrier_end(cb)
             
             ////////////////////////////////////////////////
+            
+            // @important @todo once we are satisfied with the occlusion culling the near plane should be set to a more reasonable value like 0.01. the 0.1 value is just useful for debugging, as the depth values lie in a more visible range.
+            projection := projection_reversed_z_infinite_far_plane(70 * RadPerDeg, cast(f32) swapchain.size.x / cast(f32) swapchain.size.y, 0.1)
+            view       := translate(1, -cam_pos)
+            
+            
+            // @todo(viktor): we also need to take the view matrix into account
+            draw_distance: f32 = 100
+            
+            frustum_planes: [6] v4
+            if culling_enabled {
+                view_projection := projection * view
+                cam_forward := v3{0, 0, -1}
+                
+                frustum_planes[0] = get_row_v4(view_projection, 3) + get_row_v4(view_projection, 0) // x + w < 0
+                frustum_planes[1] = get_row_v4(view_projection, 3) - get_row_v4(view_projection, 0) // x - w > 0
+                frustum_planes[2] = get_row_v4(view_projection, 3) + get_row_v4(view_projection, 1) // y + w < 0
+                frustum_planes[3] = get_row_v4(view_projection, 3) - get_row_v4(view_projection, 1) // y - w > 0
+                frustum_planes[4] = get_row_v4(view_projection, 3) - get_row_v4(view_projection, 2) // z - w > 0 -- :ReversedZ:
+                // @todo(viktor): also reenable in the compute shader
+                // frustum_planes[5] = v4{**cam_forward, draw_distance + dot(cam_forward, cam_pos)}          // :ReversedZ: infinite far plane
+                
+                for &plane in frustum_planes {
+                    plane /= length(plane.xyz)
+                }
+            }
+            
+            frame.cull_globals.cpu^ = Cull_Globals {
+                frustum_planes      = frustum_planes,
+                draw_buffer         = draw_buffer.address,
+                mesh_buffer         = mesh_buffer.address,
+                draw_command_buffer = draw_command_buffer.address,
+                draw_command_count  = draw_command_count_buffer.address,
+                
+                lod_enabled             = cast(b32) lod_enabled,
+                frustum_culling_enabled = cast(b32) culling_enabled,
+                draw_count              = len(draws),
+                camera_p                = cam_pos,
+            }
             
             bind_pipeline(cb, cull_pipeline)
                 // @shader cull.comp
@@ -823,7 +826,7 @@ main :: proc () {
         
             ////////////////////////////////////////////////
         
-        gpu_profile_zone_end()
+            gpu_profile_zone_end()
         gpu_labeled_region_end(cb)
         
         ////////////////////////////////////////////////
@@ -841,26 +844,28 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
+        // @shaders meshlet pipeline
+        draw_globals.projection = projection
+        draw_globals.view       = view
+        
+        draw_globals.draw_command_buffer = draw_command_buffer.address
+        draw_globals.draw_buffer         = draw_buffer.address
+        draw_globals.mesh_buffer         = mesh_buffer.address
+        draw_globals.meshlet_buffer      = meshlet_buffer.address
+        draw_globals.meshlet_data_buffer = meshlet_data_buffer.address
+        draw_globals.vertex_buffer       = vertex_buffer.address
+        
+        frame.draw_globals.cpu^ = draw_globals
+        
         gpu_profile_zone_begin("rendering early pass")
         gpu_labeled_region_begin(cb, "rendering early pass", {0.6, 0.1, 07, 1.0})
         begin_rendering(cb, swapchain, image_index, {0.07, 0.07, 0.07, 1}, early = true)
-            
             
             gpu_labeled_region_begin(cb, "meshlets", {0.0, 0.6, 0.8, 1.0})
             gpu_profile_zone_begin("meshlets")
             
             // @shader meshlet.task meshlet.mesh meshlet.frag
             bind_pipeline(cb, meshlet_pipeline)
-                
-                update_descriptors_begin()
-                    update_descriptor_whole_buffer(draw_buffer)
-                    update_descriptor_whole_buffer(mesh_buffer)
-                    update_descriptor_whole_buffer(meshlet_buffer)
-                    update_descriptor_whole_buffer(meshlet_data_buffer)
-                    update_descriptor_whole_buffer(vertex_buffer)
-                    update_descriptor_whole_buffer(draw_command_buffer)
-                update_descriptors_end(cb, meshlet_pipeline, 0)
-                
                 vk.CmdBindDescriptorSets(cb, meshlet_pipeline.bind_point, meshlet_pipeline.layout, 1, 1, &textures_descriptor_set, 0, nil)
                 
                 push_constants(cb, meshlet_pipeline, &frame.draw_globals)

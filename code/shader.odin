@@ -16,8 +16,8 @@ import vk "vendor:vulkan"
     buffer reference struct:
         A type that is passed to shader via a pointer, and which may contain pointers to buffers.
         
-        These pointers are probably vk.DeviceAddress types on the cpu side and must contain a tag like:
-            field_name: vk.DeviceAddress "name_of_the_pointed_at_type name_of_the_buffer/pointer"
+        These pointers must be vk.DeviceAddress types on the cpu side and must contain a tag like:
+            field_name: vk.DeviceAddress "name_of_the_pointed_at_type"
             (The tag's "name_of_the_pointed_at_type" must be the type name used in the shader.)
         
 */
@@ -34,6 +34,11 @@ generate_shader_api :: proc (output_file: string) {
     append_simple_struct(&builder, Meshlet)
     append_simple_struct(&builder, Vertex)
     append_simple_struct(&builder, Depth_Globals)
+    
+    reference_types := make(map[string] struct {}, context.allocator)
+    collect_reference_types(&reference_types, Cull_Globals)
+    collect_reference_types(&reference_types, Draw_Globals)
+    append_reference_types(&builder, reference_types)
     
     append_buffer_reference_struct(&builder, Cull_Globals)
     append_buffer_reference_struct(&builder, Draw_Globals)
@@ -85,20 +90,33 @@ generate_shader_api :: proc (output_file: string) {
         fmt.sbprintf(builder, "};\n\n")
     }
     
+    collect_reference_types :: proc (refs: ^map[string] struct {}, type: typeid) {
+        info := type_info_of(runtime.typeid_base(type))
+        s :=  info.variant.(runtime.Type_Info_Struct)
+        
+        // @todo(viktor): currently all fields are vk.DeviceAddress, but that hides the type for this metaprogram. Can we make a wrapper like GPU_Pointer(T) so that we can read the inner type here and not have to specify it in the tag string?
+        for field in soa_zip(type = s.types[:s.field_count], tag = s.tags[:s.field_count]) {
+            if field.tag != "" && field.type.id == typeid_of(vk.DeviceAddress) {
+                refs[field.tag] = {}
+            }
+        }
+    }
+    
+    append_reference_types :: proc (builder: ^strings.Builder, refs: map[string] struct{}, loc := #caller_location) {
+        append_location(builder, loc)
+        
+        for type_name, _ in refs {
+            alignment :: 4 // @todo(viktor): unhardcode the alignment once we know the inner type
+            fmt.sbprintf(builder, "layout(buffer_reference, buffer_reference_align = %v, std430, scalar) buffer %v_p {{ %v v; };\n", alignment, type_name, type_name)
+        }
+        fmt.sbprintf(builder, "\n")
+    }
+    
     append_buffer_reference_struct :: proc (builder: ^strings.Builder, type: typeid, loc := #caller_location) {
         append_location(builder, loc)
         
         info := type_info_of(runtime.typeid_base(type))
         s :=  info.variant.(runtime.Type_Info_Struct)
-        
-        // @todo(viktor): currently all fields are vk.DeviceAddress, but that hides the type for this metaprogram. Can we make a wrapper like GPU_Pointer(T) so that we can read the inner type here and not have to specify it in the tag string?
-        for field in soa_zip(name = s.names[:s.field_count], tag = s.tags[:s.field_count]) {
-            if field.tag != "" {
-                type_name, _, _ := strings.partition(field.tag, " ")
-                // @todo(viktor): unhardcode the alignment once we know the inner type
-                fmt.sbprintf(builder, "layout(buffer_reference, buffer_reference_align = %v, std430, scalar) buffer %v_p {{ %v v; };\n", 4, type_name, type_name)
-            }
-        }
         
         fmt.sbprintf(builder, "layout(buffer_reference, buffer_reference_align = %v, std430, scalar) ", align_of(pmm))
         fmt.sbprintf(builder, "buffer %v {{\n", type)
@@ -113,8 +131,8 @@ generate_shader_api :: proc (output_file: string) {
         
         for field in soa_zip(type = s.types[:s.field_count], name = s.names[:s.field_count], tag = s.tags[:s.field_count]) {
             if field.tag != "" {
-                type, _, name := strings.partition(field.tag, " ")
-                fmt.sbprintf(builder, "    %v_p %v;\n", type, name)
+                type := field.tag
+                fmt.sbprintf(builder, "    %v_p %v;\n", type, field.name)
                 continue
             }
             
