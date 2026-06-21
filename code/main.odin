@@ -16,16 +16,11 @@ Optimized :: ODIN_OPTIMIZATION_MODE == .Speed
 
 VSync :: true when !Optimized else false
 
-MaxFramesInFlight :: 2
-
 ////////////////////////////////////////////////
 
 Frame :: struct {
     draw_globals: Push_Constant(Draw_Globals),
     cull_globals: Push_Constant(Cull_Globals),
-    
-    command_buffer: vk.CommandBuffer,
-    image_aquired:  vk.Semaphore,
 }
 
 Push_Constant :: struct ($T: typeid) {
@@ -157,31 +152,35 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    ips := create_instance_physical_device_and_surface(window, cast(pmm) sdl.Vulkan_GetVkGetInstanceProcAddr())
+    gpu := gpu_init(window)
+    // @cleanup
+    device := gpu.device
     
-    device, queue, frames, command_pool := create_device_queue_frames_and_command_pool_and_init_gpu_allocator(ips)
+    frames := make([] Frame, MaxFramesInFlight, context.allocator)
+    // @waste there are a lot of buffers here, each of which is very small
+    for &frame in frames {
+        frame.draw_globals.gpu, frame.draw_globals.cpu = gpu_make_buffer_type(&gpu, Draw_Globals,  { .SHADER_DEVICE_ADDRESS })
+        frame.cull_globals.gpu, frame.cull_globals.cpu = gpu_make_buffer_type(&gpu, Cull_Globals,  { .SHADER_DEVICE_ADDRESS })
+    }
     
     ////////////////////////////////////////////////
     
-    swapchain: Swapchain
-    
-    swapchain.format              = get_swapchain_format(ips)
-    swapchain.depth_buffer.format = get_depth_buffer_format(ips)
-    
-    recreate_swapchain(ips, device, sdl_get_window_size(window), &swapchain)
+    // @placement
+    gpu.timeline_semaphore = create_semaphore(device, timeline_initial_value = MaxFramesInFlight)
+    defer_destroy(vk.DestroySemaphore, gpu.timeline_semaphore)
     
     ////////////////////////////////////////////////
     
     // @todo(viktor): currently all are allocated to be host visible, so that we can simplify copying into them.
     // Rethink if any of these should be copied to device_local memory
-    vertex_buffer,       vb_view  := gpu_make_buffer([] Vertex,    256 * Megabyte / size_of(Vertex),  { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
-    meshlet_buffer,      mlb_view := gpu_make_buffer([] Meshlet,   256 * Megabyte / size_of(Meshlet), { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
-    meshlet_data_buffer, mdb_view := gpu_make_buffer([] u32,       256 * Megabyte / size_of(u32),     { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
-    draw_buffer,         db_view  := gpu_make_buffer([] Draw,      256 * Megabyte / size_of(Draw),    { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
-    mesh_buffer,         mb_view  := gpu_make_buffer([] Mesh,      256 * Megabyte / size_of(Mesh),    { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
+    vertex_buffer,       vb_view  := gpu_make_buffer(&gpu, [] Vertex,    256 * Megabyte / size_of(Vertex),  { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
+    meshlet_buffer,      mlb_view := gpu_make_buffer(&gpu, [] Meshlet,   256 * Megabyte / size_of(Meshlet), { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
+    meshlet_data_buffer, mdb_view := gpu_make_buffer(&gpu, [] u32,       256 * Megabyte / size_of(u32),     { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
+    draw_buffer,         db_view  := gpu_make_buffer(&gpu, [] Draw,      256 * Megabyte / size_of(Draw),    { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
+    mesh_buffer,         mb_view  := gpu_make_buffer(&gpu, [] Mesh,      256 * Megabyte / size_of(Mesh),    { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
     // @todo(viktor): this buffer is never seen by the cpu, its filled by compute and used by task+mesh shader
-    draw_command_buffer, dcb_view := gpu_make_buffer([] Draw_Command, 256 * Megabyte / size_of(Draw_Command), { .STORAGE_BUFFER, .INDIRECT_BUFFER, .SHADER_DEVICE_ADDRESS })
-    draw_command_count_buffer, dccb_view := gpu_make_buffer_type(u32, { .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER, .SHADER_DEVICE_ADDRESS })
+    draw_command_buffer, dcb_view := gpu_make_buffer(&gpu, [] Draw_Command, 256 * Megabyte / size_of(Draw_Command), { .STORAGE_BUFFER, .INDIRECT_BUFFER, .SHADER_DEVICE_ADDRESS })
+    draw_command_count_buffer, dccb_view := gpu_make_buffer_type(&gpu, u32, { .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER, .SHADER_DEVICE_ADDRESS })
     
     geometry: Geometry
     {
@@ -216,10 +215,10 @@ main :: proc () {
             
             loaded_texture := load_ktx_texture(filename, context.temp_allocator)
             
-            texture = gpu_make_image({loaded_texture.width, loaded_texture.height}, loaded_texture.format, { .TRANSFER_DST, .SAMPLED }, { .COLOR }, mip_levels = loaded_texture.mip_levels)
+            texture = gpu_make_image(&gpu, {loaded_texture.width, loaded_texture.height}, loaded_texture.format, { .TRANSFER_DST, .SAMPLED }, { .COLOR }, mip_levels = loaded_texture.mip_levels)
             
-            source_buffer, source_buffer_data := gpu_make_buffer_slice([] u8, len(loaded_texture.data), { .TRANSFER_SRC })
-            defer gpu_delete(source_buffer)
+            source_buffer, source_buffer_data := gpu_make_buffer_slice(&gpu, [] u8, len(loaded_texture.data), { .TRANSFER_SRC })
+            defer gpu_delete(&gpu, source_buffer)
             
             copy(source_buffer_data, loaded_texture.data)
             
@@ -231,7 +230,7 @@ main :: proc () {
             cb_once: vk.CommandBuffer
             cb_once_allocate_info := vk.CommandBufferAllocateInfo {
                 sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-                commandPool        = command_pool,
+                commandPool        = gpu.command_pool,
                 commandBufferCount = 1,
             }
             check(vk.AllocateCommandBuffers(device, &cb_once_allocate_info, &cb_once))
@@ -271,7 +270,7 @@ main :: proc () {
                 pCommandBuffers = &cb_once,
             }
             
-            check(vk.QueueSubmit(queue, 1, &once_submit_info, fence_once))
+            check(vk.QueueSubmit(gpu.queue, 1, &once_submit_info, fence_once))
             
             check(vk.WaitForFences(device, 1, &fence_once, waitAll = true, timeout = MaxTimeout))
             
@@ -434,11 +433,6 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    timeline_semaphore := create_semaphore(device, timeline_initial_value = MaxFramesInFlight)
-    defer_destroy(vk.DestroySemaphore, timeline_semaphore)
-    
-    ////////////////////////////////////////////////
-    
     gpu_profile_make_query_pool(device)
     
     ////////////////////////////////////////////////
@@ -466,9 +460,6 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    // @speed is a pipeline cache still a good optimization?
-    pipeline_cache: vk.PipelineCache = 0
-    
     cull_pipeline:    Pipeline_pc(^Cull_Globals)
     depth_pipeline:   Pipeline_pc(Depth_Globals)
     meshlet_pipeline: Pipeline_pc(^Draw_Globals)
@@ -483,15 +474,11 @@ main :: proc () {
         pos.xz += arm(t * Tau)
     }
     
+    
     cam_pos := v3{ 0, 0, 0}
     object_rotation: v3
     quit: bool
     last_time := time.tick_now()
-    
-    absolute_frame_index: u64
-    image_index: u32
-    next_signal_value: u64 = MaxFramesInFlight + 1
-    should_recreate_swapchain: bool
     
     time_smoothed_blend :: proc (frame_time: f64, last_value: f64, value: f64) -> f64 {
         // @speed We could precompute ks if needed as it only depends on h and frame time, not the smooth itself.
@@ -547,8 +534,8 @@ main :: proc () {
                 case sdl.K_C:     culling_enabled = !culling_enabled
                 case sdl.K_L:     lod_enabled     = !lod_enabled
                 case sdl.K_O:     display_pyramid = !display_pyramid
-                case sdl.K_PLUS:  display_pyramid_mip_level = clamp(display_pyramid_mip_level+1, 0, cast(i32) len(swapchain.depth_pyramid_mips)-1)
-                case sdl.K_MINUS: display_pyramid_mip_level = clamp(display_pyramid_mip_level-1, 0, cast(i32) len(swapchain.depth_pyramid_mips)-1)
+                case sdl.K_PLUS:  display_pyramid_mip_level = clamp(display_pyramid_mip_level+1, 0, cast(i32) len(gpu.depth_pyramid_mips)-1)
+                case sdl.K_MINUS: display_pyramid_mip_level = clamp(display_pyramid_mip_level-1, 0, cast(i32) len(gpu.depth_pyramid_mips)-1)
                 case sdl.K_P:     print_profile_and_stats = true
                 }
             case .KEY_UP:
@@ -560,7 +547,7 @@ main :: proc () {
                 mouse_wheel_delta = event.wheel.y
                 
             case .WINDOW_RESIZED:
-                should_recreate_swapchain = true
+                gpu.should_recreate_swapchain = true
             }
         }
         
@@ -592,57 +579,34 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         // @todo(viktor): if the window is minimized we can never get it back up and visible
-        if should_recreate_swapchain {
-            should_recreate_swapchain = false
+        if gpu.should_recreate_swapchain {
+            gpu.should_recreate_swapchain = false
             
             vk.DeviceWaitIdle(device)
-            recreate_swapchain(ips, device, sdl_get_window_size(window), &swapchain)
+            recreate_swapchain(&gpu, sdl_get_window_size(window))
         }
         
         watchers_check_for_modification(watchers)
         
+        // @api should this be begin pipeline, which just always takes in the dependencies and does a reload and recreate itself?
         if reload_shaders_if_needed(watchers, shader_allocator, &draw_cull_shader) || !pipeline_is_valid(cull_pipeline) {
-            cull_pipeline = create_compute_pipeline(device, pipeline_cache, draw_cull_shader, cull_descriptor_set_layout, cull_pipeline)
+            cull_pipeline = create_compute_pipeline(&gpu, draw_cull_shader, cull_descriptor_set_layout, cull_pipeline)
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, &depth_reduce_shader) || !pipeline_is_valid(depth_pipeline) {
-            depth_pipeline = create_compute_pipeline(device, pipeline_cache, depth_reduce_shader, depth_descriptor_set_layout, depth_pipeline)
+            depth_pipeline = create_compute_pipeline(&gpu, depth_reduce_shader, depth_descriptor_set_layout, depth_pipeline)
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, meshlet_shaders[:]) || !pipeline_is_valid(meshlet_pipeline) {
-            meshlet_pipeline = create_graphics_pipeline(device, pipeline_cache, swapchain, { graphics_descriptor_set_layout, textures_descriptor_set_layout }, meshlet_shaders[:], meshlet_pipeline)
+            meshlet_pipeline = create_graphics_pipeline(&gpu, { graphics_descriptor_set_layout, textures_descriptor_set_layout }, meshlet_shaders[:], meshlet_pipeline)
         }
         
         ////////////////////////////////////////////////
         
-        signal_value := next_signal_value
-        next_signal_value += 1
-        wait_value := signal_value - MaxFramesInFlight
+        frame_index, restart := wait_for_the_gpu_to_be_ready_for_the_next_frame(&gpu)
+        if restart { continue }
         
-        wait_info := vk.SemaphoreWaitInfo {
-            sType = .SEMAPHORE_WAIT_INFO,
-            semaphoreCount = 1,
-            pSemaphores    = &timeline_semaphore,
-            pValues        = &wait_value,
-        }
-        wait_result := vk.WaitSemaphores(device, &wait_info, MaxTimeout)
-        if wait_result == .TIMEOUT {
-            should_recreate_swapchain = true
-            continue
-        }
-        check(wait_result)
-        
-        ////////////////////////////////////////////////
-        
-        frame := frames[absolute_frame_index % MaxFramesInFlight]
-        absolute_frame_index += 1
-        
-        acquire_result := vk.AcquireNextImageKHR(device, swapchain.swapchain, MaxTimeout, frame.image_aquired, {}, &image_index)
-        if acquire_result == .ERROR_OUT_OF_DATE_KHR || acquire_result == .SUBOPTIMAL_KHR {
-            should_recreate_swapchain = true
-            continue
-        }
-        check(acquire_result)
+        frame := &frames[frame_index]
         
         ////////////////////////////////////////////////
         
@@ -708,8 +672,8 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        cb := frame.command_buffer
-        check(vk.ResetCommandBuffer(cb, {}))
+        // @api expecting the user to pass the frame index is a source for mistakes
+        cb := gpu_begin_the_command_buffer_of_the_current_frame(&gpu, frame_index)
         
         check(vk.BeginCommandBuffer(cb, &vk.CommandBufferBeginInfo { sType = .COMMAND_BUFFER_BEGIN_INFO, flags = { .ONE_TIME_SUBMIT } }))
         
@@ -721,31 +685,10 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        projection_reversed_z_infinite_far_plane :: proc (fov_y, aspect_w_h, near_z: f32) -> m4 { // :ReversedZ:
-            f := 1 / tan(fov_y / 2)
-            x := f / aspect_w_h
-            y := f
-            n := near_z
-            
-            result := m4 {
-                x,  0,  0,  0,
-                0,  y,  0,  0,
-                0,  0,  0,  n,
-                0,  0, -1,  0,
-            }
-            
-            return result
-        }
-        
-        ////////////////////////////////////////////////
-        
         gpu_labeled_region_begin(cb, "culling", {0.0, 0.6, 0.8, 1.0})
             gpu_profile_zone_begin("culling")
             
-            ////////////////////////////////////////////////
-            
-            // @todo(viktor): is this barrier/transition before the fill necessary?
-            pipeline_barrier_begin()
+            pipeline_barrier_begin() // @todo(viktor): is this barrier/transition before the fill necessary?
             add_buffer_barrier(&draw_command_count_buffer, {}, {}, { .TRANSFER }, { .TRANSFER_WRITE })
             pipeline_barrier_end(cb)
             
@@ -764,9 +707,8 @@ main :: proc () {
             ////////////////////////////////////////////////
             
             // @important @todo once we are satisfied with the occlusion culling the near plane should be set to a more reasonable value like 0.01. the 0.1 value is just useful for debugging, as the depth values lie in a more visible range.
-            projection := projection_reversed_z_infinite_far_plane(70 * RadPerDeg, cast(f32) swapchain.size.x / cast(f32) swapchain.size.y, 0.1)
+            projection := projection_reversed_z_infinite_far_plane(70 * RadPerDeg, cast(f32) gpu.swapchain_size.x / cast(f32) gpu.swapchain_size.y, 0.1)
             view       := translate(1, -cam_pos)
-            
             
             // @todo(viktor): we also need to take the view matrix into account
             draw_distance: f32 = 100
@@ -808,9 +750,7 @@ main :: proc () {
                 
                 vk.CmdDispatch(cb, get_group_count(draw_cull_shader, len(draws)))
             
-            gpu_profile_zone_end()
-            
-            gpu_profile_zone_begin("memory barriers")
+            ////////////////////////////////////////////////
             
             pipeline_barrier_begin()
             add_buffer_barrier_transition_from_last(&draw_command_buffer, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .INDIRECT_COMMAND_READ, .SHADER_READ })
@@ -819,13 +759,14 @@ main :: proc () {
             
             ////////////////////////////////////////////////
             
+            // this apparently needs to happend before we do anything related to rendering
             pipeline_barrier_begin()
-                add_image_barrier(&swapchain.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL)
-                add_image_barrier(&swapchain.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
+                add_image_barrier(&gpu.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL)
+                add_image_barrier(&gpu.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
             pipeline_barrier_end(cb)
-        
+            
             ////////////////////////////////////////////////
-        
+            
             gpu_profile_zone_end()
         gpu_labeled_region_end(cb)
         
@@ -834,13 +775,13 @@ main :: proc () {
         vk.CmdSetViewport(cb, 0, 1, &vk.Viewport {
             x      = 0,
             y      = 0,
-            width  = cast(f32) swapchain.size.x,
-            height = cast(f32) swapchain.size.y,
+            width  = cast(f32) gpu.swapchain_size.x,
+            height = cast(f32) gpu.swapchain_size.y,
             minDepth = 0,
             maxDepth = 1,
         })
         
-        vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D { extent = to_extent(swapchain.size) })
+        vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D { extent = to_extent(gpu.swapchain_size) })
         
         ////////////////////////////////////////////////
         
@@ -859,7 +800,7 @@ main :: proc () {
         
         gpu_profile_zone_begin("rendering early pass")
         gpu_labeled_region_begin(cb, "rendering early pass", {0.6, 0.1, 07, 1.0})
-        begin_rendering(cb, swapchain, image_index, {0.07, 0.07, 0.07, 1}, early = true)
+        begin_rendering(cb, &gpu, {0.07, 0.07, 0.07, 1}, early = true)
             
             gpu_labeled_region_begin(cb, "meshlets", {0.0, 0.6, 0.8, 1.0})
             gpu_profile_zone_begin("meshlets")
@@ -888,8 +829,8 @@ main :: proc () {
         // :OcclusionCull: the barrier before the depth pyramid was missing the barrier for the pyramid.image itself (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=11592)
         
         pipeline_barrier_begin()
-            add_image_barrier_transition_from_last(&swapchain.depth_buffer, { .COMPUTE_SHADER }, { .SHADER_READ }, .SHADER_READ_ONLY_OPTIMAL, { .DEPTH })
-            add_image_barrier(&swapchain.depth_pyramid, {}, {}, .UNDEFINED,  { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL)
+            add_image_barrier_transition_from_last(&gpu.depth_buffer, { .COMPUTE_SHADER }, { .SHADER_READ }, .SHADER_READ_ONLY_OPTIMAL, { .DEPTH })
+            add_image_barrier(&gpu.depth_pyramid, {}, {}, .UNDEFINED,  { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL)
         pipeline_barrier_end(cb)
         
         ////////////////////////////////////////////////
@@ -901,28 +842,28 @@ main :: proc () {
             
             updates: [dynamic; 32] DescriptorUpdateData
             prev_mip: ^Depth_Pyramid_Mip
-            for &mip, mip_level in swapchain.depth_pyramid_mips {
+            for &mip, mip_level in gpu.depth_pyramid_mips {
                 // @shaders depth_reduce.comp
                 push_constants_value(cb, depth_pipeline, Depth_Globals { size = cast(v2) mip.size })
                 
                 clear(&updates)
                 append(&updates, DescriptorUpdateData { image = { 
-                    swapchain.depth_buffer.sampler,
-                    mip_level == 0 ? swapchain.depth_buffer.view                   : prev_mip.view,
-                    mip_level == 0 ? swapchain.depth_buffer.last_transition.layout : .GENERAL,
+                    gpu.depth_buffer.sampler,
+                    mip_level == 0 ? gpu.depth_buffer.view                   : prev_mip.view,
+                    mip_level == 0 ? gpu.depth_buffer.last_transition.layout : .GENERAL,
                 } })
                 prev_mip = &mip
                 append(&updates, DescriptorUpdateData { image = { 
-                    swapchain.depth_buffer.sampler,
+                    gpu.depth_buffer.sampler,
                     mip.view,
                     .GENERAL,
                 } })
                 vk.CmdPushDescriptorSetWithTemplate(cb, depth_pipeline.update_template, depth_pipeline.layout, 0, raw_data(&updates))
                 
-                vk.CmdDispatch(cb, get_group_count(depth_reduce_shader, **mip.size, 1))
+                vk.CmdDispatch(cb, get_group_count(depth_reduce_shader, **mip.size))
                 
                 pipeline_barrier_begin()
-                    add_image_barrier_transition_from_last(&swapchain.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
+                    add_image_barrier_transition_from_last(&gpu.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
                 pipeline_barrier_end(cb, { .BY_REGION })
             }
         
@@ -932,14 +873,14 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         pipeline_barrier_begin()
-            add_image_barrier_transition_from_last(&swapchain.depth_buffer, {.EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH })
+            add_image_barrier_transition_from_last(&gpu.depth_buffer, {.EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH })
         pipeline_barrier_end(cb)
         
         ////////////////////////////////////////////////
         
         gpu_profile_zone_begin("rendering late pass")
         gpu_labeled_region_begin(cb, "rendering late pass", {0.6, 0.1, 07, 1.0})
-        begin_rendering(cb, swapchain, image_index, {}, early = false)
+        begin_rendering(cb, &gpu, {}, early = false)
             
         end_rendering(cb)
         gpu_labeled_region_end(cb)
@@ -950,28 +891,28 @@ main :: proc () {
         gpu_profile_zone_begin("copy to swapchain")
         
             pipeline_barrier_begin()
-                add_image_barrier(&swapchain.images[image_index], { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
+                add_image_barrier(&gpu.swapchain_images[gpu.image_index], { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
                 if !display_pyramid {
-                    add_image_barrier_transition_from_last(&swapchain.color_buffer, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
+                    add_image_barrier_transition_from_last(&gpu.color_buffer, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
                 } else {
-                    add_image_barrier_transition_from_last(&swapchain.depth_pyramid, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
+                    add_image_barrier_transition_from_last(&gpu.depth_pyramid, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
                 }
             pipeline_barrier_end(cb)
                 
-            destination := swapchain.images[image_index]
+            destination := gpu.swapchain_images[gpu.image_index]
             if !display_pyramid {
-                source := swapchain.color_buffer
+                source := gpu.color_buffer
                 
                 vk.CmdCopyImage(cb, source.image, source.last_transition.layout, destination.image, destination.last_transition.layout, 1, &vk.ImageCopy {
                     srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
-                    extent         = to_extent(swapchain.size, 1),
+                    extent         = to_extent(gpu.swapchain_size, 1),
                 })
             } else {
-                source := swapchain.depth_pyramid
+                source := gpu.depth_pyramid
                 
-                mip_size  := cast(iv2) swapchain.depth_pyramid_mips[display_pyramid_mip_level].size
-                dest_size := cast(iv2) swapchain.size
+                mip_size  := cast(iv2) gpu.depth_pyramid_mips[display_pyramid_mip_level].size
+                dest_size := cast(iv2) gpu.swapchain_size
                 
                 vk.CmdBlitImage(cb, source.image, source.last_transition.layout, destination.image, destination.last_transition.layout, 1, &vk.ImageBlit {
                     srcSubresource = { aspectMask = { .COLOR }, layerCount = 1, mipLevel = cast(u32) display_pyramid_mip_level },
@@ -982,7 +923,7 @@ main :: proc () {
             }
             
             pipeline_barrier_begin()
-                add_image_barrier_transition_from_last(&swapchain.images[image_index], {}, {}, .PRESENT_SRC_KHR)
+                add_image_barrier_transition_from_last(&gpu.swapchain_images[gpu.image_index], {}, {}, .PRESENT_SRC_KHR)
             pipeline_barrier_end(cb)
         
         gpu_profile_zone_end()
@@ -995,27 +936,10 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        queue_submit(queue, swapchain, frame, image_index, signal_value, timeline_semaphore)
+        // @cleanup dont pass the frameindex, this is a place that could cause mistakes
+        gpu_end_the_command_buffer_and_submit_and_present_the_queue(&gpu, frame_index, &cb)
         
-        ////////////////////////////////////////////////
-        
-        present_info := vk.PresentInfoKHR {
-            sType = .PRESENT_INFO_KHR,
-            waitSemaphoreCount = 1,
-            pWaitSemaphores    = &swapchain.render_completes[image_index],
-            swapchainCount     = 1,
-            pSwapchains        = &swapchain.swapchain,
-            pImageIndices      = &image_index,
-        }
-        
-        present_result := vk.QueuePresentKHR(queue, &present_info)
-        if present_result == .ERROR_OUT_OF_DATE_KHR {
-            should_recreate_swapchain = true
-        } else {
-            check(present_result)
-        }
-        
-        gpu_profile_collate_times(ips, device, print_profile_and_stats)
+        gpu_profile_collate_times(&gpu, device, print_profile_and_stats)
         
         gpu_delta  := gpu_profile_get_zone("frame").total_time_with_children
         cull_delta  = gpu_profile_get_zone("culling").total_time
@@ -1050,35 +974,29 @@ main :: proc () {
     ////////////////////////////////////////////////
     // Cleanup and Shutdown
     
-	check(vk.DeviceWaitIdle(device))
+	check(vk.DeviceWaitIdle(gpu.device))
     
+    gpu_delete(&gpu, vertex_buffer)
+    gpu_delete(&gpu, meshlet_buffer)
+    gpu_delete(&gpu, meshlet_data_buffer)
+    gpu_delete(&gpu, mesh_buffer)
+    gpu_delete(&gpu, draw_buffer)
+    gpu_delete(&gpu, draw_command_buffer)
+    gpu_delete(&gpu, draw_command_count_buffer)
+
     for frame in frames {
-        gpu_delete(frame.draw_globals.gpu)
-        gpu_delete(frame.cull_globals.gpu)
+        gpu_delete(&gpu, frame.draw_globals.gpu)
+        gpu_delete(&gpu, frame.cull_globals.gpu)
     }
     
-    gpu_delete(vertex_buffer)
-    gpu_delete(meshlet_buffer)
-    gpu_delete(meshlet_data_buffer)
-    gpu_delete(mesh_buffer)
-    gpu_delete(draw_buffer)
-    gpu_delete(draw_command_buffer)
-    gpu_delete(draw_command_count_buffer)
-    
-    destroy_swapchain(device, &swapchain)
-    destroy_pipeline(device, meshlet_pipeline)
-    destroy_pipeline(device, cull_pipeline)
+    destroy_pipeline(gpu.device, meshlet_pipeline)
+    destroy_pipeline(gpu.device, cull_pipeline)
     
     for texture in textures {
-        gpu_delete(texture)
+        gpu_delete(&gpu, texture)
     }
     
-    destroy_all_handles(device)
-    
-	vk.DestroyDevice(device, nil)
-    
-	vk.DestroySurfaceKHR(ips.instance, ips.surface, nil)
-	vk.DestroyInstance(ips.instance, nil)
+    gpu_deinit(&gpu)
 }
 
 ////////////////////////////////////////////////
