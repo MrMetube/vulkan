@@ -49,9 +49,6 @@ Geometry :: struct {
 
 ////////////////////////////////////////////////
 
-// @shader meshlet.task
-TaskWidth :: 32
-
 // @shader meshlet.mesh
 MaxVertices  :: 64
 MaxTriangles :: 84
@@ -465,9 +462,9 @@ main :: proc () {
     // @speed is a pipeline cache still a good optimization?
     pipeline_cache: vk.PipelineCache = 0
     
-    cull_pipeline:    Pipeline
-    depth_pipeline:   Pipeline
-    meshlet_pipeline: Pipeline
+    cull_pipeline:    Pipeline_pc(^Cull_Globals)
+    depth_pipeline:   Pipeline_pc(Depth_Globals)
+    meshlet_pipeline: Pipeline_pc(^Draw_Globals)
     
     ////////////////////////////////////////////////
     
@@ -598,15 +595,15 @@ main :: proc () {
         watchers_check_for_modification(watchers)
         
         if reload_shaders_if_needed(watchers, shader_allocator, &draw_cull_shader) || !pipeline_is_valid(cull_pipeline) {
-            cull_pipeline = create_compute_pipeline(device, pipeline_cache, draw_cull_shader, cull_descriptor_set_layout, cull_pipeline, vk.DeviceAddress)
+            cull_pipeline = create_compute_pipeline(device, pipeline_cache, draw_cull_shader, cull_descriptor_set_layout, cull_pipeline)
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, &depth_reduce_shader) || !pipeline_is_valid(depth_pipeline) {
-            depth_pipeline = create_compute_pipeline(device, pipeline_cache, depth_reduce_shader, depth_descriptor_set_layout, depth_pipeline, Depth_Globals)
+            depth_pipeline = create_compute_pipeline(device, pipeline_cache, depth_reduce_shader, depth_descriptor_set_layout, depth_pipeline)
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, meshlet_shaders[:]) || !pipeline_is_valid(meshlet_pipeline) {
-            meshlet_pipeline = create_graphics_pipeline(device, pipeline_cache, swapchain, { graphics_descriptor_set_layout, textures_descriptor_set_layout }, meshlet_shaders[:], meshlet_pipeline, vk.DeviceAddress)
+            meshlet_pipeline = create_graphics_pipeline(device, pipeline_cache, swapchain, { graphics_descriptor_set_layout, textures_descriptor_set_layout }, meshlet_shaders[:], meshlet_pipeline)
         }
         
         ////////////////////////////////////////////////
@@ -804,7 +801,7 @@ main :: proc () {
             
             bind_pipeline(cb, cull_pipeline)
                 // @shader cull.comp
-                push_constants(cb, cull_pipeline, &frame.cull_globals)
+                push_constants_pointer(cb, cull_pipeline, &frame.cull_globals)
                 
                 vk.CmdDispatch(cb, get_group_count(draw_cull_shader, len(draws)))
             

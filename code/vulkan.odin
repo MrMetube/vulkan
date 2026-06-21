@@ -38,6 +38,9 @@ Depth_Pyramid_Mip :: struct {
     size: uv2,
 }
 
+Pipeline_pc :: struct ($Push_Constant: typeid) {
+    #subtype using i: Pipeline
+}
 Pipeline :: struct {
     pipeline: vk.Pipeline,
     layout:   vk.PipelineLayout,
@@ -676,7 +679,7 @@ create_pipeline_layout :: proc (device: vk.Device, stage_flags: vk.ShaderStageFl
 
 
 // @todo(viktor): store type of pushconstant in the pipeline, so that cmdpushconstants can validate usage, then also differentiate if its a pointer type to use vk.DeviceAddress's size or a struct type
-create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, shader: Shader, set_layout: vk.DescriptorSetLayout, old: Pipeline = {}, $PushConstant: typeid) -> Pipeline {
+create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, shader: Shader, set_layout: vk.DescriptorSetLayout, old: Pipeline_pc($PC)) -> Pipeline_pc(PC) {
     if pipeline_is_valid(old) {
         check(vk.DeviceWaitIdle(device))
         destroy_pipeline(device, old)
@@ -684,11 +687,16 @@ create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sha
     
     assert(shader.stage == .COMPUTE)
     
-    result: Pipeline
+    result: Pipeline_pc(PC)
     result.bind_point = .COMPUTE
     result.shader_stages += { shader.stage }
     
-    result.layout = create_pipeline_layout(device, result.shader_stages, set_layout, size_of_push_constant = size_of(PushConstant))
+    when intrinsics.type_is_pointer(PC) {
+        size := cast(u32) size_of(vk.DeviceAddress)
+    } else {
+        size := cast(u32) size_of(PC)
+    }
+    result.layout = create_pipeline_layout(device, result.shader_stages, set_layout, size_of_push_constant = size)
     
     create_info := vk.ComputePipelineCreateInfo {
         sType = .COMPUTE_PIPELINE_CREATE_INFO,
@@ -705,26 +713,26 @@ create_compute_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, sha
         },
     }
     
-    check(vk.CreateComputePipelines(device, cache, 1, &create_info, nil, &result.pipeline))
+    check(vk.CreateComputePipelines(device, cache, 1, &create_info, nil, &result.i.pipeline))
     
     result.update_template = create_update_template(device, .COMPUTE, result.layout, shader)
     
     return result
 }
 
-create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, swapchain: Swapchain, set_layouts: [] vk.DescriptorSetLayout, shaders: [] Shader, old: Pipeline = {}, $PushConstant: typeid) -> Pipeline {
+create_graphics_pipeline :: proc (device: vk.Device, cache: vk.PipelineCache, swapchain: Swapchain, set_layouts: [] vk.DescriptorSetLayout, shaders: [] Shader, old: Pipeline_pc($PC)) -> Pipeline_pc(PC) {
     if pipeline_is_valid(old) {
         check(vk.DeviceWaitIdle(device))
         destroy_pipeline(device, old)
     }
     
-    result: Pipeline
+    result: Pipeline_pc(PC)
     result.bind_point = .GRAPHICS
     for shader in shaders {
         result.shader_stages += { shader.stage }
     }
     
-    result.layout = create_pipeline_layout(device, result.shader_stages, ..set_layouts, size_of_push_constant = size_of(PushConstant))
+    result.layout = create_pipeline_layout(device, result.shader_stages, ..set_layouts, size_of_push_constant = size_of(PC))
     
     shader_stages: [dynamic; 16] vk.PipelineShaderStageCreateInfo
     module_infos:  [dynamic; 16] vk.ShaderModuleCreateInfo
@@ -907,10 +915,10 @@ bind_pipeline :: proc (cb: vk.CommandBuffer, pipeline: Pipeline) {
 }
 
 push_constants :: proc { push_constants_pointer, push_constants_value }
-push_constants_pointer :: proc (cb: vk.CommandBuffer, pipeline: Pipeline, push_constant: ^Push_Constant($T)) {
+push_constants_pointer :: proc (cb: vk.CommandBuffer, pipeline: Pipeline_pc(^$T), push_constant: ^Push_Constant(T)) {
     push_constants_raw(cb, pipeline, size_of(vk.DeviceAddress), &push_constant.gpu.address)
 }
-push_constants_value :: proc (cb: vk.CommandBuffer, pipeline: Pipeline, push_constant: $T) where !intrinsics.type_is_pointer(T) {
+push_constants_value :: proc (cb: vk.CommandBuffer, pipeline: Pipeline_pc($T), push_constant: T) where !intrinsics.type_is_pointer(T) {
     value := push_constant
     push_constants_raw(cb, pipeline, size_of(T), &value)
 }
