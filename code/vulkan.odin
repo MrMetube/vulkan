@@ -93,12 +93,8 @@ recreate_swapchain :: proc (gpu: ^Gpu, new_size: uv2) {
     surface_capabilities: vk.SurfaceCapabilitiesKHR
     check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(gpu.physical_device, gpu.surface, &surface_capabilities))
     
+    // :Linux: Wayland had a special value for surface_capabilities.currentExtent.width
     swapchain_extent := surface_capabilities.currentExtent
-    // @note(viktor): this is like for wayland or something, dont know if i want to maintain that any further
-    if surface_capabilities.currentExtent.width == 0xFFFFFFFF {
-        swapchain_extent = to_extent(new_size)
-    }
-    
     if swapchain_extent.width == 0 && swapchain_extent.height == 0 {
         if gpu.swapchain == 0 {
             assert(false, "Welp :(")
@@ -125,39 +121,48 @@ recreate_swapchain :: proc (gpu: ^Gpu, new_size: uv2) {
     
     gpu.swapchain_size = new_size
     
-    check(vk.CreateSwapchainKHR(gpu.device, &swapchain_create_info, nil, &gpu.swapchain))
-    if old_swapchain != 0 { destroy_swapchain(gpu, old_swapchain) }
+    previous_image_count := cast(u32) len(gpu.swapchain_images)
     
-    // @waste semaphores only need to be deleted and recreated, if the image_count changes up or down respectively
+    check(vk.CreateSwapchainKHR(gpu.device, &swapchain_create_info, nil, &gpu.swapchain))
     
     image_count: u32
-    images: [dynamic; 64] vk.Image
     check(vk.GetSwapchainImagesKHR(gpu.device, gpu.swapchain, &image_count, nil))
-    resize(&images, image_count)
-    check(vk.GetSwapchainImagesKHR(gpu.device, gpu.swapchain, &image_count, &images[0]))
     
-    resize(&gpu.swapchain_images, image_count)
-    resize(&gpu.render_completes, image_count)
-    for image, index in images {
-        gpu.swapchain_images[index].image = image
+    if old_swapchain != 0 {
+        destroy_swapchain(gpu, old_swapchain, image_count_did_change = previous_image_count != image_count)
     }
     
-    for &it in gpu.render_completes {
-        it = create_semaphore(gpu.device)
+    if previous_image_count != image_count {
+        resize(&gpu.swapchain_images, image_count)
+        resize(&gpu.render_completes, image_count)
+        
+        for &it in gpu.render_completes {
+            it = create_semaphore(gpu.device)
+        }
+    }
+    images: [dynamic; 64] vk.Image
+    assert(image_count <= cap(images))
+    resize(&images, image_count)
+    check(vk.GetSwapchainImagesKHR(gpu.device, gpu.swapchain, &image_count, &images[0]))
+    for image, index in images {
+        gpu.swapchain_images[index].image = image
+    
     }
     
     // :Stencil: add the .STENCIL mask bit
-    gpu.depth_buffer  = gpu_make_image(gpu, gpu.swapchain_size,  gpu.depth_buffer.format, { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED }, { .DEPTH })
-    gpu.color_buffer  = gpu_make_image(gpu, gpu.swapchain_size,  gpu.swapchain_format,    { .COLOR_ATTACHMENT, .TRANSFER_SRC },   { .COLOR })
+    gpu.depth_buffer = gpu_make_image(gpu, gpu.swapchain_size, gpu.depth_buffer.format, { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED }, { .DEPTH })
+    gpu.color_buffer = gpu_make_image(gpu, gpu.swapchain_size, gpu.swapchain_format,    { .COLOR_ATTACHMENT, .TRANSFER_SRC },    { .COLOR })
 }
 
 // @cleanup this isnt a good design
-destroy_swapchain :: proc (gpu: ^Gpu, old_swapchain: vk.SwapchainKHR = 0) { 
-    for &it in gpu.render_completes {
-        vk.DestroySemaphore(gpu.device, it, nil)
+destroy_swapchain :: proc (gpu: ^Gpu, old_swapchain: vk.SwapchainKHR = 0, image_count_did_change := true) { 
+    if image_count_did_change {
+        for &it in gpu.render_completes {
+            vk.DestroySemaphore(gpu.device, it, nil)
+        }
+        clear(&gpu.render_completes)
+        clear(&gpu.swapchain_images) // The swapchain's images are allocated for us, so we can just drop the handles.
     }
-    clear(&gpu.render_completes)
-    clear(&gpu.swapchain_images) // The swapchain's images are allocated for us, so we can just drop the handles.
     
     gpu_delete(gpu, gpu.depth_buffer)
     gpu_delete(gpu, gpu.color_buffer)
@@ -180,14 +185,8 @@ pipeline_barrier_begin :: proc () {
     barrier_state.is_open = true
 }
 
-add_image_barrier :: proc { add_image_barrier_vk, add_image_barrier_image }
-add_image_barrier_image :: proc (image: ^Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
-    add_image_barrier(image.image, src_stage, src_access, old_layout, dst_stage, dst_access, new_layout, aspect_mask)
-    image.last_transition = { dst_stage, dst_access, new_layout }
-}
-add_image_barrier_vk :: proc (image: vk.Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
+add_image_barrier :: proc (image: ^Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
     assert(barrier_state.is_open)
-    
     append(&barrier_state.image_barriers, vk.ImageMemoryBarrier2 {
         sType = .IMAGE_MEMORY_BARRIER_2,
         srcAccessMask = src_access,
@@ -196,9 +195,10 @@ add_image_barrier_vk :: proc (image: vk.Image, src_stage: vk.PipelineStageFlags2
         dstStageMask  = dst_stage,
         oldLayout = old_layout,
         newLayout = new_layout,
-        image = image,
+        image = image.image,
         subresourceRange = { aspectMask = aspect_mask, levelCount = vk.REMAINING_MIP_LEVELS, layerCount = vk.REMAINING_ARRAY_LAYERS },
     })
+    image.last_transition = { dst_stage, dst_access, new_layout }
 }
 
 add_buffer_barrier :: proc (buffer: ^Buffer, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2) {
@@ -274,7 +274,6 @@ create_pipeline_layout :: proc (device: vk.Device, stage_flags: vk.ShaderStageFl
     return result
 }
 
-
 create_compute_pipeline :: proc (gpu: ^Gpu, shader: Shader, set_layout: vk.DescriptorSetLayout, old: Pipeline_pc($PC)) -> Pipeline_pc(PC) {
     if pipeline_is_valid(old) {
         check(vk.DeviceWaitIdle(gpu.device))
@@ -287,11 +286,7 @@ create_compute_pipeline :: proc (gpu: ^Gpu, shader: Shader, set_layout: vk.Descr
     result.bind_point = .COMPUTE
     result.shader_stages += { shader.stage }
     
-    when intrinsics.type_is_pointer(PC) {
-        size := cast(u32) size_of(vk.DeviceAddress)
-    } else {
-        size := cast(u32) size_of(PC)
-    }
+    size := cast(u32) (size_of(vk.DeviceAddress) when intrinsics.type_is_pointer(PC) else size_of(PC))
     
     if set_layout == 0 {
         result.layout = create_pipeline_layout(gpu.device, result.shader_stages, size_of_push_constant = size)
@@ -333,7 +328,9 @@ create_graphics_pipeline :: proc (gpu: ^Gpu, set_layouts: [] vk.DescriptorSetLay
         result.shader_stages += { shader.stage }
     }
     
-    result.layout = create_pipeline_layout(gpu.device, result.shader_stages, ..set_layouts, size_of_push_constant = size_of(PC))
+    size := cast(u32) (size_of(vk.DeviceAddress) when intrinsics.type_is_pointer(PC) else size_of(PC))
+    
+    result.layout = create_pipeline_layout(gpu.device, result.shader_stages, ..set_layouts, size_of_push_constant = size)
     
     shader_stages: [dynamic; 16] vk.PipelineShaderStageCreateInfo
     module_infos:  [dynamic; 16] vk.ShaderModuleCreateInfo

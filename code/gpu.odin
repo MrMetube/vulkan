@@ -57,6 +57,8 @@ Gpu :: struct {
     
     swapchain_size:   uv2,
     swapchain_format: vk.Format, // @cleanup is this always just the color_buffers format?
+    
+    // @todo(viktor): these should also be part of the app, as we are already passing special usage flags based on what the app wants to do
     color_buffer: Image,
     depth_buffer: Image,
 }
@@ -139,12 +141,13 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
         ////////////////////////////////////////////////
         
         {
-            physical_devices: [] vk.PhysicalDevice
+            physical_devices: [dynamic; 128] vk.PhysicalDevice
             {
                 device_count: u32
                 check(vk.EnumeratePhysicalDevices(result.instance, &device_count, nil))
-                physical_devices = make([] vk.PhysicalDevice, device_count, context.temp_allocator)
-                check(vk.EnumeratePhysicalDevices(result.instance, &device_count, raw_data(physical_devices)))
+                assert(device_count <= cap(physical_devices))
+                resize(&physical_devices, device_count)
+                check(vk.EnumeratePhysicalDevices(result.instance, &device_count, raw_data(&physical_devices)))
             }
             
             discrete: vk.PhysicalDevice
@@ -155,8 +158,10 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
                 {
                     queue_family_count: u32
                     vk.GetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, nil)
-                    queue_family_properties := make([] vk.QueueFamilyProperties, queue_family_count, context.temp_allocator)
-                    vk.GetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, raw_data(queue_family_properties))
+                    queue_family_properties: [dynamic; 128] vk.QueueFamilyProperties
+                    assert(queue_family_count <= cap(queue_family_properties))
+                    resize(&queue_family_properties, queue_family_count)
+                    vk.GetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, raw_data(&queue_family_properties))
                     
                     for props, index in queue_family_properties {
                         if .GRAPHICS in props.queueFlags {
@@ -207,8 +212,7 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
     
     ////////////////////////////////////////////////
     
-    
-    { // create_device_queue_frames_and_command_pool_and_init_gpu_allocator
+    {
         queue_family_index: u32
         
         device_extensions := [] cstring { 
@@ -329,7 +333,10 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             sema = create_semaphore(result.device)
             defer_destroy(vk.DestroySemaphore, sema)
         }
-        
+            
+        result.timeline_semaphore = create_semaphore(result.device, timeline_initial_value = MaxFramesInFlight)
+        defer_destroy(vk.DestroySemaphore, result.timeline_semaphore)
+            
         ////////////////////////////////////////////////
         
         {
@@ -353,16 +360,15 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
         }
     }
     
-    result.timeline_semaphore = create_semaphore(result.device, timeline_initial_value = MaxFramesInFlight)
-    defer_destroy(vk.DestroySemaphore, result.timeline_semaphore)
-        
     ////////////////////////////////////////////////
         
     get_swapchain_format :: proc (gpu: ^Gpu) -> vk.Format {
         format_count: u32
         check(vk.GetPhysicalDeviceSurfaceFormatsKHR(gpu.physical_device, gpu.surface, &format_count, nil))
-        formats := make([] vk.SurfaceFormatKHR, format_count, context.temp_allocator)
-        check(vk.GetPhysicalDeviceSurfaceFormatsKHR(gpu.physical_device, gpu.surface, &format_count, raw_data(formats)))
+        formats: [dynamic; 128] vk.SurfaceFormatKHR
+        assert(format_count <= cap(formats))
+        resize(&formats, format_count)
+        check(vk.GetPhysicalDeviceSurfaceFormatsKHR(gpu.physical_device, gpu.surface, &format_count, raw_data(&formats)))
         
         if len(formats) == 1 && formats[0].format == .UNDEFINED {
             return .R8G8B8A8_SRGB
@@ -541,7 +547,6 @@ gpu_make_image :: proc (gpu: ^Gpu, size: uv2, format: vk.Format, usage: vk.Image
 }
 
 select_memory_type_and_allocate :: proc (gpu: ^Gpu, requirements: vk.MemoryRequirements, flags: vk.MemoryPropertyFlags, add_device_address_flag := false) -> vk.DeviceMemory {
-    
     properties := gpu.memory_properties
     
     selected_memory_type_index: u32
