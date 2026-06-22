@@ -745,7 +745,7 @@ main :: proc () {
         
         gpu_profile_zone_begin("rendering early pass")
         gpu_labeled_region_begin(cmd, "rendering early pass", {0.6, 0.1, 07, 1.0})
-        begin_rendering(cmd, &gpu, stuff.color_buffer, stuff.depth_buffer, {0.07, 0.07, 0.07, 1}, early = true)
+        render(&gpu, cmd, stuff.color_buffer, stuff.depth_buffer, {0.07, 0.07, 0.07, 1}, early = true)
                 
             if print_profile_and_stats {
                 vk.ResetQueryPool(gpu.device, stats_pool, 0, stats_count)
@@ -773,7 +773,7 @@ main :: proc () {
                 vk.CmdEndQuery(cmd, stats_pool, 0)
             }
             
-        end_rendering(cmd)
+        gpu_end_render_pass(cmd)
         gpu_labeled_region_end(cmd)
         gpu_profile_zone_end()
         
@@ -832,9 +832,9 @@ main :: proc () {
         
         gpu_profile_zone_begin("rendering late pass")
         gpu_labeled_region_begin(cmd, "rendering late pass", {0.6, 0.1, 07, 1.0})
-        begin_rendering(cmd, &gpu, stuff.color_buffer, stuff.depth_buffer, {}, early = false)
+        render(&gpu, cmd, stuff.color_buffer, stuff.depth_buffer, {}, early = false)
             
-        end_rendering(cmd)
+        gpu_end_render_pass(cmd)
         gpu_labeled_region_end(cmd)
         gpu_profile_zone_end()
         
@@ -976,6 +976,20 @@ get_the_next_frame :: proc (gpu: ^Gpu, semaphore: vk.Semaphore) -> (frame_index:
     
     return frame_index, false
 }
+
+render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, color_buffer, depth_buffer: Image, clear_color: v4, early: bool) {
+    desc := Render_Pass_Desc {
+        // :ReversedZ: 0 is the maximal value
+        depth_target = { texture = depth_buffer, load_op = early ? .CLEAR : .LOAD, store_op = early ? .STORE : .DONT_CARE, clear_depth = 0 }, 
+        color_targets = {
+            { texture = color_buffer, load_op = early ? .CLEAR : .LOAD, store_op = .STORE, clear_color = clear_color }
+        }, 
+        
+    }
+    gpu_begin_render_pass(gpu, cmd, desc)
+}
+
+////////////////////////////////////////////////
 
 recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain) {
     delete_stuff(gpu, stuff)

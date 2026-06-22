@@ -141,7 +141,7 @@ recreate_swapchain :: proc (gpu: ^Gpu, new_size: uv2) {
         }
     }
     
-    images: [dynamic; 64] vk.Image
+    images: [dynamic; 16] vk.Image
     assert(image_count <= cap(images))
     resize(&images, image_count)
     check(vk.GetSwapchainImagesKHR(gpu.device, gpu.swapchain, &image_count, &images[0]))
@@ -328,39 +328,6 @@ create_update_template :: proc (device: vk.Device, bind_point: vk. PipelineBindP
     }
     
     return result
-}
-
-////////////////////////////////////////////////
-
-begin_rendering :: proc (cb: vk.CommandBuffer, gpu: ^Gpu, color_buffer, depth_buffer: Image, clear_color: v4, early: bool) {
-    rendering_info := vk.RenderingInfo {
-        sType = .RENDERING_INFO, 
-        renderArea = { extent = { **gpu.swapchain_size } },
-        layerCount = 1,
-        colorAttachmentCount = 1,
-        pColorAttachments = &vk.RenderingAttachmentInfo {
-            sType = .RENDERING_ATTACHMENT_INFO,
-            imageView   = color_buffer.view,
-            imageLayout = .ATTACHMENT_OPTIMAL,
-            loadOp      = early ? .CLEAR : .LOAD,
-            storeOp     = .STORE,
-            clearValue  = { color = { float32 = clear_color } },
-        },
-        pDepthAttachment  = &vk.RenderingAttachmentInfo {
-            sType = .RENDERING_ATTACHMENT_INFO,
-            imageView   = depth_buffer.view,
-            imageLayout = .ATTACHMENT_OPTIMAL,
-            loadOp      = early ? .CLEAR : .LOAD,
-            storeOp     = early ? .STORE : .DONT_CARE,
-            clearValue  = { depthStencil = { 0, 0 } }, // :ReversedZ: 0 is the maximal value
-        },
-    }
-    
-    vk.CmdBeginRendering(cb, &rendering_info)
-}
-
-end_rendering :: proc (cb: vk.CommandBuffer) {
-    vk.CmdEndRendering(cb)
 }
 
 ////////////////////////////////////////////////

@@ -1196,8 +1196,76 @@ gpu_set_scissor :: proc (cmd: vk.CommandBuffer, offset: iv2 = 0, size: uv2) {
 
 // void gpuDispatchIndirect(GpuCommandBuffer cb, void* dataGpu, void* gridDimensionsGpu);
 
-// void gpuBeginRenderPass(GpuCommandBuffer cb, GpuRenderPassDesc desc);
-// void gpuEndRenderPass(GpuCommandBuffer cb);
+Render_Target :: struct {
+    texture: Image,
+    
+    load_op:  vk.AttachmentLoadOp,
+    store_op: vk.AttachmentStoreOp,
+    
+    clear_depth:   f32,
+    clear_stencil: u32,
+    clear_color:   v4,
+}
+
+Render_Pass_Desc :: struct {
+    depth_target:   Render_Target,
+    stencil_target: Render_Target,
+    color_targets:  [] Render_Target,
+}
+
+gpu_begin_render_pass :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, desc: Render_Pass_Desc) {
+    // @api this should maybe be a parameter
+    render_size := gpu.swapchain_size
+    
+    color_attachments: [dynamic; 64] vk.RenderingAttachmentInfo
+    for target in desc.color_targets {
+        it := append_into(&color_attachments)
+        it.sType = .RENDERING_ATTACHMENT_INFO
+        
+        it.imageLayout = .ATTACHMENT_OPTIMAL
+        it.imageView   = target.texture.view
+        it.loadOp  = target.load_op
+        it.storeOp = target.store_op
+        it.clearValue.color.float32 = target.clear_color
+    }
+    
+    rendering_info := vk.RenderingInfo {
+        sType = .RENDERING_INFO, 
+        
+        renderArea = { extent = { **render_size } },
+        layerCount = 1,
+        
+        colorAttachmentCount = auto_cast len(color_attachments),
+        pColorAttachments = raw_data(&color_attachments),
+    }
+    
+    if desc.depth_target.texture.image != 0 {
+        rendering_info.pDepthAttachment = &vk.RenderingAttachmentInfo {
+            sType = .RENDERING_ATTACHMENT_INFO,
+            imageLayout = .ATTACHMENT_OPTIMAL,
+            imageView   = desc.depth_target.texture.view,
+            loadOp      = desc.depth_target.load_op,
+            storeOp     = desc.depth_target.store_op,
+            clearValue  = { depthStencil = { depth = desc.depth_target.clear_depth } },
+        }
+    }
+    
+    if desc.stencil_target.texture.image != 0 {
+        rendering_info.pStencilAttachment = &vk.RenderingAttachmentInfo {
+            sType = .RENDERING_ATTACHMENT_INFO,
+            imageLayout = .ATTACHMENT_OPTIMAL,
+            imageView   = desc.stencil_target.texture.view,
+            loadOp      = desc.stencil_target.load_op,
+            storeOp     = desc.stencil_target.store_op,
+            clearValue  = { depthStencil = { stencil = desc.stencil_target.clear_stencil } },
+        }
+    }
+    
+    vk.CmdBeginRendering(cmd, &rendering_info)
+}
+gpu_end_render_pass :: proc (cmd: vk.CommandBuffer) {
+    vk.CmdEndRendering(cmd)
+}
 
 // void gpuDrawIndexedInstanced(GpuCommandBuffer cb, void* vertexDataGpu, void* pixelDataGpu, void* indicesGpu, uint32 indexCount, uint32 instanceCount);
 // void gpuDrawIndexedInstancedIndirect(GpuCommandBuffer cb, void* vertexDataGpu, void* pixelDataGpu, void* indicesGpu, void* argsGpu);
