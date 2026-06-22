@@ -65,9 +65,7 @@ Gpu :: struct {
 gpu_init :: proc (window: ^sdl.Window) -> Gpu {
     result: Gpu
     
-    ////////////////////////////////////////////////
-    
-    { // create_instance_physical_device_and_surface
+    {
         vk.GetInstanceProcAddr = auto_cast sdl.Vulkan_GetVkGetInstanceProcAddr()
         vk.load_proc_addresses_global(auto_cast vk.GetInstanceProcAddr)
         
@@ -319,8 +317,6 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
         
         vk.GetDeviceQueue(result.device, queue_family_index, 0, &result.queue)
         
-        ////////////////////////////////////////////////
-        
         vk.GetPhysicalDeviceMemoryProperties(result.physical_device, &result.memory_properties)
         
         ////////////////////////////////////////////////
@@ -347,7 +343,8 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
     }
     
     ////////////////////////////////////////////////
-        
+    
+    // @cleanup inline
     get_swapchain_format :: proc (gpu: ^Gpu) -> vk.Format {
         format_count: u32
         check(vk.GetPhysicalDeviceSurfaceFormatsKHR(gpu.physical_device, gpu.surface, &format_count, nil))
@@ -368,7 +365,8 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
         
         return formats[0].format
     }
-
+    
+    // @cleanup inline
     get_depth_buffer_format :: proc (gpu: ^Gpu) -> vk.Format {
         result: vk.Format
         
@@ -409,69 +407,6 @@ gpu_deinit :: proc (gpu: ^Gpu) {
 }
 
 ////////////////////////////////////////////////
-
-get_the_next_frame :: proc (gpu: ^Gpu, semaphore: vk.Semaphore) -> (frame_index: u32, should_restart_frame: bool) {
-    frame_index = gpu.absolute_frame_index % MaxFramesInFlight
-    gpu.absolute_frame_index += 1
-    
-    info := vk.AcquireNextImageInfoKHR {
-        sType = .ACQUIRE_NEXT_IMAGE_INFO_KHR,
-        
-        swapchain  = gpu.swapchain,
-        timeout    = MaxTimeout,
-        semaphore  = gpu.image_aquired_semaphores[frame_index],
-        deviceMask = 1 << 0,
-    }
-    
-    result := vk.AcquireNextImage2KHR(gpu.device, &info, &gpu.image_index)
-    if result == .ERROR_OUT_OF_DATE_KHR || result == .SUBOPTIMAL_KHR {
-        gpu.should_recreate_swapchain = true
-        return 0, true
-    }
-    check(result)
-    
-    return frame_index, false
-}
-
-////////////////////////////////////////////////
-
-gpu_make_buffer :: proc (gpu: ^Gpu, #any_int size: vk.DeviceSize, usage: vk.BufferUsageFlags, flags: vk.MemoryPropertyFlags) -> (Buffer, pmm) {
-    assert(gpu.device != nil)
-    
-    create_info := vk.BufferCreateInfo {
-        sType = .BUFFER_CREATE_INFO,
-        size  = size,
-        usage = usage,
-    }
-    
-    result: Buffer
-    check(vk.CreateBuffer(gpu.device, &create_info, nil, &result.buffer))
-    
-    requirements: vk.MemoryRequirements
-    vk.GetBufferMemoryRequirements(gpu.device, result.buffer, &requirements)
-    
-    uses_address := .SHADER_DEVICE_ADDRESS in usage
-    
-    result.memory = select_memory_type_and_allocate(gpu, requirements, flags, add_device_address_flag = uses_address)
-    
-    check(vk.BindBufferMemory(gpu.device, result.buffer, result.memory, 0))
-    
-    pointer: pmm
-    vk.MapMemory(gpu.device, result.memory, 0, size, {}, &pointer)
-    
-    if uses_address {
-        adress_create_info := vk.BufferDeviceAddressInfo {
-            sType = .BUFFER_DEVICE_ADDRESS_INFO,
-            buffer = result.buffer,
-        }
-        
-        result.address = vk.GetBufferDeviceAddress(gpu.device, &adress_create_info)
-        
-        assert(result.address != 0)
-    }
-    
-    return result, pointer
-}
 
 gpu_make_image :: proc (gpu: ^Gpu, size: uv2, format: vk.Format, usage: vk.ImageUsageFlags, aspect_mask: vk.ImageAspectFlags, flags := vk.MemoryPropertyFlags { .DEVICE_LOCAL }, mip_levels : u32 = 1) -> Image {
     assert(gpu.device != nil)
@@ -603,18 +538,16 @@ create_sampler :: proc (device: vk.Device, filter: vk.Filter, mipmap_mode: vk.Sa
 
 ////////////////////////////////////////////////
 
-
-// @naming should these be prefixed or not?
-Gpu_Memory_Kind :: enum u32 {
+Memory_Kind :: enum u32 {
     Default,  // cpu_mapped_gpu_memory, for fast gpu read, and direct cpu copying into
     GPU,      // gpu only memory for texture data, or big gpu-only buffers
     Readback, // cpu cached
 }
 
-Gpu_Hazard_Flags :: bit_set[Gpu_Hazard_Flag; u32]
-Gpu_Hazard_Flag :: enum u32 {
-    draw_arguments, 
-    descriptors,    // If you write to the texture descriptor heap (uncommon), you need to add a special flag.
+Hazard_Flags :: bit_set[Hazard_Flag; u32]
+Hazard_Flag :: enum u32 {
+    draw_arguments, // Indirect Draw Commands modify possibly prefetched data
+    descriptors,    // If you write to the texture descriptor heap
     depth_stencil,  
 }
 
@@ -626,14 +559,6 @@ Gpu_Texture_Kind :: enum u32 {
     _2D_Array,
     Cube_Array,
 }
-Gpu_Texture_Format :: vk.Format/* enum u32 {
-    None,
-    RGBA8_UNORM,
-    D32_FLOAT,
-    RG11B10_FLOAT,
-    RGB10_A2_UNORM,
-    // ...
-} */
 
 Gpu_Usage_Flags :: vk.ImageUsageFlags /* bit_set[Usage_Flag; u32]
 Usage_Flag ::  enum u32 {
@@ -646,7 +571,7 @@ Usage_Flag ::  enum u32 {
 
 ////////////////////////////////////////////////
 
-Gpu_Texture_Desc :: struct {
+Texture_Desc :: struct {
     kind: Gpu_Texture_Kind,
     dimensions: uv3,
     
@@ -654,20 +579,72 @@ Gpu_Texture_Desc :: struct {
     layer_count:  u32, // default = 1
     sample_count: vk.SampleCountFlags, // default = 1
     
-    format: Gpu_Texture_Format,
+    format: Format,
     usage:  Gpu_Usage_Flags,
 }
 
-Gpu_Texture_Descriptor :: struct {
+Texture_Descriptor :: struct {
     data: [4] u64,
 }
 
-Gpu_Texture :: distinct u64
+Texture :: distinct u64
+
+Topology :: vk.PrimitiveTopology
+Cull     :: enum { None, CCW, CW, All }
+Blend    :: enum { ADD, SUBTRACT, REV_SUBTRACT, MIN, MAX }
+Factor   :: vk.BlendFactor
+
+Format :: vk.Format
+
+Raster_Desc :: struct {
+    topology:                     Topology,
+    cull:                         Cull,
+    alpha_to_coverage:            bool,
+    // support_dual_source_blending: bool,
+    sample_count:                 u8,
+    depth_format:                 Format,
+    stencil_format:               Format,
+    color_targets:                [] Color_Target,
+    blendstate:                   ^Blend_Desc, // optional embedded blend state
+}
+
+DefaultRasterDesc :: Raster_Desc {
+    topology = .TRIANGLE_LIST,
+    sample_count = 1,
+}
+
+Color_Target :: struct {
+    format:     Format,
+    write_mask: Color_Mask, // should default to { .R, .G, .B, .A }
+}
+
+Blend_Desc :: struct {
+    color_op: Blend,
+    src_color_factor: Factor,
+    dst_color_factor: Factor,
+    alpha_op: Blend,
+    src_alpha_factor: Factor,
+    dst_alpha_factor: Factor,
+    color_write_mask: Color_Mask,
+}
+
+DefaultBlendDesc :: Blend_Desc {
+    src_color_factor = .ONE,
+    src_alpha_factor = .ONE,
+    color_write_mask = DefaulColorMask,
+}
+
+DefaulColorMask :: Color_Mask { .R, .G, .B, .A }
+
+Color_Mask :: vk.ColorComponentFlags
+
+
+
 
 ////////////////////////////////////////////////
+// Memory
 
 Gpu_Address :: struct ($T: typeid) { address: vk.DeviceAddress }
-Gpu_Slice   :: struct ($E: typeid) { address: vk.DeviceAddress }
 
 // @todo(viktor): can we find a way not to store this metadata per allocation?
 the_allocations: map[vk.DeviceAddress] Buffer
@@ -676,7 +653,7 @@ the_allocations: map[vk.DeviceAddress] Buffer
 // it seems that base structs should still be aligned by 16 bytes to make the best use of the loading hardware
 // this does not change with scalar block layout, as that just reduces padding issues between cpu and gpu.
 gpu_allocate :: proc { gpu_allocate_size, gpu_allocate_slice, gpu_allocate_type }
-gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Gpu_Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (cpu_result: pmm, gpu_result: vk.DeviceAddress) {
+gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (cpu_result: pmm, gpu_result: vk.DeviceAddress) {
     usage := usage
     usage += { .SHADER_DEVICE_ADDRESS }
     
@@ -685,6 +662,45 @@ gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Gp
     case .Default:  flags = { .HOST_VISIBLE, .HOST_COHERENT }
     case .GPU:      flags = { .HOST_VISIBLE, .DEVICE_LOCAL }
     case .Readback: flags = { .HOST_VISIBLE, .HOST_COHERENT, .HOST_CACHED }
+    }
+    
+    // @cleanup inline and simplify
+    gpu_make_buffer :: proc (gpu: ^Gpu, #any_int size: vk.DeviceSize, usage: vk.BufferUsageFlags, flags: vk.MemoryPropertyFlags) -> (Buffer, pmm) {
+        assert(gpu.device != nil)
+        
+        create_info := vk.BufferCreateInfo {
+            sType = .BUFFER_CREATE_INFO,
+            size  = size,
+            usage = usage,
+        }
+        
+        result: Buffer
+        check(vk.CreateBuffer(gpu.device, &create_info, nil, &result.buffer))
+        
+        requirements: vk.MemoryRequirements
+        vk.GetBufferMemoryRequirements(gpu.device, result.buffer, &requirements)
+        
+        uses_address := .SHADER_DEVICE_ADDRESS in usage
+        
+        result.memory = select_memory_type_and_allocate(gpu, requirements, flags, add_device_address_flag = uses_address)
+        
+        check(vk.BindBufferMemory(gpu.device, result.buffer, result.memory, 0))
+        
+        pointer: pmm
+        vk.MapMemory(gpu.device, result.memory, 0, size, {}, &pointer)
+        
+        if uses_address {
+            adress_create_info := vk.BufferDeviceAddressInfo {
+                sType = .BUFFER_DEVICE_ADDRESS_INFO,
+                buffer = result.buffer,
+            }
+            
+            result.address = vk.GetBufferDeviceAddress(gpu.device, &adress_create_info)
+            
+            assert(result.address != 0)
+        }
+        
+        return result, pointer
     }
     
     // @cleanup and use alignment
@@ -698,12 +714,14 @@ gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Gp
     
     return cpu_result, gpu_result
 }
-gpu_allocate_slice :: proc (gpu: ^Gpu, $T: typeid/ [] $E, #any_int count: umm, memory: Gpu_Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (result: [] E, gpu_result: vk.DeviceAddress) {
+
+gpu_allocate_slice :: proc (gpu: ^Gpu, $T: typeid/ [] $E, #any_int count: umm, memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (result: [] E, gpu_result: vk.DeviceAddress) {
     cpu_pointer, gpu_pointer := gpu_allocate_size(gpu, size_of(E) * count, align_of(E), memory, usage)
     result = slice_from_parts(E, cpu_pointer, count)
     return result, gpu_pointer
 }
-gpu_allocate_type :: proc (gpu: ^Gpu, $T: typeid, memory: Gpu_Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (result: ^T, gpu_result: Gpu_Address(T)) {
+
+gpu_allocate_type :: proc (gpu: ^Gpu, $T: typeid, memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (result: ^T, gpu_result: Gpu_Address(T)) {
     cpu_pointer, gpu_pointer := gpu_allocate_size(gpu, size_of(T), align_of(T), memory, usage)
     return cast(^T) cpu_pointer, Gpu_Address(T) { gpu_pointer }
 }
@@ -718,186 +736,17 @@ gpu_free_address :: proc (gpu: ^Gpu, address: Gpu_Address($T)) {
     gpu_free_pointer(gpu, address.address)
 }
 
-////////////////////////////////////////////////
- // Texture Bindings
-// @todo upload_bump_allocator bump_allocate(size) -> xx
 
-xx :: struct {
-    cpu: pmm,
-    gpu: pmm,
-}
 
-// gpu_make_texture_desc :: proc (
-//     kind: Gpu_Texture_Kind = ._2D,
-//     dimensions: uv3 = 1,
-    
-//     mip_count:    u32 = 1,
-//     layer_count:  u32 = 1,
-//     sample_count: vk.SampleCountFlags = {._1},
-    
-//     format: Gpu_Texture_Format = .UNDEFINED,
-//     usage:  Gpu_Usage_Flags,
-// ) -> Gpu_Texture_Desc {
-//     result: Gpu_Texture_Desc
-//     result.kind         = kind
-//     result.dimensions   = dimensions
-//     result.mip_count    = mip_count
-//     result.layer_count  = layer_count
-//     result.sample_count = sample_count
-//     result.format       = format
-//     result.usage        = usage
-//     return result
-// }
-
-// gpu_texture_size_align :: proc (gpu: ^Gpu, desc: Gpu_Texture_Desc) -> (size: umm, alignment: umm) {
-//     create_info := vk.ImageCreateInfo {
-//         sType = .IMAGE_CREATE_INFO,
-//         imageType     = .D2,
-//         format        = desc.format,
-//         extent        = { **desc.dimensions },
-//         mipLevels     = desc.mip_count,
-//         arrayLayers   = 1,
-//         samples       = { ._1 },
-//         tiling        = .OPTIMAL,
-//         usage         = desc.usage,
-//         initialLayout = .UNDEFINED,
-//     }
-    
-//     // @waste
-//     image: vk.Image
-//     check(vk.CreateImage(gpu.device, &create_info, nil, &image))
-    
-//     requirements: vk.MemoryRequirements
-//     vk.GetImageMemoryRequirements(gpu.device, image, &requirements)
-    
-//     vk.DestroyImage(gpu.device, image, nil)
-    
-//     return cast(umm) requirements.size, cast(umm) requirements.alignment
-// }
-
-// gpu_create_texture :: proc (gpu: ^Gpu, desc: Gpu_Texture_Desc, pointer: Gpu_pmm) -> Gpu_Texture {
-//     memory := the_allocations[pointer].memory
-//     vk.BindImageMemory(gpu.device, image, memory)
-// }
-
-/* 
-
-// Load a mesh using a 3rd party library
-auto mesh = createMesh("mesh.obj");
-auto upload = uploadBumpAllocator.allocate(mesh.byteSize); // Custom bump allocator (wraps a gpuMalloc ptr)
-mesh.load(upload.cpu);
-
-// Allocate GPU-only memory and copy into it
-void* meshGpu = gpuMalloc(mesh.byteSize, MEMORY_GPU);
-gpuMemCpy(commandBuffer, meshGpu, upload.gpu);
-
-*/
-
-// @api provide a version that allows multiple dest, source pairs with a single wait, or make it begin-end for now?
-gpu_copy :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: xx, source: pmm) {
-    semaphore := gpu_create_timeline_semaphore(gpu, 0)
-    defer gpu_destroy_semaphore(gpu, semaphore)
-    
-    // pipeline_barrier_begin()
-    //     add_image_barrier(&texture, {}, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
-    // pipeline_barrier_end(cmd)
-    
-    // copy_regions := make([dynamic] vk.BufferImageCopy, context.temp_allocator)
-    // for level in 0..<loaded_texture.mip_levels {
-    //     mip_offset := loaded_texture.mip_offsets[level]
-        
-    //     append(&copy_regions, vk.BufferImageCopy {
-    //         bufferOffset     = auto_cast mip_offset,
-    //         imageSubresource = { aspectMask = { .COLOR }, mipLevel = level, layerCount = 1 },
-    //         imageExtent      = { width = loaded_texture.width >> level, height = loaded_texture.height >> level, depth = 1 },
-    //     })
-    // }
-    
-    // vk.CmdCopyBufferToImage(cmd, source_buffer.buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
-    
-    // pipeline_barrier_begin()
-    //     add_image_barrier_transition_from_last(&texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
-    // pipeline_barrier_end(cmd)
-    
-    check(vk.EndCommandBuffer(cmd))
-    
-    gpu_submit(gpu.queue, semaphore, 1, cmd)
-    gpu_wait_semaphore(gpu, semaphore, 1)
-}
-
-gpu_copy_to_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: pmm, source: pmm, texture: Gpu_Texture) {
-    
-}
-
-gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: pmm, source: pmm, texture: Gpu_Texture) {
-    
-}
 
 ////////////////////////////////////////////////
-// Root arguments
+// Textures
 
-/* 
-
-    // Common header...
-    struct alignas(16) Data
-    {
-        // Uniform data
-        float16x4 color; // 16-bit float vector
-        uint16x2 offset; // 16-bit integer vector
-        const uint8* lut; // pointer to 8-bit data array
-
-        // Pointers to in/out data arrays
-        const uint32* input;
-        uint32* output;
-    };
-
-    // CPU code...
-    gpuSetPipeline(commandBuffer, computePipeline);
-
-    auto data = myBumpAllocator.allocate<Data>(); // Custom bump allocator (wraps gpuMalloc ptr, see appendix)
-    data.cpu->color = {1.0f, 0.0f, 0.0f, 1.0f};
-    data.cpu->offset = {16, 0};
-    data.cpu->lut = luts.gpu + 64; // GPU pointers support pointer math (no need for offset API)
-    data.cpu->input = input.gpu;
-    data.cpu->output = output.gpu;
-
-    gpuDispatch(commandBuffer, data.gpu, uvec3(128, 1, 1));
-
-    // GPU kernel...
-    [groupsize = (64, 1, 1)]
-    void main(uint32x3 threadId : SV_ThreadID, const Data* data)
-    {
-        uint32 value = data->input[threadId.x]; 
-        // TODO: Code using color, offset, lut, etc...
-        data->output[threadId.x] = value;
-    }
-
-*/
-
-// Inputs should be marked as constant array and 
-// the most important fields should be at the start of the struct, as they are preloaded
-// to enable uniformity the data should be always marked as readonly
-// by convention buffers should not alias into each other
-
-the_bound_pipeline: Pipeline
-
-gpu_set_pipeline :: proc (command_buffer: vk.CommandBuffer, pipeline: Pipeline) {
-    vk.CmdBindPipeline(command_buffer, pipeline.bind_point, pipeline.pipeline)
-    the_bound_pipeline = pipeline
-}
-
-// @api make gpu_data type safer
-gpu_dispatch :: proc (command_buffer: vk.CommandBuffer, pointer_to_the_gpu_address: ^^$T, group_size: uv3) {
-    assert(the_bound_pipeline.pipeline != 0, "no pipeline was bound")
-    
-    vk.CmdPushConstants(command_buffer, the_bound_pipeline.layout, the_bound_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), pointer_to_the_gpu_address)
-    
-    vk.CmdDispatch(command_buffer, **group_size)
-}
-
-////////////////////////////////////////////////
-// Texture bindings
 // @todo
+// GpuTextureSizeAlign gpuTextureSizeAlign(GpuTextureDesc desc);
+// GpuTexture gpuCreateTexture(GpuTextureDesc desc, void* ptrGpu);
+// GpuTextureDescriptor gpuTextureViewDescriptor(GpuTexture texture, GpuViewDesc desc);
+// GpuTextureDescriptor gpuRWTextureViewDescriptor(GpuTexture texture, GpuViewDesc desc);
 
 /* 
 
@@ -1006,36 +855,37 @@ gpu_dispatch :: proc (command_buffer: vk.CommandBuffer, pointer_to_the_gpu_addre
     }
 */
 
-////////////////////////////////////////////////
-// Shader pipelines
 
-gpu_create_compute_pipeline :: proc (gpu: ^Gpu, shader: Shader, $PC: typeid, old: Pipeline) -> Pipeline {
-    if pipeline_is_valid(old) {
-        check(vk.DeviceWaitIdle(gpu.device))
-        destroy_pipeline(gpu.device, old)
-    }
-    
-    assert(shader.stage == .COMPUTE)
+
+////////////////////////////////////////////////
+// Pipelines 
+
+// @cleanup
+gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, temporary_set_layout: vk.DescriptorSetLayout = 0) -> Pipeline {
+    // @todo(viktor): allow for optional shader constant, i.e. vulkan specialization constants
+    assert(compute.stage == .COMPUTE)
     
     result: Pipeline
     result.bind_point    = .COMPUTE
     result.shader_stages = { .COMPUTE }
     
-    size := cast(u32) (size_of(vk.DeviceAddress) when intrinsics.type_is_pointer(PC) else size_of(PC))
-    
-    result.layout = create_pipeline_layout(gpu.device, result.shader_stages, size_of_push_constant = size)
+    if temporary_set_layout != 0 {
+        result.layout = create_pipeline_layout(gpu, result.shader_stages, temporary_set_layout)
+    } else {
+        result.layout = create_pipeline_layout(gpu, result.shader_stages)
+    }
     
     create_info := vk.ComputePipelineCreateInfo {
         sType = .COMPUTE_PIPELINE_CREATE_INFO,
         layout = result.layout,
         stage  = { 
             sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
-            stage = { shader.stage }, 
+            stage = { compute.stage }, 
             pName = "main", 
             pNext = &vk.ShaderModuleCreateInfo {
                 sType    = .SHADER_MODULE_CREATE_INFO,
-                codeSize = len(shader.bytes),
-                pCode    = cast(^u32) &shader.bytes[0],
+                codeSize = len(compute.bytes),
+                pCode    = cast(^u32) &compute.bytes[0],
             },
         },
     }
@@ -1045,149 +895,242 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, shader: Shader, $PC: typeid, old
     return result
 }
 
-////////////////////////////////////////////////
-// Shader constants
-
-/* 
-
-// Common header...
-struct alignas(16) Constants
-{
-    int32 qualityLevel;
-    uint8* blueNoiseLUT;
-};
-
-// CPU code...
-Constants constants { .qualityLevel = 2, blueNoiseLUT = blueNoiseLUT.gpu };
-
-auto shaderIR = loadFile("computeShader.ir");
-GpuPipeline computePipeline = gpuCreateComputePipeline(shaderIR, &constants);
-
-// GPU kernel...
-[groupsize = (8, 8, 1)]
-void main(uint32x3 threadId : SV_ThreadID, const Data* data, const Constants constants)
-{
-    if (constants.qualityLevel == 3)
-    {
-        // Dead code eliminated
-    }
+gpu_create_graphics_pipeline :: proc (gpu: ^Gpu, vertex, fragment: Shader, info: Raster_Desc) -> Pipeline {
+    assert(vertex.stage   == .VERTEX)
+    assert(fragment.stage == .FRAGMENT)
+    
+    result: Pipeline
+    gpu_create_graphics_pipeline_common(gpu, &result, info, vertex, fragment)
+    
+    return result
 }
 
-*/
+gpu_create_graphics_meshlet_pipeline :: proc { gpu_create_graphics_meshlet_pipeline_tmp, gpu_create_graphics_meshlet_pipeline_mp }
 
-////////////////////////////////////////////////
-// Barriers and fences
+// @todo(viktor): get rid of the set_layout which should only be the textures actually, just make the texture_heap a parameter
+gpu_create_graphics_meshlet_pipeline_tmp :: proc (gpu: ^Gpu, task, mesh, frag: Shader, info: Raster_Desc, set_layout: vk.DescriptorSetLayout) -> Pipeline {
+    assert(task.stage == .TASK_EXT)
+    assert(mesh.stage == .MESH_EXT)
+    assert(frag.stage == .FRAGMENT)
+    
+    result: Pipeline
+    gpu_create_graphics_pipeline_common(gpu, &result, info, task, mesh, frag, set_layout = set_layout)
+    
+    return result
+}
 
-// @todo(viktor): check where niagara uses dependency flags and add it
-gpu_barrier :: proc (command_buffer: vk.CommandBuffer, source_stage, destination_stage: vk.PipelineStageFlags2, hazard := Gpu_Hazard_Flags {}) {
-    // @study vk.DependencyFlags
-    info := vk.DependencyInfo {
-        sType = .DEPENDENCY_INFO,
+gpu_create_graphics_meshlet_pipeline_mp :: proc (gpu: ^Gpu, mesh, frag: Shader, info: Raster_Desc) -> Pipeline {
+    assert(mesh.stage == .MESH_EXT)
+    assert(frag.stage == .FRAGMENT)
+    
+    result: Pipeline
+    gpu_create_graphics_pipeline_common(gpu, &result, info, mesh, frag)
+    
+    return result
+}
+
+create_pipeline_layout :: proc (gpu: ^Gpu, stage_flags: vk.ShaderStageFlags, set_layouts: ..vk.DescriptorSetLayout) -> vk.PipelineLayout {
+    info := vk.PipelineLayoutCreateInfo { sType = .PIPELINE_LAYOUT_CREATE_INFO }
+    
+    if len(set_layouts) > 0 {
+        info.setLayoutCount = cast(u32) len(set_layouts)
+        info.pSetLayouts    = &set_layouts[0]
+    }
+    
+    size_of_push_constant := cast(u32) size_of(vk.DeviceAddress)
+    if size_of_push_constant != 0 {
+        info.pushConstantRangeCount = 1
+        info.pPushConstantRanges = &vk.PushConstantRange {
+            stageFlags = stage_flags,
+            size       = size_of_push_constant,
+        }
+    }
+    
+    result: vk.PipelineLayout
+    check(vk.CreatePipelineLayout(gpu.device, &info, nil, &result))
+    
+    return result
+}
+
+gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info: Raster_Desc, shaders: ..Shader, set_layout: vk.DescriptorSetLayout = 0) {
+    shader_stages: [dynamic; 4] vk.PipelineShaderStageCreateInfo
+    module_infos:  [dynamic; 4] vk.ShaderModuleCreateInfo
+    for shader in shaders {
+        result.shader_stages += { shader.stage }
         
-        memoryBarrierCount = 1,
-        pMemoryBarriers    = &vk.MemoryBarrier2 {
-            sType = .MEMORY_BARRIER_2,
-            srcStageMask = source_stage,
-            dstStageMask = destination_stage,
-            // srcAccessMask = vk.AccessFlags2., // @todo(viktor): set based on hazards
-            // dstAccessMask: AccessFlags2,
+        append(&module_infos, vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO, 
+            codeSize = len(shader.bytes), 
+            pCode    = cast(^u32) raw_data(shader.bytes),
+        })
+        
+        append(&shader_stages, vk.PipelineShaderStageCreateInfo{ 
+            sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
+            stage = { shader.stage }, 
+            pName = "main", 
+            pNext = last(&module_infos),
+        })
+    }
+    
+    result.layout = create_pipeline_layout(gpu, result.shader_stages, set_layout)
+        
+    // @todo(viktor): make as much of this a dynamic state
+    dynamic_states := [] vk.DynamicState { .VIEWPORT, .SCISSOR, .LINE_WIDTH }
+    
+    color_formats: [dynamic; 32] Format
+    for target in info.color_targets { append(&color_formats, target.format) }
+    
+    // @todo(viktor): this has a bunch more fields
+    color_attachments: [dynamic; 32] vk.PipelineColorBlendAttachmentState
+    for target in info.color_targets { append(&color_attachments, vk.PipelineColorBlendAttachmentState{ colorWriteMask = target.write_mask }) }
+    
+    sample_count: vk.SampleCountFlag
+    switch info.sample_count {
+    case: assert(false, "invalid sample count")
+    case 1:  sample_count = ._1
+    case 2:  sample_count = ._2
+	case 4:  sample_count = ._4
+	case 8:  sample_count = ._8
+	case 16: sample_count = ._16
+	case 32: sample_count = ._32
+	case 64: sample_count = ._64
+    }
+    
+    cull_mode:  vk.CullModeFlags
+    switch info.cull {
+    case .None: cull_mode = {}
+    case .CCW:  cull_mode = { .FRONT }
+    case .CW:   cull_mode = { .BACK  }
+    case .All:  cull_mode = { .FRONT, .BACK }
+    }
+    
+    create_info := vk.GraphicsPipelineCreateInfo {
+        sType = .GRAPHICS_PIPELINE_CREATE_INFO,
+        
+        pNext = &vk.PipelineRenderingCreateInfo {
+            sType = .PIPELINE_RENDERING_CREATE_INFO,
+            colorAttachmentCount    = auto_cast len(color_formats),
+            pColorAttachmentFormats = raw_data(&color_formats),
+            depthAttachmentFormat   = info.depth_format,
+            stencilAttachmentFormat = info.stencil_format,
+        },
+        
+        stageCount = auto_cast len(shader_stages),
+        pStages    = &shader_stages[0],
+        
+        layout = result.layout,
+        
+        pInputAssemblyState = &vk.PipelineInputAssemblyStateCreateInfo {
+            sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+            topology = info.topology,
+        },
+        
+        // @study can there be more then 1 with dynamic states?
+        pViewportState = &vk.PipelineViewportStateCreateInfo {
+            sType = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+            viewportCount = 1,
+            scissorCount  = 1,
+        },
+        
+        pRasterizationState = &vk.PipelineRasterizationStateCreateInfo {
+            sType = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+            cullMode  = cull_mode,
+            frontFace = .COUNTER_CLOCKWISE,
+            
+            // @todo(viktor): which of these fields can by dynamic state?
+            // depthClampEnable:        b32,
+            // rasterizerDiscardEnable: b32,
+            // polygonMode:             PolygonMode,
+            // depthBiasEnable:         b32, -> ext dynamic state
+            // depthBiasConstantFactor: f32,
+            // depthBiasClamp:          f32,
+            // depthBiasSlopeFactor:    f32,
+        },
+        
+        pMultisampleState = &vk.PipelineMultisampleStateCreateInfo {
+            sType = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+            rasterizationSamples = { sample_count },
+        },
+        
+        // @todo(viktor): read from info
+        pDepthStencilState = &vk.PipelineDepthStencilStateCreateInfo {
+            sType = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+            depthTestEnable  = true,
+            depthWriteEnable = true,
+            depthCompareOp   = .GREATER,
+            // :Stencil: stencilTestEnable:     b32,
+        },
+        
+        pColorBlendState = &vk.PipelineColorBlendStateCreateInfo {
+            sType = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+            attachmentCount = auto_cast len(color_attachments),
+            pAttachments    = raw_data(&color_attachments),
+            // @todo(viktor): these field from the optional blend desc? can these be dynamic state?
+            // logicOpEnable:   b32,     -> ext dynamic state
+            // logicOp:         LogicOp, -> ext dynamic state
+            // blendConstants:  [4]f32,  -> dynamic state
+        },
+        
+        pDynamicState = &vk.PipelineDynamicStateCreateInfo {
+            sType = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+            dynamicStateCount = auto_cast len(dynamic_states),
+            pDynamicStates    = raw_data(dynamic_states),
         },
     }
     
-    // @todo(viktor):  is this sufficient?
-    if .COLOR_ATTACHMENT_OUTPUT in destination_stage {
-        info.pMemoryBarriers[0].dstAccessMask += { .COLOR_ATTACHMENT_WRITE, .DEPTH_STENCIL_ATTACHMENT_WRITE }
-    }
-    
-    vk.CmdPipelineBarrier2(command_buffer, &info)
+    check(vk.CreateGraphicsPipelines(gpu.device, gpu.pipeline_cache, 1, &create_info, nil, &result.pipeline))
 }
 
-/* 
-
-gpuSignalAfter(commandBuffer, STAGE_RASTER_COLOR_OUT, gpuPtr, counter, SIGNAL_ATOMIC_MAX);
-// Put independent work here
-gpuWaitBefore(commandBuffer, STAGE_PIXEL_SHADER, gpuPtr, counter++, OP_GREATER_EQUAL);
-
-*/
-
-gpu_signal_after :: proc (command_buffer: vk.CommandBuffer, stage: vk.PipelineStageFlags2, gpu_pointer: pmm, count: u64, signal_op: any) {
-    unimplemented()
-}
-gpu_wait_before :: proc (command_buffer: vk.CommandBuffer, stage: vk.PipelineStageFlags2, gpu_pointer: pmm, value: u64, wait_op: any) {
-    unimplemented()
-}
-
-/* 
-
-#define FRAMES_IN_FLIGHT 2
-
-GpuSemaphore frameSemaphore = gpuCreateSemaphore(0);
-uint64 nextFrame = 1;
-
-while (running)
-{
-    if (nextFrame > FRAMES_IN_FLIGHT) 
-    {
-        gpuWaitSemaphore(frameSemaphore, nextFrame - FRAMES_IN_FLIGHT);
-    }
-    
-    // Render the frame here
-
-    gpuSubmit(queue, {commandBuffer}, frameSemaphore, nextFrame++);
-}
-
-gpuDestroySemaphore(frameSemaphore);
-
-*/
-
-MaxTimeout :: max(u64)
-
-gpu_create_semaphore :: proc (gpu: ^Gpu) -> vk.Semaphore {
-    info := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO }
-    
-    result: vk.Semaphore
-    check(vk.CreateSemaphore(gpu.device, &info, nil, &result))
-    
+pipeline_is_valid :: proc (pipeline: Pipeline) -> bool {
+    result := pipeline.pipeline != 0
     return result
 }
 
-gpu_create_timeline_semaphore :: proc (gpu: ^Gpu, initial_value: u64) -> vk.Semaphore {
-    info := vk.SemaphoreCreateInfo { 
-        sType = .SEMAPHORE_CREATE_INFO,
-        pNext = &vk.SemaphoreTypeCreateInfo {
-            sType = .SEMAPHORE_TYPE_CREATE_INFO,
-            semaphoreType = .TIMELINE,
-            initialValue  = initial_value,
-        },
+destroy_pipeline :: proc (gpu: ^Gpu, pipeline: Pipeline) {
+    if pipeline_is_valid(pipeline) {
+        check(vk.DeviceWaitIdle(gpu.device))
+        
+        vk.DestroyPipelineLayout(gpu.device,           pipeline.layout,          nil)
+        vk.DestroyPipeline(gpu.device,                 pipeline.pipeline,        nil)
+        vk.DestroyDescriptorUpdateTemplate(gpu.device, pipeline.update_template, nil)
+    }
+}
+
+
+
+////////////////////////////////////////////////
+// State Objects
+
+// GpuDepthStencilState gpuCreateDepthStencilState(GpuDepthStencilDesc desc);
+// GpuBlendState gpuCreateBlendState(GpuBlendDesc desc);
+// void gpuFreeDepthStencilState(GpuDepthStencilState state);
+// void gpuFreeBlendState(GpuBlendState state);
+
+
+
+////////////////////////////////////////////////
+// Queue
+
+// GpuQueue gpuCreateQueue(/* DEVICE & QUEUE CREATION DETAILS OMITTED */);
+
+// @todo(viktor): queue is ignored, we need to allocate from a pool created with the correct queue_family_index
+gpu_begin_command_recording :: proc (gpu: ^Gpu, frame_index: u32, _: vk.Queue) -> vk.CommandBuffer {
+    info := vk.CommandBufferAllocateInfo {
+        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+        commandPool        = gpu.command_pools[frame_index],
+        commandBufferCount = 1,
     }
     
-    result: vk.Semaphore
-    check(vk.CreateSemaphore(gpu.device, &info, nil, &result))
+    result: vk.CommandBuffer
+    check(vk.AllocateCommandBuffers(gpu.device, &info, &result))
+    
+    begin_info := vk.CommandBufferBeginInfo { 
+        sType = .COMMAND_BUFFER_BEGIN_INFO, 
+        flags = { .ONE_TIME_SUBMIT }, 
+    }
+    check(vk.BeginCommandBuffer(result, &begin_info))
     
     return result
-}
-
-gpu_destroy_semaphore :: proc (gpu: ^Gpu, semaphore: vk.Semaphore) {
-    vk.DestroySemaphore(gpu.device, semaphore, nil)
-}
-
-gpu_wait_semaphore :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, wait_value: u64) {
-    semaphores := [?] vk.Semaphore { semaphore }
-    values     := [?] u64 { wait_value }
-    
-    info := vk.SemaphoreWaitInfo {
-        sType = .SEMAPHORE_WAIT_INFO,
-        semaphoreCount = len(semaphores),
-        pSemaphores    = &semaphores[0],
-        pValues        = &values[0],
-    }
-    
-    wait_result := vk.WaitSemaphores(gpu.device, &info, MaxTimeout)
-    if wait_result == .TIMEOUT {
-        gpu.should_recreate_swapchain = true
-        unimplemented("recreate immediatly and wait again or just return?")
-    }
-    check(wait_result)
 }
 
 gpu_submit :: proc (queue: vk.Queue, semaphore: vk.Semaphore, signal_value: u64, command_buffers: ..vk.CommandBuffer) {
@@ -1220,25 +1163,261 @@ gpu_submit :: proc (queue: vk.Queue, semaphore: vk.Semaphore, signal_value: u64,
     check(vk.QueueSubmit2(queue, 1, &once_submit_info, 0))
 }
 
-////////////////////////////////////////////////
-// Command Buffers
 
-// @todo(viktor): queue is ignored, we need to allocate from a pool created with the correct queue_family_index
-gpu_begin_command_recording :: proc (gpu: ^Gpu, frame_index: u32, _: vk.Queue) -> vk.CommandBuffer {
-    info := vk.CommandBufferAllocateInfo {
-        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-        commandPool        = gpu.command_pools[frame_index],
-        commandBufferCount = 1,
-    }
+
+////////////////////////////////////////////////
+// Semaphores
+
+gpu_create_semaphore :: proc (gpu: ^Gpu) -> vk.Semaphore {
+    info := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO }
     
-    result: vk.CommandBuffer
-    check(vk.AllocateCommandBuffers(gpu.device, &info, &result))
-    
-    begin_info := vk.CommandBufferBeginInfo { 
-        sType = .COMMAND_BUFFER_BEGIN_INFO, 
-        flags = { .ONE_TIME_SUBMIT }, 
-    }
-    check(vk.BeginCommandBuffer(result, &begin_info))
+    result: vk.Semaphore
+    check(vk.CreateSemaphore(gpu.device, &info, nil, &result))
     
     return result
 }
+
+gpu_create_timeline_semaphore :: proc (gpu: ^Gpu, initial_value: u64) -> vk.Semaphore {
+    info := vk.SemaphoreCreateInfo { 
+        sType = .SEMAPHORE_CREATE_INFO,
+        pNext = &vk.SemaphoreTypeCreateInfo {
+            sType = .SEMAPHORE_TYPE_CREATE_INFO,
+            semaphoreType = .TIMELINE,
+            initialValue  = initial_value,
+        },
+    }
+    
+    result: vk.Semaphore
+    check(vk.CreateSemaphore(gpu.device, &info, nil, &result))
+    
+    return result
+}
+
+gpu_wait_semaphore :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, wait_value: u64) {
+    semaphores := [?] vk.Semaphore { semaphore }
+    values     := [?] u64 { wait_value }
+    
+    info := vk.SemaphoreWaitInfo {
+        sType = .SEMAPHORE_WAIT_INFO,
+        semaphoreCount = len(semaphores),
+        pSemaphores    = &semaphores[0],
+        pValues        = &values[0],
+    }
+    
+    wait_result := vk.WaitSemaphores(gpu.device, &info, MaxTimeout)
+    if wait_result == .TIMEOUT {
+        gpu.should_recreate_swapchain = true
+        unimplemented("recreate immediatly and wait again or just return?")
+    }
+    check(wait_result)
+}
+
+gpu_destroy_semaphore :: proc (gpu: ^Gpu, semaphore: vk.Semaphore) {
+    vk.DestroySemaphore(gpu.device, semaphore, nil)
+}
+
+
+
+
+////////////////////////////////////////////////
+// Commands
+
+// void gpuMemCpy(GpuCommandBuffer cb, void* destGpu, void* srcGpu,);
+// void gpuCopyToTexture(GpuCommandBuffer cb, void* destGpu, void* srcGpu, GpuTexture texture);
+// void gpuCopyFromTexture(GpuCommandBuffer cb, void* destGpu, void* srcGpu, GpuTexture texture);
+
+// @api provide a version that allows multiple dest, source pairs with a single wait, or make it begin-end for now?
+gpu_copy :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: any, source: pmm) {
+    semaphore := gpu_create_timeline_semaphore(gpu, 0)
+    defer gpu_destroy_semaphore(gpu, semaphore)
+    
+    // pipeline_barrier_begin()
+    //     add_image_barrier(&texture, {}, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
+    // pipeline_barrier_end(cmd)
+    
+    // copy_regions := make([dynamic] vk.BufferImageCopy, context.temp_allocator)
+    // for level in 0..<loaded_texture.mip_levels {
+    //     mip_offset := loaded_texture.mip_offsets[level]
+        
+    //     append(&copy_regions, vk.BufferImageCopy {
+    //         bufferOffset     = auto_cast mip_offset,
+    //         imageSubresource = { aspectMask = { .COLOR }, mipLevel = level, layerCount = 1 },
+    //         imageExtent      = { width = loaded_texture.width >> level, height = loaded_texture.height >> level, depth = 1 },
+    //     })
+    // }
+    
+    // vk.CmdCopyBufferToImage(cmd, source_buffer.buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
+    
+    // pipeline_barrier_begin()
+    //     add_image_barrier_transition_from_last(&texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
+    // pipeline_barrier_end(cmd)
+    
+    check(vk.EndCommandBuffer(cmd))
+    
+    gpu_submit(gpu.queue, semaphore, 1, cmd)
+    gpu_wait_semaphore(gpu, semaphore, 1)
+}
+
+gpu_copy_to_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: pmm, source: pmm, texture: Texture) {
+    
+}
+
+gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: pmm, source: pmm, texture: Texture) {
+    
+}
+
+// @todo
+// void gpuSetActiveTextureHeapPtr(GpuCommandBuffer cb, void *ptrGpu);
+
+MaxTimeout :: max(u64)
+
+// @todo(viktor): check where niagara uses dependency flags and add it
+gpu_barrier :: proc (command_buffer: vk.CommandBuffer, before, after: vk.PipelineStageFlags2, hazard := Hazard_Flags {}) {
+    // @study vk.DependencyFlags
+    info := vk.DependencyInfo {
+        sType = .DEPENDENCY_INFO,
+        
+        memoryBarrierCount = 1,
+        pMemoryBarriers    = &vk.MemoryBarrier2 {
+            sType = .MEMORY_BARRIER_2,
+            srcStageMask = before,
+            dstStageMask = after,
+            // srcAccessMask = vk.AccessFlags2., // @todo(viktor): set based on hazards
+            // dstAccessMask: AccessFlags2,
+        },
+    }
+    
+    vk.CmdPipelineBarrier2(command_buffer, &info)
+}
+
+// @todo
+// void gpuSignalAfter(GpuCommandBuffer cb, STAGE before, void *ptrGpu, uint64 value, SIGNAL signal);
+// void gpuWaitBefore(GpuCommandBuffer cb, STAGE after, void *ptrGpu, uint64 value, OP op, HAZARD_FLAGS hazards = 0, uint64 mask = ~0);
+
+gpu_signal_after :: proc (command_buffer: vk.CommandBuffer, stage: vk.PipelineStageFlags2, gpu_pointer: pmm, count: u64, signal_op: any) {
+    unimplemented()
+}
+
+gpu_wait_before :: proc (command_buffer: vk.CommandBuffer, stage: vk.PipelineStageFlags2, gpu_pointer: pmm, value: u64, wait_op: any) {
+    unimplemented()
+}
+
+the_bound_pipeline: Pipeline
+
+gpu_set_pipeline :: proc (command_buffer: vk.CommandBuffer, pipeline: Pipeline) {
+    vk.CmdBindPipeline(command_buffer, pipeline.bind_point, pipeline.pipeline)
+    the_bound_pipeline = pipeline
+}
+
+gpu_set_viewport :: proc (cmd: vk.CommandBuffer, offset: v2 = 0, size: v2, min_depth: f32 = 0, max_depth: f32 = 1) {
+    vk.CmdSetViewport(cmd, 0, 1, &vk.Viewport { offset.x, offset.y, size.x, size.y, min_depth, max_depth })
+}
+
+gpu_set_scissor :: proc (cmd: vk.CommandBuffer, offset: iv2 = 0, size: uv2) {
+    vk.CmdSetScissor(cmd, 0, 1, &vk.Rect2D { offset = { **offset }, extent = { **size } })
+}
+
+// @todo(viktor): 
+// void gpuSetDepthStencilState(GpuCommandBuffer cb, GpuDepthStencilState state);
+// void gpuSetBlendState(GpuCommandBuffer cb, GpuBlendState state); 
+
+// void gpuDispatchIndirect(GpuCommandBuffer cb, void* dataGpu, void* gridDimensionsGpu);
+
+// void gpuBeginRenderPass(GpuCommandBuffer cb, GpuRenderPassDesc desc);
+// void gpuEndRenderPass(GpuCommandBuffer cb);
+
+// void gpuDrawIndexedInstanced(GpuCommandBuffer cb, void* vertexDataGpu, void* pixelDataGpu, void* indicesGpu, uint32 indexCount, uint32 instanceCount);
+// void gpuDrawIndexedInstancedIndirect(GpuCommandBuffer cb, void* vertexDataGpu, void* pixelDataGpu, void* indicesGpu, void* argsGpu);
+// void gpuDrawIndexedInstancedIndirectMulti(GpuCommandBuffer cb, void* dataVxGpu, uint32 vxStride, void* dataPxGpu, uint32 pxStride, void* argsGpu, void* drawCountGpu);
+
+// void gpuDrawMeshlets(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, uvec3 dim);
+// void gpuDrawMeshletsIndirect(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, void *dimGpu);
+
+// @api make gpu_data type safer
+gpu_dispatch :: proc (command_buffer: vk.CommandBuffer, pointer_to_the_gpu_address: ^^$T, group_size: uv3) {
+    assert(the_bound_pipeline.pipeline != 0, "no pipeline was bound")
+    
+    vk.CmdPushConstants(command_buffer, the_bound_pipeline.layout, the_bound_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), pointer_to_the_gpu_address)
+    
+    vk.CmdDispatch(command_buffer, **group_size)
+}
+
+gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, commands, count: vk.Buffer, max_count: u32, stride: u32, command_offset: umm, count_offset: umm) {
+    vk.CmdDrawMeshTasksIndirectCountEXT(cmd, commands, auto_cast command_offset, count, auto_cast  count_offset, max_count, size_of(Draw_Command))
+}
+
+
+/* 
+
+    // Common header...
+    struct Vertex
+    {
+        float32x4 position;
+        uint16x2 uv;
+    };
+
+    struct alignas(16) DataVertex
+    {
+        float32x4x4 matrixMVP;
+        const Vertex *vertices;
+    };
+
+    struct alignas(16) DataPixel
+    {
+        float32x4 color;
+        uint32 textureIndex;
+    };
+
+    // CPU code...
+    gpuSetDepthStencilState(commandBuffer, depthStencilState);
+    gpuSetPipeline(commandBuffer, graphicsPipeline);
+
+    auto dataVertex = myBumpAllocator.allocate<DataVertex>();
+    dataVertex.cpu->matrixMVP = camera.viewProjection * modelMatrix;
+    dataVertex.cpu->vertices = mesh.vertices;
+
+    auto dataPixel = myBumpAllocator.allocate<DataPixel>();
+    dataPixel.cpu->color = material.color;
+    dataPixel.cpu->textureIndex = material.textureIndex;
+
+    gpuDrawIndexed(commandBuffer, dataVertex.gpu, dataPixel.gpu, mesh.indices, mesh.indexCount);
+
+    // Vertex shader...
+    struct VertexOut 
+    {
+        float32x4 position : SV_Position; // SV values are not real struct fields (doesn't affect the layout)
+        float32x2 uv;
+    };
+
+    VertexOut main(uint32 vertexIndex : SV_VertexID, const DataVertex* data)
+    {
+        Vertex vertex = data.vertices[vertexIndex];
+        float32x4 position = data->matrixMVP * vertex.position;
+        return { .position = position, .uv = vertex.uv };
+    }
+
+    // Pixel shader...
+    const Texture textureHeap[];
+
+    struct VertexIn // Matching vertex shader output struct layout
+    {
+        float32x2 uv;
+    };
+
+    PixelOut main(const VertexIn &vertex, const DataPixel* data)
+    {
+        Texture texture = textureHeap[data->textureIndex];
+        Sampler sampler = {.minFilter = LINEAR, .magFilter = LINEAR};
+
+        float32x4 color = sample(texture, sampler, vertex.uv);
+        return { .color = color };
+    }
+
+*/
+
+// gpuDrawIndexed(commandBuffer, vertex shader data address, pixel shader data address, mesh.indices, mesh.indexCount);
+// gpuDispatchIndirect(commandBuffer, data.gpu, arguments.gpu);
+// gpuDrawIndexedInstancedIndirect(commandBuffer, dataVertex.gpu, dataPixel.gpu, arguments.gpu);
+// gpuDrawIndexedInstancedIndirectMulti(commandBuffer, dataVertex.gpu, sizeof(DataVertex), dataPixel.gpu, sizeof(DataPixel), arguments.gpu, drawCount.gpu);
+//   see gpu_draw_mesh_tasks_indirect_count :: 
+//   gpuBarrier(commandBuffer, STAGE_COMPUTE, STAGE_COMPUTE, HAZARD_DRAW_ARGUMENTS); for multi draw

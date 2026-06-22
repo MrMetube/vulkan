@@ -112,7 +112,6 @@ Draw_Command :: struct {
     draw_id:   u32,
     lod_index: u32,
     command:   vk.DrawMeshTasksIndirectCommandEXT,
-    // _pad: u32, // @cleanup it seems the buffer is not correctly written to by the cull.comp shader. the values assuming another padding byte, which the cpu did not assume. CmdDrawMeshTasksIndirectCountEXT then failed to read the correct values as it was given the cpu's alignments and offsets.
 }
 
 // @shader
@@ -156,7 +155,7 @@ main :: proc () {
     ////////////////////////////////////////////////
     // @speed most of these buffer could be move the GPU local memory
     // 200.000 suzannes: Defaul = 42.2 ms | GPU = 40.8 ms
-    memory := Gpu_Memory_Kind.Default
+    memory := Memory_Kind.Default
     
     // @todo(viktor): draws change per frame and could also be placed in the per frame bump allocator, as we just need a gpu address
     // All the geometry data can just live in the gpu
@@ -520,15 +519,36 @@ main :: proc () {
         
         // @api should this be begin pipeline, which just always takes in the dependencies and does a reload and recreate itself?
         if reload_shaders_if_needed(watchers, shader_allocator, &draw_cull_shader) || !pipeline_is_valid(cull_pipeline) {
-            cull_pipeline = gpu_create_compute_pipeline(&gpu, draw_cull_shader, ^Cull_Globals, cull_pipeline)
+            destroy_pipeline(&gpu, cull_pipeline)
+            
+            cull_pipeline = gpu_create_compute_pipeline(&gpu, draw_cull_shader)
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, &depth_reduce_shader) || !pipeline_is_valid(depth_pipeline) {
-            depth_pipeline = create_compute_pipeline(&gpu, depth_reduce_shader, depth_descriptor_set_layout, ^Depth_Globals, depth_pipeline)
+            destroy_pipeline(&gpu, depth_pipeline)
+            
+            depth_pipeline = gpu_create_compute_pipeline(&gpu, depth_reduce_shader, depth_descriptor_set_layout)
+            depth_pipeline.update_template = create_update_template(gpu.device, .COMPUTE, depth_pipeline.layout, depth_reduce_shader)
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, meshlet_shaders[:]) || !pipeline_is_valid(meshlet_pipeline) {
-            meshlet_pipeline = create_graphics_pipeline(&gpu, { textures_descriptor_set_layout }, meshlet_shaders[:], ^Draw_Globals, meshlet_pipeline)
+            raster_description := DefaultRasterDesc
+            raster_description.depth_format = .D32_SFLOAT
+            raster_description.color_targets = {
+                { format = gpu.swapchain_format, write_mask = { .R, .G, .B, .A } },
+            }
+            // :Stencil: 
+            
+            // @cleanup
+            task, mesh, frag: Shader
+            for it in meshlet_shaders do #partial switch it.stage {
+            case .TASK_EXT: task = it
+            case .MESH_EXT: mesh = it
+            case .FRAGMENT: frag = it
+            }
+            
+            destroy_pipeline(&gpu, meshlet_pipeline)
+            meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, task, mesh, frag, raster_description, textures_descriptor_set_layout)
         }
         
         ////////////////////////////////////////////////
@@ -543,7 +563,7 @@ main :: proc () {
         
         entropy := seed_random_series(54654)
         when true {
-            draws := db_view[:200_000]
+            draws := db_view[:20_000]
             global_rotation := la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX)
             for &draw in draws {
                 p := random_bilateral(&entropy, v3) * {10, 10, 10} - {0, 0, 20}
@@ -694,17 +714,10 @@ main :: proc () {
         gpu_labeled_region_end(cmd)
         
         ////////////////////////////////////////////////
-        // Setting these outside of rendering-sections means they persist across all sections.
-        vk.CmdSetViewport(cmd, 0, 1, &vk.Viewport {
-            x      = 0,
-            y      = 0,
-            width  = cast(f32) gpu.swapchain_size.x,
-            height = cast(f32) gpu.swapchain_size.y,
-            minDepth = 0,
-            maxDepth = 1,
-        })
         
-        vk.CmdSetScissor(cmd, 0, 1, &vk.Rect2D { extent = { **gpu.swapchain_size } })
+        // Setting these outside of rendering-sections means they persist across all sections.
+        gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
+        gpu_set_scissor(cmd,  size = gpu.swapchain_size)
         
         ////////////////////////////////////////////////
         
@@ -738,10 +751,12 @@ main :: proc () {
                 // @shader meshlet.task meshlet.mesh meshlet.frag
                 vk.CmdBindDescriptorSets(cmd, meshlet_pipeline.bind_point, meshlet_pipeline.layout, 0, 1, &textures_descriptor_set, 0, nil)
                 
+                
                 vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
                 
-                // @todo(viktor): as nice as the api could be this is a bit stupid
-                vk.CmdDrawMeshTasksIndirectCountEXT(cmd, draw_command_buffer_buffer, auto_cast offset_of(Draw_Command, command), draw_command_count_buffer_buffer, 0, auto_cast len(draws), size_of(Draw_Command))
+                // @api it would be way nicer to be able to combine the address of a buffer with the offset directly, removing two arguments.
+                // But I dont know how to then get back to the buffer and offset for vulkans api. :(
+                gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer_buffer, draw_command_count_buffer_buffer, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command), 0)
             
             gpu_profile_zone_end()
             gpu_labeled_region_end(cmd)
@@ -918,9 +933,9 @@ main :: proc () {
         bump_allocator_delete(&gpu, &bump)
     }
     
-    destroy_pipeline(gpu.device, meshlet_pipeline)
-    destroy_pipeline(gpu.device, cull_pipeline)
-    destroy_pipeline(gpu.device, depth_pipeline)
+    destroy_pipeline(&gpu, meshlet_pipeline)
+    destroy_pipeline(&gpu, cull_pipeline)
+    destroy_pipeline(&gpu, depth_pipeline)
     
     for texture in textures {
         gpu_delete(&gpu, texture)
@@ -933,17 +948,27 @@ main :: proc () {
 
 ////////////////////////////////////////////////
 
-delete_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain, final := false) {
-    gpu_delete(gpu, stuff.depth_pyramid)
+get_the_next_frame :: proc (gpu: ^Gpu, semaphore: vk.Semaphore) -> (frame_index: u32, should_restart_frame: bool) {
+    frame_index = gpu.absolute_frame_index % MaxFramesInFlight
+    gpu.absolute_frame_index += 1
     
-    for &it in stuff.depth_pyramid_mips {
-        vk.DestroyImageView(gpu.device, it.view, nil)
+    info := vk.AcquireNextImageInfoKHR {
+        sType = .ACQUIRE_NEXT_IMAGE_INFO_KHR,
+        
+        swapchain  = gpu.swapchain,
+        timeout    = MaxTimeout,
+        semaphore  = gpu.image_aquired_semaphores[frame_index],
+        deviceMask = 1 << 0,
     }
-    clear(&stuff.depth_pyramid_mips)
     
-    if final {
-        vk.DestroySampler(gpu.device, stuff.depth_sampler, nil)
+    result := vk.AcquireNextImage2KHR(gpu.device, &info, &gpu.image_index)
+    if result == .ERROR_OUT_OF_DATE_KHR || result == .SUBOPTIMAL_KHR {
+        gpu.should_recreate_swapchain = true
+        return 0, true
     }
+    check(result)
+    
+    return frame_index, false
 }
 
 recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain) {
@@ -968,6 +993,19 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_S
         mip.size.x >>= i
         mip.size.y >>= i
         mip.size = vec_max(mip.size, 1)
+    }
+}
+
+delete_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain, final := false) {
+    gpu_delete(gpu, stuff.depth_pyramid)
+    
+    for &it in stuff.depth_pyramid_mips {
+        vk.DestroyImageView(gpu.device, it.view, nil)
+    }
+    clear(&stuff.depth_pyramid_mips)
+    
+    if final {
+        vk.DestroySampler(gpu.device, stuff.depth_sampler, nil)
     }
 }
 
