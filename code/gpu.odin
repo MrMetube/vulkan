@@ -1236,7 +1236,7 @@ gpu_begin_command_recording :: proc (gpu: ^Gpu, frame_index: u32, _: vk.Queue) -
     
     begin_info := vk.CommandBufferBeginInfo { 
         sType = .COMMAND_BUFFER_BEGIN_INFO, 
-        flags = { .ONE_TIME_SUBMIT } 
+        flags = { .ONE_TIME_SUBMIT }, 
     }
     check(vk.BeginCommandBuffer(result, &begin_info))
     

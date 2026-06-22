@@ -3,6 +3,9 @@ package main
 
 import "base:intrinsics"
 import "base:runtime"
+
+_ :: runtime
+
 import "core:fmt"
 import "core:time"
 

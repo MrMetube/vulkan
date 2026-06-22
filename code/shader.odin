@@ -116,9 +116,6 @@ generate_shader_api :: proc (output_file: string) {
     append_buffer_reference_struct :: proc (builder: ^strings.Builder, type: typeid, loc := #caller_location) {
         append_location(builder, loc)
         
-        info := type_info_of(runtime.typeid_base(type))
-        s :=  info.variant.(runtime.Type_Info_Struct)
-        
         fmt.sbprintf(builder, "layout(buffer_reference, buffer_reference_align = %v, std430, scalar) ", align_of(pmm))
         fmt.sbprintf(builder, "buffer %v {{\n", type)
         

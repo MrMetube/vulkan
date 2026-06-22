@@ -154,17 +154,23 @@ main :: proc () {
     recreate_stuff(&gpu, &stuff)
     
     ////////////////////////////////////////////////
+    // @speed most of these buffer could be move the GPU local memory
+    // 200.000 suzannes: Defaul = 42.2 ms | GPU = 40.8 ms
+    memory := Gpu_Memory_Kind.Default
     
-    // @todo(viktor): currently all are allocated to be host visible, so that we can simplify copying into them.
-    // Rethink if any of these should be copied to device_local memory
-    vb_view,  vertex_buffer        := gpu_allocate(&gpu, [] Vertex,    256 * Megabyte / size_of(Vertex))
-    mlb_view, meshlet_buffer       := gpu_allocate(&gpu, [] Meshlet,   256 * Megabyte / size_of(Meshlet))
-    mdb_view, meshlet_data_buffer  := gpu_allocate(&gpu, [] u32,       256 * Megabyte / size_of(u32))
-    db_view,  draw_buffer          := gpu_allocate(&gpu, [] Draw,      256 * Megabyte / size_of(Draw))
-    mb_view,  mesh_buffer          := gpu_allocate(&gpu, [] Mesh,      256 * Megabyte / size_of(Mesh))
-    // @todo(viktor): this buffer is never seen by the cpu, its filled by compute and used by task+mesh shader, but for debbuging it really helped that there was a view/slice
-    dcb_view, draw_command_buffer := gpu_allocate(&gpu, [] Draw_Command, 256 * Megabyte / size_of(Draw_Command), usage = vk.BufferUsageFlags {  .STORAGE_BUFFER, .INDIRECT_BUFFER })
-    dccb_view, draw_command_count_buffer := gpu_allocate_type(&gpu, u32, usage = { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
+    // @todo(viktor): draws change per frame and could also be placed in the per frame bump allocator, as we just need a gpu address
+    // All the geometry data can just live in the gpu
+    vb_view,   vertex_buffer        := gpu_allocate(&gpu, [] Vertex,    256 * Megabyte / size_of(Vertex),  memory = memory)
+    mlb_view,  meshlet_buffer       := gpu_allocate(&gpu, [] Meshlet,   256 * Megabyte / size_of(Meshlet), memory = memory)
+    mdb_view,  meshlet_data_buffer  := gpu_allocate(&gpu, [] u32,       256 * Megabyte / size_of(u32),     memory = memory)
+    db_view,   draw_buffer          := gpu_allocate(&gpu, [] Draw,      256 * Megabyte / size_of(Draw),    memory = memory)
+    mb_view,   mesh_buffer          := gpu_allocate(&gpu, [] Mesh,      256 * Megabyte / size_of(Mesh),    memory = memory)
+    dcb_view,  draw_command_buffer  := gpu_allocate(&gpu, [] Draw_Command, 256 * Megabyte / size_of(Draw_Command), memory = memory, usage = vk.BufferUsageFlags {  .STORAGE_BUFFER, .INDIRECT_BUFFER })
+    dccb_view, draw_command_count_buffer := gpu_allocate_type(&gpu, u32, memory = memory, usage = { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
+    
+    unused(dcb_view)
+    
+    // @cleanup a Cmd needs these buffers, we should wrap with gpu_xx
     draw_command_buffer_buffer       := the_allocations[draw_command_buffer].buffer
     draw_command_count_buffer_buffer := the_allocations[draw_command_count_buffer.address].buffer
     
@@ -273,7 +279,7 @@ main :: proc () {
             texture_descriptors[index] = vk.DescriptorImageInfo{ 
                 sampler     = sampler, 
                 imageView   = texture.view, 
-                imageLayout = texture.last_transition.layout
+                imageLayout = texture.last_transition.layout,
             }
         }
     }
@@ -537,7 +543,7 @@ main :: proc () {
         
         entropy := seed_random_series(54654)
         when true {
-            @(static) draws: [20000] Draw
+            draws := db_view[:200_000]
             global_rotation := la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX)
             for &draw in draws {
                 p := random_bilateral(&entropy, v3) * {10, 10, 10} - {0, 0, 20}
@@ -572,8 +578,6 @@ main :: proc () {
             }
         }
         
-        copy(db_view, draws[:])
-        
         ////////////////////////////////////////////////
         
         cpu_time = time_smoothed_blend(delta_time_64, cpu_time, delta_time_64)
@@ -593,7 +597,7 @@ main :: proc () {
                 view(cull_delta), 
                 culling_enabled ? "on" : "off",
                 lod_enabled     ? "on" : "off",
-                extra
+                extra,
             )
             // @todo(viktor): how can we record how many triangles we have rendered after culling?
             sdl.SetWindowTitle(window, title)
@@ -642,6 +646,9 @@ main :: proc () {
                 frustum_planes[2] = get_row_v4(view_projection, 3) + get_row_v4(view_projection, 1) // y + w < 0
                 frustum_planes[3] = get_row_v4(view_projection, 3) - get_row_v4(view_projection, 1) // y - w > 0
                 frustum_planes[4] = get_row_v4(view_projection, 3) - get_row_v4(view_projection, 2) // z - w > 0 -- :ReversedZ:
+                
+                unused(draw_distance)
+                unused(cam_forward)
                 // @todo(viktor): also reenable in the compute shader
                 // frustum_planes[5] = v4{**cam_forward, draw_distance + dot(cam_forward, cam_pos)}          // :ReversedZ: infinite far plane
                 
@@ -662,14 +669,14 @@ main :: proc () {
                 
                 lod_enabled             = cast(b32) lod_enabled,
                 frustum_culling_enabled = cast(b32) culling_enabled,
-                draw_count              = len(draws),
+                draw_count              = auto_cast len(draws),
                 camera_p                = cam_pos,
             }
             
             gpu_set_pipeline(cmd, cull_pipeline)
             
                 // @shader cull.comp
-                gpu_dispatch(cmd, &cull_globals_gpu, get_group_count(draw_cull_shader, len(draws)))
+                gpu_dispatch(cmd, &cull_globals_gpu, get_group_count(draw_cull_shader, auto_cast len(draws)))
             
             ////////////////////////////////////////////////
             
@@ -734,7 +741,7 @@ main :: proc () {
                 vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
                 
                 // @todo(viktor): as nice as the api could be this is a bit stupid
-                vk.CmdDrawMeshTasksIndirectCountEXT(cmd, draw_command_buffer_buffer, auto_cast offset_of(Draw_Command, command), draw_command_count_buffer_buffer, 0, len(draws), size_of(Draw_Command))
+                vk.CmdDrawMeshTasksIndirectCountEXT(cmd, draw_command_buffer_buffer, auto_cast offset_of(Draw_Command, command), draw_command_count_buffer_buffer, 0, auto_cast len(draws), size_of(Draw_Command))
             
             gpu_profile_zone_end()
             gpu_labeled_region_end(cmd)
