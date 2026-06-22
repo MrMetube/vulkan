@@ -149,10 +149,6 @@ recreate_swapchain :: proc (gpu: ^Gpu, new_size: uv2) {
         gpu.swapchain_images[index].image = image
     
     }
-    
-    // :Stencil: add the .STENCIL mask bit
-    gpu.depth_buffer = gpu_make_image(gpu, gpu.swapchain_size, gpu.depth_buffer.format, { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED }, { .DEPTH })
-    gpu.color_buffer = gpu_make_image(gpu, gpu.swapchain_size, gpu.swapchain_format,    { .COLOR_ATTACHMENT, .TRANSFER_SRC },    { .COLOR })
 }
 
 // @cleanup this isnt a good design
@@ -164,9 +160,6 @@ destroy_swapchain :: proc (gpu: ^Gpu, old_swapchain: vk.SwapchainKHR = 0, image_
         clear(&gpu.render_completes)
         clear(&gpu.swapchain_images) // The swapchain's images are allocated for us, so we can just drop the handles.
     }
-    
-    gpu_delete(gpu, gpu.depth_buffer)
-    gpu_delete(gpu, gpu.color_buffer)
     
     vk.DestroySwapchainKHR(gpu.device, old_swapchain != 0 ? old_swapchain : gpu.swapchain, nil)
 }
@@ -339,8 +332,7 @@ create_update_template :: proc (device: vk.Device, bind_point: vk. PipelineBindP
 
 ////////////////////////////////////////////////
 
-
-begin_rendering :: proc (cb: vk.CommandBuffer, gpu: ^Gpu, clear_color: v4, early: bool) {
+begin_rendering :: proc (cb: vk.CommandBuffer, gpu: ^Gpu, color_buffer, depth_buffer: Image, clear_color: v4, early: bool) {
     rendering_info := vk.RenderingInfo {
         sType = .RENDERING_INFO, 
         renderArea = { extent = { **gpu.swapchain_size } },
@@ -348,7 +340,7 @@ begin_rendering :: proc (cb: vk.CommandBuffer, gpu: ^Gpu, clear_color: v4, early
         colorAttachmentCount = 1,
         pColorAttachments = &vk.RenderingAttachmentInfo {
             sType = .RENDERING_ATTACHMENT_INFO,
-            imageView   = gpu.color_buffer.view,
+            imageView   = color_buffer.view,
             imageLayout = .ATTACHMENT_OPTIMAL,
             loadOp      = early ? .CLEAR : .LOAD,
             storeOp     = .STORE,
@@ -356,7 +348,7 @@ begin_rendering :: proc (cb: vk.CommandBuffer, gpu: ^Gpu, clear_color: v4, early
         },
         pDepthAttachment  = &vk.RenderingAttachmentInfo {
             sType = .RENDERING_ATTACHMENT_INFO,
-            imageView   = gpu.depth_buffer.view,
+            imageView   = depth_buffer.view,
             imageLayout = .ATTACHMENT_OPTIMAL,
             loadOp      = early ? .CLEAR : .LOAD,
             storeOp     = early ? .STORE : .DONT_CARE,

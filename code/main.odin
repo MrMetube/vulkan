@@ -33,6 +33,9 @@ Geometry :: struct {
 }
 
 Stuff_With_The_Same_Lifetime_As_The_Swapchain :: struct {
+    color_buffer: Image,
+    depth_buffer: Image,
+    
     depth_sampler: vk.Sampler, // well except you of course..
     depth_pyramid: Image,
     depth_pyramid_mips: [dynamic; 16] Depth_Pyramid_Mip,
@@ -150,6 +153,10 @@ main :: proc () {
     gpu := gpu_init(window)
     
     stuff: Stuff_With_The_Same_Lifetime_As_The_Swapchain
+    
+    // :Stencil: Switch to .D32_SFLOAT_S8_UINT if we actually make use of the stencil buffer.
+    stuff.depth_buffer.format = .D32_SFLOAT
+    
     recreate_stuff(&gpu, &stuff)
     
     ////////////////////////////////////////////////
@@ -533,10 +540,11 @@ main :: proc () {
         
         if reload_shaders_if_needed(watchers, shader_allocator, meshlet_shaders[:]) || !pipeline_is_valid(meshlet_pipeline) {
             raster_description := DefaultRasterDesc
-            raster_description.depth_format = .D32_SFLOAT
+            raster_description.depth_format = stuff.depth_buffer.format
             raster_description.color_targets = {
-                { format = gpu.swapchain_format, write_mask = { .R, .G, .B, .A } },
+                { format = stuff.color_buffer.format, write_mask = { .R, .G, .B, .A } },
             }
+            raster_description.blendstate = &Blend_Desc{ **DefaultBlendDesc }
             // :Stencil: 
             
             // @cleanup
@@ -704,8 +712,8 @@ main :: proc () {
             gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
             // this apparently needs to happend before we do anything related to rendering
             pipeline_barrier_begin()
-                add_image_barrier(&gpu.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL)
-                add_image_barrier(&gpu.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
+                add_image_barrier(&stuff.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL)
+                add_image_barrier(&stuff.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
             pipeline_barrier_end(cmd)
             
             ////////////////////////////////////////////////
@@ -737,7 +745,7 @@ main :: proc () {
         
         gpu_profile_zone_begin("rendering early pass")
         gpu_labeled_region_begin(cmd, "rendering early pass", {0.6, 0.1, 07, 1.0})
-        begin_rendering(cmd, &gpu, {0.07, 0.07, 0.07, 1}, early = true)
+        begin_rendering(cmd, &gpu, stuff.color_buffer, stuff.depth_buffer, {0.07, 0.07, 0.07, 1}, early = true)
                 
             if print_profile_and_stats {
                 vk.ResetQueryPool(gpu.device, stats_pool, 0, stats_count)
@@ -774,7 +782,7 @@ main :: proc () {
         // :OcclusionCull: the barrier before the depth pyramid was missing the barrier for the pyramid.image itself (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=11592)
         
         pipeline_barrier_begin()
-            add_image_barrier_transition_from_last(&gpu.depth_buffer, { .COMPUTE_SHADER }, { .SHADER_READ }, .SHADER_READ_ONLY_OPTIMAL, { .DEPTH })
+            add_image_barrier_transition_from_last(&stuff.depth_buffer, { .COMPUTE_SHADER }, { .SHADER_READ }, .SHADER_READ_ONLY_OPTIMAL, { .DEPTH })
             add_image_barrier(&stuff.depth_pyramid, {}, {}, .UNDEFINED,  { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL)
         pipeline_barrier_end(cmd)
         
@@ -793,8 +801,8 @@ main :: proc () {
                 clear(&updates)
                 append(&updates, DescriptorUpdateData { image = { 
                     stuff.depth_sampler,
-                    mip_level == 0 ? gpu.depth_buffer.view                   : prev_mip.view,
-                    mip_level == 0 ? gpu.depth_buffer.last_transition.layout : .GENERAL,
+                    mip_level == 0 ? stuff.depth_buffer.view                   : prev_mip.view,
+                    mip_level == 0 ? stuff.depth_buffer.last_transition.layout : .GENERAL,
                 } })
                 append(&updates, DescriptorUpdateData { image = { stuff.depth_sampler, mip.view, .GENERAL } })
                 vk.CmdPushDescriptorSetWithTemplate(cmd, depth_pipeline.update_template, depth_pipeline.layout, 0, raw_data(&updates))
@@ -817,14 +825,14 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         pipeline_barrier_begin()
-            add_image_barrier_transition_from_last(&gpu.depth_buffer, {.EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH })
+            add_image_barrier_transition_from_last(&stuff.depth_buffer, {.EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH })
         pipeline_barrier_end(cmd)
         
         ////////////////////////////////////////////////
         
         gpu_profile_zone_begin("rendering late pass")
         gpu_labeled_region_begin(cmd, "rendering late pass", {0.6, 0.1, 07, 1.0})
-        begin_rendering(cmd, &gpu, {}, early = false)
+        begin_rendering(cmd, &gpu, stuff.color_buffer, stuff.depth_buffer, {}, early = false)
             
         end_rendering(cmd)
         gpu_labeled_region_end(cmd)
@@ -837,7 +845,7 @@ main :: proc () {
             pipeline_barrier_begin()
                 add_image_barrier(&gpu.swapchain_images[gpu.image_index], { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
                 if !display_pyramid {
-                    add_image_barrier_transition_from_last(&gpu.color_buffer, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
+                    add_image_barrier_transition_from_last(&stuff.color_buffer, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
                 } else {
                     add_image_barrier_transition_from_last(&stuff.depth_pyramid, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
                 }
@@ -845,9 +853,7 @@ main :: proc () {
                 
             destination := gpu.swapchain_images[gpu.image_index]
             if !display_pyramid {
-                source := gpu.color_buffer
-                
-                vk.CmdCopyImage(cmd, source.image, source.last_transition.layout, destination.image, destination.last_transition.layout, 1, &vk.ImageCopy {
+                vk.CmdCopyImage(cmd, stuff.color_buffer.image, stuff.color_buffer.last_transition.layout, destination.image, destination.last_transition.layout, 1, &vk.ImageCopy {
                     srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     extent         = { gpu.swapchain_size.x, gpu.swapchain_size.y, 1 },
@@ -994,10 +1000,17 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_S
         mip.size.y >>= i
         mip.size = vec_max(mip.size, 1)
     }
+        
+    // :Stencil: add the .STENCIL mask bit
+    stuff.depth_buffer = gpu_make_image(gpu, gpu.swapchain_size, stuff.depth_buffer.format, { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED }, { .DEPTH })
+    stuff.color_buffer = gpu_make_image(gpu, gpu.swapchain_size, gpu.swapchain_format,      { .COLOR_ATTACHMENT, .TRANSFER_SRC },    { .COLOR })
 }
 
 delete_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain, final := false) {
     gpu_delete(gpu, stuff.depth_pyramid)
+    
+    gpu_delete(gpu, stuff.depth_buffer)
+    gpu_delete(gpu, stuff.color_buffer)
     
     for &it in stuff.depth_pyramid_mips {
         vk.DestroyImageView(gpu.device, it.view, nil)
