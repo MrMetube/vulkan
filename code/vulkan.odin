@@ -557,11 +557,10 @@ end_rendering :: proc (cb: vk.CommandBuffer) {
 
 ////////////////////////////////////////////////
 
-gpu_end_the_command_buffer_and_submit_and_present_the_queue :: proc (gpu: ^Gpu, frame_index: u32, command_buffer: ^vk.CommandBuffer) {
+gpu_end_the_command_buffer_and_submit_and_present_the_queue :: proc (gpu: ^Gpu, timeline_semaphore: vk.Semaphore, signal_value: u64, frame_index: u32, command_buffer: ^vk.CommandBuffer) {
     // we handed out the command buffer and now ask for it to be returned. After this point it has no use, therefore we destroy the users value.
     defer command_buffer^ = nil
     
-    gpu.signal_value += 1
     semaphore_info := [?] vk.SemaphoreSubmitInfo {
         {
             sType = .SEMAPHORE_SUBMIT_INFO,
@@ -570,8 +569,8 @@ gpu_end_the_command_buffer_and_submit_and_present_the_queue :: proc (gpu: ^Gpu, 
         },
         {
             sType = .SEMAPHORE_SUBMIT_INFO,
-            semaphore = gpu.timeline_semaphore,
-            value     = gpu.signal_value,
+            semaphore = timeline_semaphore,
+            value     = signal_value,
             stageMask = { .ALL_COMMANDS },
         },
     }
@@ -769,16 +768,6 @@ gpu_profile_get_zone :: proc (label: string) -> (Profile_Zone, bool) #optional_o
     return result, ok
 }
 
-peek :: proc (s: [] $T) -> (T, bool) {
-    result: T
-    ok: bool
-    if len(s) > 0 {
-        result = s[len(s)-1]
-        ok = true
-    }
-    return result, ok
-}
-
 ////////////////////////////////////////////////
 
 gpu_labeled_region_begin :: proc (cb: vk.CommandBuffer, label: cstring, color: v4) {
@@ -790,14 +779,6 @@ gpu_labeled_region_end :: proc (cb: vk.CommandBuffer) {
     if !Optimized {
         vk.CmdEndDebugUtilsLabelEXT(cb)
     }
-}
-
-////////////////////////////////////////////////
-
-create_fence :: proc (device: vk.Device, flags: vk.FenceCreateFlags = {}) -> vk.Fence {
-    result: vk.Fence
-    check(vk.CreateFence(device, &vk.FenceCreateInfo { sType = .FENCE_CREATE_INFO, flags = flags }, nil, &result))
-    return result
 }
 
 ////////////////////////////////////////////////

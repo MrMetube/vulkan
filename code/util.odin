@@ -189,6 +189,13 @@ last_slice :: proc (array: [] $T) -> ^T {
     return result
 }
 
+peek :: proc (s: [] $T) -> (T, bool) {
+    if len(s) == 0 { return {}, false }
+    
+    result := s[len(s)-1]
+    return result, true
+}
+
 absolute_difference :: proc (a, b: $T) -> T {
     result: T
     when T == v3 {

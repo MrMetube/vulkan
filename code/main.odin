@@ -250,8 +250,9 @@ main :: proc () {
             
             ////////////////////////////////////////////////
             
-            fence := create_fence(gpu.device)
-            defer vk.DestroyFence(gpu.device, fence, nil)
+            // @todo(viktor): could we just have one semaphore and wait after the loop?
+            upload_semaphore := gpu_create_timeline_semaphore(&gpu, 0)
+            defer gpu_destroy_semaphore(&gpu, upload_semaphore)
             
             cmd := gpu_begin_command_recording(&gpu, 0, gpu.queue)
             
@@ -278,22 +279,15 @@ main :: proc () {
             
             check(vk.EndCommandBuffer(cmd))
             
-            once_submit_info := vk.SubmitInfo {
-                sType = .SUBMIT_INFO,
-                commandBufferCount = 1,
-                pCommandBuffers    = &cmd,
-            }
-            
-            check(vk.QueueSubmit(gpu.queue, 1, &once_submit_info, fence))
-            
-            check(vk.WaitForFences(gpu.device, 1, &fence, waitAll = true, timeout = MaxTimeout))
+            gpu_submit(&gpu, gpu.queue, upload_semaphore, 1, cmd)
+            gpu_wait_semaphore(&gpu, upload_semaphore, 1)
             
             sampler := create_sampler(gpu.device, .LINEAR, .LINEAR, cast(f32) loaded_texture.mip_levels, true)
             defer_destroy(vk.DestroySampler, sampler)
             
             texture_descriptors[index] = vk.DescriptorImageInfo{ 
-                sampler = sampler, 
-                imageView = texture.view, 
+                sampler     = sampler, 
+                imageView   = texture.view, 
                 imageLayout = texture.last_transition.layout
             }
         }
@@ -405,6 +399,12 @@ main :: proc () {
     cull_pipeline:    Pipeline_pc(^Cull_Globals)
     depth_pipeline:   Pipeline_pc(Depth_Globals)
     meshlet_pipeline: Pipeline_pc(^Draw_Globals)
+    
+    ////////////////////////////////////////////////
+    
+    next_frame: u64 = MaxFramesInFlight
+    frame_semaphore := gpu_create_timeline_semaphore(&gpu, MaxFramesInFlight)
+    defer_destroy(vk.DestroySemaphore, frame_semaphore)
     
     ////////////////////////////////////////////////
     
@@ -537,7 +537,8 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        frame_index, restart := wait_for_the_gpu_to_be_ready_for_the_next_frame(&gpu)
+        gpu_wait_semaphore(&gpu, frame_semaphore, next_frame + 1 - MaxFramesInFlight)
+        frame_index, restart := get_the_next_frame(&gpu, frame_semaphore)
         if restart { continue }
         
         frame := &frames[frame_index]
@@ -866,7 +867,8 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         // @cleanup dont pass the frameindex, this is a place that could cause mistakes
-        gpu_end_the_command_buffer_and_submit_and_present_the_queue(&gpu, frame_index, &cmd)
+        next_frame += 1
+        gpu_end_the_command_buffer_and_submit_and_present_the_queue(&gpu, frame_semaphore, next_frame, frame_index, &cmd)
         
         gpu_profile_collate_times(&gpu, gpu.device, print_profile_and_stats)
         

@@ -42,9 +42,6 @@ Gpu :: struct {
     
     ////////////////////////////////////////////////
     
-    timeline_semaphore: vk.Semaphore,
-    signal_value: u64,
-    
     command_pools:            [MaxFramesInFlight] vk.CommandPool,
     image_aquired_semaphores: [MaxFramesInFlight] vk.Semaphore,
     
@@ -67,7 +64,6 @@ Gpu :: struct {
 
 gpu_init :: proc (window: ^sdl.Window) -> Gpu {
     result: Gpu
-    result.signal_value = MaxFramesInFlight
     
     ////////////////////////////////////////////////
     
@@ -334,9 +330,6 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             defer_destroy(vk.DestroySemaphore, sema)
         }
             
-        result.timeline_semaphore = gpu_create_timeline_semaphore(&result, MaxFramesInFlight)
-        defer_destroy(vk.DestroySemaphore, result.timeline_semaphore)
-            
         ////////////////////////////////////////////////
         
         {
@@ -417,23 +410,25 @@ gpu_deinit :: proc (gpu: ^Gpu) {
 
 ////////////////////////////////////////////////
 
-wait_for_the_gpu_to_be_ready_for_the_next_frame :: proc (gpu: ^Gpu) -> (frame_index: u32, should_restart_frame: bool) {
-    // if gpu.signal_value > MaxFramesInFlight {
-        // @todo(viktor): we could remove the if by starting the semaphore with a initial value of MaxFramesInFlight
-        gpu_wait_semaphore(gpu, gpu.timeline_semaphore, gpu.signal_value + 1 - MaxFramesInFlight)
-    // }
-    
-    ////////////////////////////////////////////////
-    
+get_the_next_frame :: proc (gpu: ^Gpu, semaphore: vk.Semaphore) -> (frame_index: u32, should_restart_frame: bool) {
     frame_index = gpu.absolute_frame_index % MaxFramesInFlight
     gpu.absolute_frame_index += 1
     
-    acquire_result := vk.AcquireNextImageKHR(gpu.device, gpu.swapchain, MaxTimeout, gpu.image_aquired_semaphores[frame_index], {}, &gpu.image_index)
-    if acquire_result == .ERROR_OUT_OF_DATE_KHR || acquire_result == .SUBOPTIMAL_KHR {
+    info := vk.AcquireNextImageInfoKHR {
+        sType = .ACQUIRE_NEXT_IMAGE_INFO_KHR,
+        
+        swapchain  = gpu.swapchain,
+        timeout    = MaxTimeout,
+        semaphore  = gpu.image_aquired_semaphores[frame_index],
+        deviceMask = 1 << 0,
+    }
+    
+    result := vk.AcquireNextImage2KHR(gpu.device, &info, &gpu.image_index)
+    if result == .ERROR_OUT_OF_DATE_KHR || result == .SUBOPTIMAL_KHR {
         gpu.should_recreate_swapchain = true
         return 0, true
     }
-    check(acquire_result)
+    check(result)
     
     return frame_index, false
 }
@@ -687,15 +682,13 @@ gpuMemCpy(commandBuffer, meshGpu, upload.gpu);
 */
 
 // @api provide a version that allows multiple dest, source pairs with a single wait, or make it begin-end for now?
-gpu_mem_copy :: proc (gpu: ^Gpu, command_buffer: vk.CommandBuffer, destination: xx, source: pmm) {
-    command_buffer := command_buffer
-    
-    fence := create_fence(gpu.device)
-    defer vk.DestroyFence(gpu.device, fence, nil)
+gpu_mem_copy :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: xx, source: pmm) {
+    semaphore := gpu_create_timeline_semaphore(gpu, 0)
+    defer gpu_destroy_semaphore(gpu, semaphore)
     
     // pipeline_barrier_begin()
     //     add_image_barrier(&texture, {}, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
-    // pipeline_barrier_end(command_buffer)
+    // pipeline_barrier_end(cmd)
     
     // copy_regions := make([dynamic] vk.BufferImageCopy, context.temp_allocator)
     // for level in 0..<loaded_texture.mip_levels {
@@ -708,23 +701,16 @@ gpu_mem_copy :: proc (gpu: ^Gpu, command_buffer: vk.CommandBuffer, destination: 
     //     })
     // }
     
-    // vk.CmdCopyBufferToImage(command_buffer, source_buffer.buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
+    // vk.CmdCopyBufferToImage(cmd, source_buffer.buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
     
     // pipeline_barrier_begin()
     //     add_image_barrier_transition_from_last(&texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
-    // pipeline_barrier_end(command_buffer)
+    // pipeline_barrier_end(cmd)
     
-    check(vk.EndCommandBuffer(command_buffer))
+    check(vk.EndCommandBuffer(cmd))
     
-    once_submit_info := vk.SubmitInfo {
-        sType = .SUBMIT_INFO,
-        commandBufferCount = 1,
-        pCommandBuffers    = &command_buffer,
-    }
-    
-    check(vk.QueueSubmit(gpu.queue, 1, &once_submit_info, fence))
-    
-    check(vk.WaitForFences(gpu.device, 1, &fence, waitAll = true, timeout = MaxTimeout))
+    gpu_submit(gpu, gpu.queue, semaphore, 1, cmd)
+    gpu_wait_semaphore(gpu, semaphore, 1)
 }
 
 ////////////////////////////////////////////////
@@ -836,7 +822,6 @@ gpu_dispatch :: proc (command_buffer: vk.CommandBuffer, gpu_data: pmm, group_siz
 // gpu_create_texture
 // gpu_create_texture_view
 
-// gpu_start_command_recording(queue)
 // gpu_set_active_texture_heap_ptr
 
 /* 
@@ -1095,16 +1080,29 @@ gpu_wait_semaphore :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, wait_value: u64)
 }
 
 gpu_submit :: proc (gpu: ^Gpu, queue: vk.Queue, semaphore: vk.Semaphore, signal_value: u64, command_buffers: ..vk.CommandBuffer) {
-    semaphore_info := vk.SemaphoreSubmitInfo {
-        sType = .SEMAPHORE_SUBMIT_INFO,
-        semaphore = semaphore,
-        value     = signal_value,
-        // @api should this be exposed?
-        stageMask = { .ALL_COMMANDS }
+    cmd_infos: [dynamic; 16] vk.CommandBufferSubmitInfo
+    for cmd in command_buffers {
+        append(&cmd_infos, vk.CommandBufferSubmitInfo {
+            sType = .COMMAND_BUFFER_SUBMIT_INFO,
+            commandBuffer = cmd,
+        })
     }
     
-    // @todo(viktor): what about the image_aquired semaphores? are they still needed with timeline semaphores?
-    unimplemented()
+    // @todo(viktor): what if we want to signal multiple semaphores. This is only used by the image_aquired semaphores.
+    once_submit_info := vk.SubmitInfo2 {
+        sType = .SUBMIT_INFO_2,
+        signalSemaphoreInfoCount = 1,
+        pSignalSemaphoreInfos    = &vk.SemaphoreSubmitInfo {
+            sType = .SEMAPHORE_SUBMIT_INFO,
+            semaphore = semaphore,
+            value     = signal_value,
+            stageMask = { .ALL_COMMANDS },
+        },
+        commandBufferInfoCount = cast(u32) len(command_buffers),
+        pCommandBufferInfos    = &cmd_infos[0],
+    }
+    
+    check(vk.QueueSubmit2(gpu.queue, 1, &once_submit_info, 0))
 }
 
 ////////////////////////////////////////////////
