@@ -16,8 +16,8 @@ import vk "vendor:vulkan"
     buffer reference struct:
         A type that is passed to shader via a pointer, and which may contain pointers to buffers.
         
-        These pointers must be vk.DeviceAddress types on the cpu side and must contain a tag like:
-            field_name: vk.DeviceAddress "name_of_the_pointed_at_type"
+        These pointers must be Gpu_pmm types on the cpu side and must contain a tag like:
+            field_name: Gpu_pmm "name_of_the_pointed_at_type"
             (The tag's "name_of_the_pointed_at_type" must be the type name used in the shader.)
         
 */
@@ -94,9 +94,9 @@ generate_shader_api :: proc (output_file: string) {
         info := type_info_of(runtime.typeid_base(type))
         s :=  info.variant.(runtime.Type_Info_Struct)
         
-        // @todo(viktor): currently all fields are vk.DeviceAddress, but that hides the type for this metaprogram. Can we make a wrapper like GPU_Pointer(T) so that we can read the inner type here and not have to specify it in the tag string?
+        // @todo(viktor): currently all fields are Gpu_pmm, but that hides the type for this metaprogram. Can we make a wrapper like GPU_Pointer(T) so that we can read the inner type here and not have to specify it in the tag string?
         for field in soa_zip(type = s.types[:s.field_count], tag = s.tags[:s.field_count]) {
-            if field.tag != "" && field.type.id == typeid_of(vk.DeviceAddress) {
+            if field.tag != "" && field.type.id == typeid_of(Gpu_pmm) {
                 refs[field.tag] = {}
             }
         }

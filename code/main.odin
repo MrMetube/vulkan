@@ -24,8 +24,8 @@ Frame :: struct {
 }
 
 Push_Constant :: struct ($T: typeid) {
-    gpu: Buffer,
-    cpu:    ^T,
+    gpu: Gpu_Address(T),
+    cpu:             ^T,
 }
 
 DescriptorUpdateData :: struct #raw_union {
@@ -57,10 +57,10 @@ MaxTriangles :: 84
 // @shader cull.comp
 Cull_Globals :: struct #all_or_none {
     frustum_planes: [6] v4,
-    draw_buffer:         vk.DeviceAddress "Draw",
-    mesh_buffer:         vk.DeviceAddress "Mesh",
-    draw_command_buffer: vk.DeviceAddress "Draw_Command",
-    draw_command_count:  vk.DeviceAddress "uint",
+    draw_buffer:         Gpu_pmm "Draw",
+    mesh_buffer:         Gpu_pmm "Mesh",
+    draw_command_buffer: Gpu_pmm "Draw_Command",
+    draw_command_count:  Gpu_pmm "uint",
     
     camera_p:   v3,
     draw_count: u32,
@@ -75,12 +75,12 @@ Draw_Globals :: struct {
     projection: m4,
     light_pos:  [4] v4,
     
-    draw_command_buffer: vk.DeviceAddress "Draw_Command",
-    draw_buffer:         vk.DeviceAddress "Draw",
-    mesh_buffer:         vk.DeviceAddress "Mesh",
-    meshlet_buffer:      vk.DeviceAddress "Meshlet",
-    meshlet_data_buffer: vk.DeviceAddress "uint",
-    vertex_buffer:       vk.DeviceAddress "Vertex",
+    draw_command_buffer: Gpu_pmm "Draw_Command",
+    draw_buffer:         Gpu_pmm "Draw",
+    mesh_buffer:         Gpu_pmm "Mesh",
+    meshlet_buffer:      Gpu_pmm "Meshlet",
+    meshlet_data_buffer: Gpu_pmm "uint",
+    vertex_buffer:       Gpu_pmm "Vertex",
 }
 
 // @shader
@@ -164,24 +164,26 @@ main :: proc () {
     recreate_stuff(&gpu, &stuff)
     
     frames := make([] Frame, MaxFramesInFlight, context.allocator)
-    // @waste there are a lot of buffers here, each of which is very small
+    // @waste allocate a buffer and bump allocate out of that buffer
     for &frame in frames {
-        frame.draw_globals.gpu, frame.draw_globals.cpu = gpu_make_buffer_type(&gpu, Draw_Globals,  { .SHADER_DEVICE_ADDRESS })
-        frame.cull_globals.gpu, frame.cull_globals.cpu = gpu_make_buffer_type(&gpu, Cull_Globals,  { .SHADER_DEVICE_ADDRESS })
+        frame.draw_globals.cpu, frame.draw_globals.gpu = gpu_allocate_type(&gpu, Draw_Globals)
+        frame.cull_globals.cpu, frame.cull_globals.gpu = gpu_allocate_type(&gpu, Cull_Globals)
     }
     
     ////////////////////////////////////////////////
     
     // @todo(viktor): currently all are allocated to be host visible, so that we can simplify copying into them.
     // Rethink if any of these should be copied to device_local memory
-    vertex_buffer,       vb_view  := gpu_make_buffer(&gpu, [] Vertex,    256 * Megabyte / size_of(Vertex),  { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
-    meshlet_buffer,      mlb_view := gpu_make_buffer(&gpu, [] Meshlet,   256 * Megabyte / size_of(Meshlet), { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
-    meshlet_data_buffer, mdb_view := gpu_make_buffer(&gpu, [] u32,       256 * Megabyte / size_of(u32),     { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
-    draw_buffer,         db_view  := gpu_make_buffer(&gpu, [] Draw,      256 * Megabyte / size_of(Draw),    { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
-    mesh_buffer,         mb_view  := gpu_make_buffer(&gpu, [] Mesh,      256 * Megabyte / size_of(Mesh),    { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
+    vb_view,  vertex_buffer        := gpu_allocate(&gpu, [] Vertex,    256 * Megabyte / size_of(Vertex))
+    mlb_view, meshlet_buffer       := gpu_allocate(&gpu, [] Meshlet,   256 * Megabyte / size_of(Meshlet))
+    mdb_view, meshlet_data_buffer  := gpu_allocate(&gpu, [] u32,       256 * Megabyte / size_of(u32))
+    db_view,  draw_buffer          := gpu_allocate(&gpu, [] Draw,      256 * Megabyte / size_of(Draw))
+    mb_view,  mesh_buffer          := gpu_allocate(&gpu, [] Mesh,      256 * Megabyte / size_of(Mesh))
     // @todo(viktor): this buffer is never seen by the cpu, its filled by compute and used by task+mesh shader, but for debbuging it really helped that there was a view/slice
-    draw_command_buffer, dcb_view := gpu_make_buffer(&gpu, [] Draw_Command, 256 * Megabyte / size_of(Draw_Command), { .STORAGE_BUFFER, .INDIRECT_BUFFER, .SHADER_DEVICE_ADDRESS })
-    draw_command_count_buffer, dccb_view := gpu_make_buffer_type(&gpu, u32, { .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER, .SHADER_DEVICE_ADDRESS })
+    dcb_view, draw_command_buffer := gpu_allocate(&gpu, [] Draw_Command, 256 * Megabyte / size_of(Draw_Command), usage = vk.BufferUsageFlags {  .STORAGE_BUFFER, .INDIRECT_BUFFER })
+    dccb_view, draw_command_count_buffer := gpu_allocate_type(&gpu, u32, usage = { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
+    draw_command_buffer_buffer       := the_allocations[draw_command_buffer].buffer
+    draw_command_count_buffer_buffer := the_allocations[draw_command_count_buffer.address].buffer
     
     geometry: Geometry
     {
@@ -243,18 +245,20 @@ main :: proc () {
             
             texture = gpu_make_image(&gpu, {loaded_texture.width, loaded_texture.height}, loaded_texture.format, { .TRANSFER_DST, .SAMPLED }, { .COLOR }, mip_levels = loaded_texture.mip_levels)
             
-            source_buffer, source_buffer_data := gpu_make_buffer_slice(&gpu, [] u8, len(loaded_texture.data), { .TRANSFER_SRC })
-            defer gpu_delete(&gpu, source_buffer)
+            source_buffer_data, source_buffer := gpu_allocate_slice(&gpu, [] u8, len(loaded_texture.data), usage = { .TRANSFER_SRC })
+            source_buffer_buffer := the_allocations[source_buffer].buffer
+            defer gpu_free(&gpu, source_buffer)
             
+            // @waste just load directly into this buffer
             copy(source_buffer_data, loaded_texture.data)
             
             ////////////////////////////////////////////////
             
+            cmd := gpu_begin_command_recording(&gpu, 0, gpu.queue)
+            
             // @todo(viktor): could we just have one semaphore and wait after the loop?
             upload_semaphore := gpu_create_timeline_semaphore(&gpu, 0)
             defer gpu_destroy_semaphore(&gpu, upload_semaphore)
-            
-            cmd := gpu_begin_command_recording(&gpu, 0, gpu.queue)
             
             pipeline_barrier_begin()
                 add_image_barrier(&texture, {}, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
@@ -271,15 +275,13 @@ main :: proc () {
                 })
             }
             
-            vk.CmdCopyBufferToImage(cmd, source_buffer.buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
+            vk.CmdCopyBufferToImage(cmd, source_buffer_buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
             
             pipeline_barrier_begin()
                 add_image_barrier_transition_from_last(&texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
             pipeline_barrier_end(cmd)
             
-            check(vk.EndCommandBuffer(cmd))
-            
-            gpu_submit(&gpu, gpu.queue, upload_semaphore, 1, cmd)
+            gpu_submit(gpu.queue, upload_semaphore, 1, cmd)
             gpu_wait_semaphore(&gpu, upload_semaphore, 1)
             
             sampler := create_sampler(gpu.device, .LINEAR, .LINEAR, cast(f32) loaded_texture.mip_levels, true)
@@ -627,7 +629,7 @@ main :: proc () {
             
             ////////////////////////////////////////////////
             
-            vk.CmdFillBuffer(cmd, draw_command_count_buffer.buffer, 0, size_of(dccb_view^), 0)
+            vk.CmdFillBuffer(cmd, draw_command_count_buffer_buffer, 0, size_of(dccb_view^), 0)
             
             ////////////////////////////////////////////////
             
@@ -662,9 +664,9 @@ main :: proc () {
             
             frame.cull_globals.cpu^ = Cull_Globals {
                 frustum_planes      = frustum_planes,
-                draw_buffer         = draw_buffer.address,
-                mesh_buffer         = mesh_buffer.address,
-                draw_command_buffer = draw_command_buffer.address,
+                draw_buffer         = draw_buffer,
+                mesh_buffer         = mesh_buffer,
+                draw_command_buffer = draw_command_buffer,
                 draw_command_count  = draw_command_count_buffer.address,
                 
                 lod_enabled             = cast(b32) lod_enabled,
@@ -706,7 +708,7 @@ main :: proc () {
             maxDepth = 1,
         })
         
-        vk.CmdSetScissor(cmd, 0, 1, &vk.Rect2D { extent = to_extent(gpu.swapchain_size) })
+        vk.CmdSetScissor(cmd, 0, 1, &vk.Rect2D { extent = { **gpu.swapchain_size } })
         
         ////////////////////////////////////////////////
         
@@ -714,12 +716,12 @@ main :: proc () {
         draw_globals.projection = projection
         draw_globals.view       = view
         
-        draw_globals.draw_command_buffer = draw_command_buffer.address
-        draw_globals.draw_buffer         = draw_buffer.address
-        draw_globals.mesh_buffer         = mesh_buffer.address
-        draw_globals.meshlet_buffer      = meshlet_buffer.address
-        draw_globals.meshlet_data_buffer = meshlet_data_buffer.address
-        draw_globals.vertex_buffer       = vertex_buffer.address
+        draw_globals.draw_command_buffer = draw_command_buffer
+        draw_globals.draw_buffer         = draw_buffer
+        draw_globals.mesh_buffer         = mesh_buffer
+        draw_globals.meshlet_buffer      = meshlet_buffer
+        draw_globals.meshlet_data_buffer = meshlet_data_buffer
+        draw_globals.vertex_buffer       = vertex_buffer
         
         frame.draw_globals.cpu^ = draw_globals
         
@@ -741,7 +743,8 @@ main :: proc () {
                 
                 push_constants(cmd, meshlet_pipeline, &frame.draw_globals)
                 
-                vk.CmdDrawMeshTasksIndirectCountEXT(cmd, draw_command_buffer.buffer, auto_cast offset_of(Draw_Command, command), draw_command_count_buffer.buffer, 0, len(draws), size_of(Draw_Command))
+                // @todo(viktor): as nice as the api could be this is a bit stupid
+                vk.CmdDrawMeshTasksIndirectCountEXT(cmd, draw_command_buffer_buffer, auto_cast offset_of(Draw_Command, command), draw_command_count_buffer_buffer, 0, len(draws), size_of(Draw_Command))
             
             gpu_profile_zone_end()
             gpu_labeled_region_end(cmd)
@@ -836,7 +839,7 @@ main :: proc () {
                 vk.CmdCopyImage(cmd, source.image, source.last_transition.layout, destination.image, destination.last_transition.layout, 1, &vk.ImageCopy {
                     srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
-                    extent         = to_extent(gpu.swapchain_size, 1),
+                    extent         = { gpu.swapchain_size.x, gpu.swapchain_size.y, 1 },
                 })
             } else {
                 source := stuff.depth_pyramid
@@ -862,7 +865,7 @@ main :: proc () {
         
         gpu_profile_frame_end()
         
-        vk.EndCommandBuffer(cmd)
+        check(vk.EndCommandBuffer(cmd))
         
         ////////////////////////////////////////////////
         
@@ -907,17 +910,17 @@ main :: proc () {
     
 	check(vk.DeviceWaitIdle(gpu.device))
     
-    gpu_delete(&gpu, vertex_buffer)
-    gpu_delete(&gpu, meshlet_buffer)
-    gpu_delete(&gpu, meshlet_data_buffer)
-    gpu_delete(&gpu, mesh_buffer)
-    gpu_delete(&gpu, draw_buffer)
-    gpu_delete(&gpu, draw_command_buffer)
-    gpu_delete(&gpu, draw_command_count_buffer)
+    gpu_free(&gpu, vertex_buffer)
+    gpu_free(&gpu, meshlet_buffer)
+    gpu_free(&gpu, meshlet_data_buffer)
+    gpu_free(&gpu, mesh_buffer)
+    gpu_free(&gpu, draw_buffer)
+    gpu_free(&gpu, draw_command_buffer)
+    gpu_free(&gpu, draw_command_count_buffer)
 
     for frame in frames {
-        gpu_delete(&gpu, frame.draw_globals.gpu)
-        gpu_delete(&gpu, frame.cull_globals.gpu)
+        gpu_free(&gpu, frame.draw_globals.gpu)
+        gpu_free(&gpu, frame.cull_globals.gpu)
     }
     
     destroy_pipeline(gpu.device, meshlet_pipeline)

@@ -527,7 +527,7 @@ push_constants_raw :: proc (cb: vk.CommandBuffer, pipeline: Pipeline, size: u32,
 begin_rendering :: proc (cb: vk.CommandBuffer, gpu: ^Gpu, clear_color: v4, early: bool) {
     rendering_info := vk.RenderingInfo {
         sType = .RENDERING_INFO, 
-        renderArea = { extent = to_extent(gpu.swapchain_size) },
+        renderArea = { extent = { **gpu.swapchain_size } },
         layerCount = 1,
         colorAttachmentCount = 1,
         pColorAttachments = &vk.RenderingAttachmentInfo {
@@ -779,20 +779,4 @@ gpu_labeled_region_end :: proc (cb: vk.CommandBuffer) {
     if !Optimized {
         vk.CmdEndDebugUtilsLabelEXT(cb)
     }
-}
-
-////////////////////////////////////////////////
-
-to_extent :: proc { to_extent_2, to_extent_3 }
-to_extent_2 :: proc (size: uv2) -> vk.Extent2D {
-    result := vk.Extent2D { **size }
-    return result
-}
-to_extent_3 :: proc (size: uv2, depth: u32) -> vk.Extent3D {
-    result := vk.Extent3D {
-        width  = size.x, 
-        height = size.y,
-        depth  = depth,
-    }
-    return result
 }
