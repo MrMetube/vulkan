@@ -666,19 +666,17 @@ Gpu_Texture :: distinct u64
 
 ////////////////////////////////////////////////
 
-Gpu_pmm :: distinct pmm
-
-Gpu_Address :: struct ($T: typeid) { address: Gpu_pmm }
-Gpu_Slice   :: struct ($E: typeid) { address: Gpu_pmm }
+Gpu_Address :: struct ($T: typeid) { address: vk.DeviceAddress }
+Gpu_Slice   :: struct ($E: typeid) { address: vk.DeviceAddress }
 
 // @todo(viktor): can we find a way not to store this metadata per allocation?
-the_allocations: map[Gpu_pmm] Buffer
+the_allocations: map[vk.DeviceAddress] Buffer
 
 // @api with scalar_block_layout, do we ever need an alignment parameter?
 // it seems that base structs should still be aligned by 16 bytes to make the best use of the loading hardware
 // this does not change with scalar block layout, as that just reduces padding issues between cpu and gpu.
 gpu_allocate :: proc { gpu_allocate_size, gpu_allocate_slice, gpu_allocate_type }
-gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Gpu_Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (cpu_result: pmm, gpu_result: Gpu_pmm) {
+gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Gpu_Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (cpu_result: pmm, gpu_result: vk.DeviceAddress) {
     usage := usage
     usage += { .SHADER_DEVICE_ADDRESS }
     
@@ -693,12 +691,14 @@ gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Gp
     buffer, result := gpu_make_buffer(gpu, size, usage, flags = flags)
     cpu_result = result
     
-    gpu_result = gpu_host_to_device_pointer(gpu, buffer)
+    info := vk.BufferDeviceAddressInfo { sType  = .BUFFER_DEVICE_ADDRESS_INFO, buffer = buffer.buffer }
+    gpu_result = vk.GetBufferDeviceAddress(gpu.device, &info)
+    
     the_allocations[gpu_result] = buffer
     
     return cpu_result, gpu_result
 }
-gpu_allocate_slice :: proc (gpu: ^Gpu, $T: typeid/ [] $E, #any_int count: umm, memory: Gpu_Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (result: [] E, gpu_result: Gpu_pmm) {
+gpu_allocate_slice :: proc (gpu: ^Gpu, $T: typeid/ [] $E, #any_int count: umm, memory: Gpu_Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (result: [] E, gpu_result: vk.DeviceAddress) {
     cpu_pointer, gpu_pointer := gpu_allocate_size(gpu, size_of(E) * count, align_of(E), memory, usage)
     result = slice_from_parts(E, cpu_pointer, count)
     return result, gpu_pointer
@@ -708,20 +708,8 @@ gpu_allocate_type :: proc (gpu: ^Gpu, $T: typeid, memory: Gpu_Memory_Kind = .Def
     return cast(^T) cpu_pointer, Gpu_Address(T) { gpu_pointer }
 }
 
-gpu_host_to_device_pointer :: proc { gpu_host_to_device_pointer_buffer, gpu_host_to_device_pointer_lookup }
-gpu_host_to_device_pointer_buffer :: proc (gpu: ^Gpu, buffer: Buffer) -> Gpu_pmm {
-    info := vk.BufferDeviceAddressInfo { sType  = .BUFFER_DEVICE_ADDRESS_INFO, buffer = buffer.buffer }
-    result := transmute(Gpu_pmm) vk.GetBufferDeviceAddress(gpu.device, &info)
-    return result
-}
-gpu_host_to_device_pointer_lookup :: proc (gpu: ^Gpu, pointer: Gpu_pmm) -> Gpu_pmm {
-    buffer := the_allocations[pointer]
-    result := gpu_host_to_device_pointer(gpu, buffer)
-    return result
-}
-
 gpu_free :: proc { gpu_free_pointer, gpu_free_address }
-gpu_free_pointer :: proc (gpu: ^Gpu, pointer: Gpu_pmm) {
+gpu_free_pointer :: proc (gpu: ^Gpu, pointer: vk.DeviceAddress) {
     buffer := the_allocations[pointer]
     vk.FreeMemory(gpu.device,    buffer.memory, nil)
     vk.DestroyBuffer(gpu.device, buffer.buffer, nil)
@@ -899,10 +887,10 @@ gpu_set_pipeline :: proc (command_buffer: vk.CommandBuffer, pipeline: Pipeline) 
 }
 
 // @api make gpu_data type safer
-gpu_dispatch :: proc (command_buffer: vk.CommandBuffer, gpu_data: pmm, group_size: uv3) {
+gpu_dispatch :: proc (command_buffer: vk.CommandBuffer, pointer_to_the_gpu_address: ^^$T, group_size: uv3) {
     assert(the_bound_pipeline.pipeline != 0, "no pipeline was bound")
     
-    vk.CmdPushConstants(command_buffer, the_bound_pipeline.layout, the_bound_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), gpu_data)
+    vk.CmdPushConstants(command_buffer, the_bound_pipeline.layout, the_bound_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), pointer_to_the_gpu_address)
     
     vk.CmdDispatch(command_buffer, **group_size)
 }
@@ -1021,7 +1009,7 @@ gpu_dispatch :: proc (command_buffer: vk.CommandBuffer, gpu_data: pmm, group_siz
 ////////////////////////////////////////////////
 // Shader pipelines
 
-gpu_create_compute_pipeline :: proc (gpu: ^Gpu, shader: Shader, old: Pipeline_pc($PC)) -> Pipeline_pc(PC) {
+gpu_create_compute_pipeline :: proc (gpu: ^Gpu, shader: Shader, $PC: typeid, old: Pipeline) -> Pipeline {
     if pipeline_is_valid(old) {
         check(vk.DeviceWaitIdle(gpu.device))
         destroy_pipeline(gpu.device, old)
@@ -1029,7 +1017,7 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, shader: Shader, old: Pipeline_pc
     
     assert(shader.stage == .COMPUTE)
     
-    result: Pipeline_pc(PC)
+    result: Pipeline
     result.bind_point    = .COMPUTE
     result.shader_stages = { .COMPUTE }
     
@@ -1052,7 +1040,7 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, shader: Shader, old: Pipeline_pc
         },
     }
     
-    check(vk.CreateComputePipelines(gpu.device, gpu.pipeline_cache, 1, &create_info, nil, &result.i.pipeline))
+    check(vk.CreateComputePipelines(gpu.device, gpu.pipeline_cache, 1, &create_info, nil, &result.pipeline))
     
     return result
 }

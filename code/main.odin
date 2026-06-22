@@ -18,16 +18,6 @@ VSync :: true when !Optimized else false
 
 ////////////////////////////////////////////////
 
-Frame :: struct {
-    draw_globals: Push_Constant(Draw_Globals),
-    cull_globals: Push_Constant(Cull_Globals),
-}
-
-Push_Constant :: struct ($T: typeid) {
-    gpu: Gpu_Address(T),
-    cpu:             ^T,
-}
-
 DescriptorUpdateData :: struct #raw_union {
     buffer: vk.DescriptorBufferInfo,
     image:  vk.DescriptorImageInfo,
@@ -57,10 +47,10 @@ MaxTriangles :: 84
 // @shader cull.comp
 Cull_Globals :: struct #all_or_none {
     frustum_planes: [6] v4,
-    draw_buffer:         Gpu_pmm "Draw",
-    mesh_buffer:         Gpu_pmm "Mesh",
-    draw_command_buffer: Gpu_pmm "Draw_Command",
-    draw_command_count:  Gpu_pmm "uint",
+    draw_buffer:         vk.DeviceAddress "Draw",
+    mesh_buffer:         vk.DeviceAddress "Mesh",
+    draw_command_buffer: vk.DeviceAddress "Draw_Command",
+    draw_command_count:  vk.DeviceAddress "uint",
     
     camera_p:   v3,
     draw_count: u32,
@@ -75,12 +65,12 @@ Draw_Globals :: struct {
     projection: m4,
     light_pos:  [4] v4,
     
-    draw_command_buffer: Gpu_pmm "Draw_Command",
-    draw_buffer:         Gpu_pmm "Draw",
-    mesh_buffer:         Gpu_pmm "Mesh",
-    meshlet_buffer:      Gpu_pmm "Meshlet",
-    meshlet_data_buffer: Gpu_pmm "uint",
-    vertex_buffer:       Gpu_pmm "Vertex",
+    draw_command_buffer: vk.DeviceAddress "Draw_Command",
+    draw_buffer:         vk.DeviceAddress "Draw",
+    mesh_buffer:         vk.DeviceAddress "Mesh",
+    meshlet_buffer:      vk.DeviceAddress "Meshlet",
+    meshlet_data_buffer: vk.DeviceAddress "uint",
+    vertex_buffer:       vk.DeviceAddress "Vertex",
 }
 
 // @shader
@@ -162,13 +152,6 @@ main :: proc () {
     
     stuff: Stuff_With_The_Same_Lifetime_As_The_Swapchain
     recreate_stuff(&gpu, &stuff)
-    
-    frames := make([] Frame, MaxFramesInFlight, context.allocator)
-    // @waste allocate a buffer and bump allocate out of that buffer
-    for &frame in frames {
-        frame.draw_globals.cpu, frame.draw_globals.gpu = gpu_allocate_type(&gpu, Draw_Globals)
-        frame.cull_globals.cpu, frame.cull_globals.gpu = gpu_allocate_type(&gpu, Cull_Globals)
-    }
     
     ////////////////////////////////////////////////
     
@@ -398,9 +381,9 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    cull_pipeline:    Pipeline_pc(^Cull_Globals)
-    depth_pipeline:   Pipeline_pc(Depth_Globals)
-    meshlet_pipeline: Pipeline_pc(^Draw_Globals)
+    cull_pipeline:    Pipeline
+    depth_pipeline:   Pipeline
+    meshlet_pipeline: Pipeline
     
     ////////////////////////////////////////////////
     
@@ -430,6 +413,11 @@ main :: proc () {
     display_pyramid: bool
     display_pyramid_mip_level: i32 = 0
     
+    // @correctness ensure that this is enough and that we did not overflow inside of a frame and override someone elses data for a shader
+    frame_bump_allocators: [MaxFramesInFlight] Bump_Allocator
+    for &bump in frame_bump_allocators {
+        bump = bump_allocator_make_temporary(&gpu, 1 * Megabyte)
+    }
     
     cull_delta: f64
     cpu_time: f64
@@ -526,15 +514,15 @@ main :: proc () {
         
         // @api should this be begin pipeline, which just always takes in the dependencies and does a reload and recreate itself?
         if reload_shaders_if_needed(watchers, shader_allocator, &draw_cull_shader) || !pipeline_is_valid(cull_pipeline) {
-            cull_pipeline = gpu_create_compute_pipeline(&gpu, draw_cull_shader, cull_pipeline)
+            cull_pipeline = gpu_create_compute_pipeline(&gpu, draw_cull_shader, ^Cull_Globals, cull_pipeline)
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, &depth_reduce_shader) || !pipeline_is_valid(depth_pipeline) {
-            depth_pipeline = create_compute_pipeline(&gpu, depth_reduce_shader, depth_descriptor_set_layout, depth_pipeline)
+            depth_pipeline = create_compute_pipeline(&gpu, depth_reduce_shader, depth_descriptor_set_layout, ^Depth_Globals, depth_pipeline)
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, meshlet_shaders[:]) || !pipeline_is_valid(meshlet_pipeline) {
-            meshlet_pipeline = create_graphics_pipeline(&gpu, { textures_descriptor_set_layout }, meshlet_shaders[:], meshlet_pipeline)
+            meshlet_pipeline = create_graphics_pipeline(&gpu, { textures_descriptor_set_layout }, meshlet_shaders[:], ^Draw_Globals, meshlet_pipeline)
         }
         
         ////////////////////////////////////////////////
@@ -543,7 +531,7 @@ main :: proc () {
         frame_index, restart := get_the_next_frame(&gpu, frame_semaphore)
         if restart { continue }
         
-        frame := &frames[frame_index]
+        bump := &frame_bump_allocators[frame_index]
         
         ////////////////////////////////////////////////
         
@@ -662,7 +650,10 @@ main :: proc () {
                 }
             }
             
-            frame.cull_globals.cpu^ = Cull_Globals {
+            
+            cull_globals_cpu, cull_globals_gpu := bump_allocate_type(bump, Cull_Globals)
+            
+            cull_globals_cpu^ = Cull_Globals {
                 frustum_planes      = frustum_planes,
                 draw_buffer         = draw_buffer,
                 mesh_buffer         = mesh_buffer,
@@ -678,9 +669,7 @@ main :: proc () {
             gpu_set_pipeline(cmd, cull_pipeline)
             
                 // @shader cull.comp
-                // @cleanup get_group_count
-                gpu_dispatch(cmd, &frame.cull_globals.gpu.address, uv3{get_group_count(draw_cull_shader, len(draws))})
-                // push_constants_pointer(cmd, cull_pipeline, &frame.cull_globals.gpu.address)
+                gpu_dispatch(cmd, &cull_globals_gpu, get_group_count(draw_cull_shader, len(draws)))
             
             ////////////////////////////////////////////////
             
@@ -723,7 +712,8 @@ main :: proc () {
         draw_globals.meshlet_data_buffer = meshlet_data_buffer
         draw_globals.vertex_buffer       = vertex_buffer
         
-        frame.draw_globals.cpu^ = draw_globals
+        draw_globals_cpu, draw_globals_gpu := bump_allocate_type(bump, Draw_Globals)
+        draw_globals_cpu^ = draw_globals
         
         gpu_profile_zone_begin("rendering early pass")
         gpu_labeled_region_begin(cmd, "rendering early pass", {0.6, 0.1, 07, 1.0})
@@ -741,7 +731,7 @@ main :: proc () {
                 // @shader meshlet.task meshlet.mesh meshlet.frag
                 vk.CmdBindDescriptorSets(cmd, meshlet_pipeline.bind_point, meshlet_pipeline.layout, 0, 1, &textures_descriptor_set, 0, nil)
                 
-                push_constants(cmd, meshlet_pipeline, &frame.draw_globals)
+                vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
                 
                 // @todo(viktor): as nice as the api could be this is a bit stupid
                 vk.CmdDrawMeshTasksIndirectCountEXT(cmd, draw_command_buffer_buffer, auto_cast offset_of(Draw_Command, command), draw_command_count_buffer_buffer, 0, len(draws), size_of(Draw_Command))
@@ -777,7 +767,6 @@ main :: proc () {
             prev_mip: ^Depth_Pyramid_Mip
             for &mip, mip_level in stuff.depth_pyramid_mips {
                 // @shaders depth_reduce.comp
-                push_constants_value(cmd, depth_pipeline, Depth_Globals { size = cast(v2) mip.size })
                 
                 clear(&updates)
                 append(&updates, DescriptorUpdateData { image = { 
@@ -785,15 +774,15 @@ main :: proc () {
                     mip_level == 0 ? gpu.depth_buffer.view                   : prev_mip.view,
                     mip_level == 0 ? gpu.depth_buffer.last_transition.layout : .GENERAL,
                 } })
-                prev_mip = &mip
-                append(&updates, DescriptorUpdateData { image = { 
-                    stuff.depth_sampler,
-                    mip.view,
-                    .GENERAL,
-                } })
+                append(&updates, DescriptorUpdateData { image = { stuff.depth_sampler, mip.view, .GENERAL } })
                 vk.CmdPushDescriptorSetWithTemplate(cmd, depth_pipeline.update_template, depth_pipeline.layout, 0, raw_data(&updates))
                 
-                vk.CmdDispatch(cmd, get_group_count(depth_reduce_shader, **mip.size))
+                prev_mip = &mip
+                
+                depth_globals_cpu, depth_globals_gpu := bump_allocate_type(bump, Depth_Globals)
+                depth_globals_cpu^ = Depth_Globals { size = cast(v2) mip.size }
+                
+                gpu_dispatch(cmd, &depth_globals_gpu, get_group_count(depth_reduce_shader, **mip.size))
                 
                 pipeline_barrier_begin()
                     add_image_barrier_transition_from_last(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
@@ -917,10 +906,9 @@ main :: proc () {
     gpu_free(&gpu, draw_buffer)
     gpu_free(&gpu, draw_command_buffer)
     gpu_free(&gpu, draw_command_count_buffer)
-
-    for frame in frames {
-        gpu_free(&gpu, frame.draw_globals.gpu)
-        gpu_free(&gpu, frame.cull_globals.gpu)
+    
+    for &bump in frame_bump_allocators {
+        bump_allocator_delete(&gpu, &bump)
     }
     
     destroy_pipeline(gpu.device, meshlet_pipeline)

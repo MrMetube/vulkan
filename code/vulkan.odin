@@ -13,9 +13,6 @@ Depth_Pyramid_Mip :: struct {
     size: uv2,
 }
 
-Pipeline_pc :: struct ($Push_Constant: typeid) {
-    #subtype using i: Pipeline
-}
 Pipeline :: struct {
     pipeline: vk.Pipeline,
     layout:   vk.PipelineLayout,
@@ -274,7 +271,7 @@ create_pipeline_layout :: proc (device: vk.Device, stage_flags: vk.ShaderStageFl
     return result
 }
 
-create_compute_pipeline :: proc (gpu: ^Gpu, shader: Shader, set_layout: vk.DescriptorSetLayout, old: Pipeline_pc($PC)) -> Pipeline_pc(PC) {
+create_compute_pipeline :: proc (gpu: ^Gpu, shader: Shader, set_layout: vk.DescriptorSetLayout, $PC: typeid, old: Pipeline) -> Pipeline {
     if pipeline_is_valid(old) {
         check(vk.DeviceWaitIdle(gpu.device))
         destroy_pipeline(gpu.device, old)
@@ -282,7 +279,7 @@ create_compute_pipeline :: proc (gpu: ^Gpu, shader: Shader, set_layout: vk.Descr
     
     assert(shader.stage == .COMPUTE)
     
-    result: Pipeline_pc(PC)
+    result: Pipeline
     result.bind_point = .COMPUTE
     result.shader_stages += { shader.stage }
     
@@ -309,20 +306,20 @@ create_compute_pipeline :: proc (gpu: ^Gpu, shader: Shader, set_layout: vk.Descr
         },
     }
     
-    check(vk.CreateComputePipelines(gpu.device, gpu.pipeline_cache, 1, &create_info, nil, &result.i.pipeline))
+    check(vk.CreateComputePipelines(gpu.device, gpu.pipeline_cache, 1, &create_info, nil, &result.pipeline))
     
     result.update_template = create_update_template(gpu.device, .COMPUTE, result.layout, shader)
     
     return result
 }
 
-create_graphics_pipeline :: proc (gpu: ^Gpu, set_layouts: [] vk.DescriptorSetLayout, shaders: [] Shader, old: Pipeline_pc($PC)) -> Pipeline_pc(PC) {
+create_graphics_pipeline :: proc (gpu: ^Gpu, set_layouts: [] vk.DescriptorSetLayout, shaders: [] Shader, $PC: typeid, old: Pipeline) -> Pipeline {
     if pipeline_is_valid(old) {
         check(vk.DeviceWaitIdle(gpu.device))
         destroy_pipeline(gpu.device, old)
     }
     
-    result: Pipeline_pc(PC)
+    result: Pipeline
     result.bind_point = .GRAPHICS
     for shader in shaders {
         result.shader_stages += { shader.stage }
@@ -506,23 +503,6 @@ destroy_pipeline :: proc (device: vk.Device, pipeline: Pipeline) {
 
 ////////////////////////////////////////////////
 
-bind_pipeline :: proc (cb: vk.CommandBuffer, pipeline: Pipeline) {
-    vk.CmdBindPipeline(cb, pipeline.bind_point, pipeline.pipeline)
-}
-
-push_constants :: proc { push_constants_pointer, push_constants_value }
-push_constants_pointer :: proc (cb: vk.CommandBuffer, pipeline: Pipeline_pc(^$T), push_constant: ^Push_Constant(T)) {
-    push_constants_raw(cb, pipeline, size_of(vk.DeviceAddress), &push_constant.gpu.address)
-}
-push_constants_value :: proc (cb: vk.CommandBuffer, pipeline: Pipeline_pc($T), push_constant: T) where !intrinsics.type_is_pointer(T) {
-    value := push_constant
-    push_constants_raw(cb, pipeline, size_of(T), &value)
-}
-push_constants_raw :: proc (cb: vk.CommandBuffer, pipeline: Pipeline, size: u32, data: pmm) {
-    vk.CmdPushConstants(cb, pipeline.layout, pipeline.shader_stages, 0, size, data)
-}
-
-////////////////////////////////////////////////
 
 begin_rendering :: proc (cb: vk.CommandBuffer, gpu: ^Gpu, clear_color: v4, early: bool) {
     rendering_info := vk.RenderingInfo {

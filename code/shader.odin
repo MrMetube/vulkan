@@ -16,8 +16,8 @@ import vk "vendor:vulkan"
     buffer reference struct:
         A type that is passed to shader via a pointer, and which may contain pointers to buffers.
         
-        These pointers must be Gpu_pmm types on the cpu side and must contain a tag like:
-            field_name: Gpu_pmm "name_of_the_pointed_at_type"
+        These pointers must be vk.DeviceAddress types on the cpu side and must contain a tag like:
+            field_name: vk.DeviceAddress "name_of_the_pointed_at_type"
             (The tag's "name_of_the_pointed_at_type" must be the type name used in the shader.)
         
 */
@@ -33,15 +33,16 @@ generate_shader_api :: proc (output_file: string) {
     append_simple_struct(&builder, Mesh)
     append_simple_struct(&builder, Meshlet)
     append_simple_struct(&builder, Vertex)
-    append_simple_struct(&builder, Depth_Globals)
     
     reference_types := make(map[string] struct {}, context.allocator)
     collect_reference_types(&reference_types, Cull_Globals)
     collect_reference_types(&reference_types, Draw_Globals)
+    collect_reference_types(&reference_types, Depth_Globals)
     append_reference_types(&builder, reference_types)
     
     append_buffer_reference_struct(&builder, Cull_Globals)
     append_buffer_reference_struct(&builder, Draw_Globals)
+    append_buffer_reference_struct(&builder, Depth_Globals)
     
     get_type_name :: proc (info: ^runtime.Type_Info) -> (string, string) {
         type_name: string
@@ -94,9 +95,9 @@ generate_shader_api :: proc (output_file: string) {
         info := type_info_of(runtime.typeid_base(type))
         s :=  info.variant.(runtime.Type_Info_Struct)
         
-        // @todo(viktor): currently all fields are Gpu_pmm, but that hides the type for this metaprogram. Can we make a wrapper like GPU_Pointer(T) so that we can read the inner type here and not have to specify it in the tag string?
+        // @todo(viktor): currently all fields are vk.DeviceAddress, but that hides the type for this metaprogram. Can we make a wrapper like GPU_Pointer(T) so that we can read the inner type here and not have to specify it in the tag string?
         for field in soa_zip(type = s.types[:s.field_count], tag = s.tags[:s.field_count]) {
-            if field.tag != "" && field.type.id == typeid_of(Gpu_pmm) {
+            if field.tag != "" && field.type.id == typeid_of(vk.DeviceAddress) {
                 refs[field.tag] = {}
             }
         }
@@ -404,10 +405,10 @@ compile_shader_end :: proc (cmd: ^Cmd, shader_input: string) -> bool {
     return true
 }
 
-get_group_count :: proc (shader: Shader, count_x: u32 = 1, count_y: u32 = 1, count_z: u32 = 1) -> (x, y, z: u32) {
+get_group_count :: proc (shader: Shader, count_x: u32 = 1, count_y: u32 = 1, count_z: u32 = 1) -> uv3 {
     total_count := uv3{ count_x, count_y, count_z }
     result := (total_count + shader.parsed.local_size-1) / shader.parsed.local_size
-    return **result
+    return result
 }
 
 ////////////////////////////////////////////////
