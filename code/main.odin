@@ -179,7 +179,7 @@ main :: proc () {
     meshlet_data_buffer, mdb_view := gpu_make_buffer(&gpu, [] u32,       256 * Megabyte / size_of(u32),     { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
     draw_buffer,         db_view  := gpu_make_buffer(&gpu, [] Draw,      256 * Megabyte / size_of(Draw),    { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
     mesh_buffer,         mb_view  := gpu_make_buffer(&gpu, [] Mesh,      256 * Megabyte / size_of(Mesh),    { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
-    // @todo(viktor): this buffer is never seen by the cpu, its filled by compute and used by task+mesh shader
+    // @todo(viktor): this buffer is never seen by the cpu, its filled by compute and used by task+mesh shader, but for debbuging it really helped that there was a view/slice
     draw_command_buffer, dcb_view := gpu_make_buffer(&gpu, [] Draw_Command, 256 * Megabyte / size_of(Draw_Command), { .STORAGE_BUFFER, .INDIRECT_BUFFER, .SHADER_DEVICE_ADDRESS })
     draw_command_count_buffer, dccb_view := gpu_make_buffer_type(&gpu, u32, { .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER, .SHADER_DEVICE_ADDRESS })
     
@@ -205,90 +205,6 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    // this will hold literally all textures, expand if needed and let the shader index into it via Draw.texture_index
-    textures: [3] Image
-    texture_descriptors: [len(textures)] vk.DescriptorImageInfo
-    
-    {
-        // @cleanup to do the copy into gpu memory ourselves, we need the tiling to be .LINEAR and not .OPTIMAL, 
-        // but in that case we cannot specify any mip_levels. :(
-        for &texture, index in textures {
-            filename := fmt.tprintf("tutorial/suzanne%v.ktx", index)
-            
-            loaded_texture := load_ktx_texture(filename, context.temp_allocator)
-            
-            texture = gpu_make_image(&gpu, {loaded_texture.width, loaded_texture.height}, loaded_texture.format, { .TRANSFER_DST, .SAMPLED }, { .COLOR }, mip_levels = loaded_texture.mip_levels)
-            
-            source_buffer, source_buffer_data := gpu_make_buffer_slice(&gpu, [] u8, len(loaded_texture.data), { .TRANSFER_SRC })
-            defer gpu_delete(&gpu, source_buffer)
-            
-            copy(source_buffer_data, loaded_texture.data)
-            
-            ////////////////////////////////////////////////
-            
-            fence_once := create_fence(gpu.device)
-            defer vk.DestroyFence(gpu.device, fence_once, nil)
-            
-            cb_once: vk.CommandBuffer
-            cb_once_allocate_info := vk.CommandBufferAllocateInfo {
-                sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-                commandPool        = gpu.command_pool,
-                commandBufferCount = 1,
-            }
-            check(vk.AllocateCommandBuffers(gpu.device, &cb_once_allocate_info, &cb_once))
-            
-            cb_once_begin_info := vk.CommandBufferBeginInfo {
-                sType = .COMMAND_BUFFER_BEGIN_INFO,
-                flags = { .ONE_TIME_SUBMIT },
-            }
-            check(vk.BeginCommandBuffer(cb_once, &cb_once_begin_info))
-            
-            pipeline_barrier_begin()
-                add_image_barrier(&texture, {}, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
-            pipeline_barrier_end(cb_once)
-            
-            copy_regions := make([dynamic] vk.BufferImageCopy, context.temp_allocator)
-            for level in 0..<loaded_texture.mip_levels {
-                mip_offset := loaded_texture.mip_offsets[level]
-                
-                append(&copy_regions, vk.BufferImageCopy {
-                    bufferOffset     = auto_cast mip_offset,
-                    imageSubresource = { aspectMask = { .COLOR }, mipLevel = level, layerCount = 1 },
-                    imageExtent      = { width = loaded_texture.width >> level, height = loaded_texture.height >> level, depth = 1 },
-                })
-            }
-            
-            vk.CmdCopyBufferToImage(cb_once, source_buffer.buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
-            
-            pipeline_barrier_begin()
-                add_image_barrier_transition_from_last(&texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
-            pipeline_barrier_end(cb_once)
-            
-            check(vk.EndCommandBuffer(cb_once))
-            
-            once_submit_info := vk.SubmitInfo {
-                sType = .SUBMIT_INFO,
-                commandBufferCount = 1,
-                pCommandBuffers    = &cb_once,
-            }
-            
-            check(vk.QueueSubmit(gpu.queue, 1, &once_submit_info, fence_once))
-            
-            check(vk.WaitForFences(gpu.device, 1, &fence_once, waitAll = true, timeout = MaxTimeout))
-            
-            sampler := create_sampler(gpu.device, .LINEAR, .LINEAR, cast(f32) loaded_texture.mip_levels, true)
-            defer_destroy(vk.DestroySampler, sampler)
-            
-            texture_descriptors[index] = vk.DescriptorImageInfo{ 
-                sampler = sampler, 
-                imageView = texture.view, 
-                imageLayout = texture.last_transition.layout
-            }
-        }
-    }
-    
-    ////////////////////////////////////////////////
-    
     generate_shader_api("shaders/api.generated.glslh")
     
     shader_allocator := context.allocator
@@ -310,6 +226,78 @@ main :: proc () {
     
     draw_cull_shader    := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/draw_cull.comp",    shader_allocator)
     depth_reduce_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/depth_reduce.comp", shader_allocator)
+    
+    ////////////////////////////////////////////////
+    
+    // this will hold literally all textures, expand if needed and let the shader index into it via Draw.texture_index
+    textures: [3] Image
+    texture_descriptors: [len(textures)] vk.DescriptorImageInfo
+    
+    {
+        // @cleanup to do the copy into gpu memory ourselves, we need the tiling to be .LINEAR and not .OPTIMAL, 
+        // but in that case we cannot specify any mip_levels. :(
+        for &texture, index in textures {
+            filename := fmt.tprintf("tutorial/suzanne%v.ktx", index)
+            
+            loaded_texture := load_ktx_texture(filename, context.temp_allocator)
+            
+            texture = gpu_make_image(&gpu, {loaded_texture.width, loaded_texture.height}, loaded_texture.format, { .TRANSFER_DST, .SAMPLED }, { .COLOR }, mip_levels = loaded_texture.mip_levels)
+            
+            source_buffer, source_buffer_data := gpu_make_buffer_slice(&gpu, [] u8, len(loaded_texture.data), { .TRANSFER_SRC })
+            defer gpu_delete(&gpu, source_buffer)
+            
+            copy(source_buffer_data, loaded_texture.data)
+            
+            ////////////////////////////////////////////////
+            
+            fence := create_fence(gpu.device)
+            defer vk.DestroyFence(gpu.device, fence, nil)
+            
+            cmd := gpu_begin_command_recording(&gpu, 0, gpu.queue)
+            
+            pipeline_barrier_begin()
+                add_image_barrier(&texture, {}, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
+            pipeline_barrier_end(cmd)
+            
+            copy_regions := make([dynamic] vk.BufferImageCopy, context.temp_allocator)
+            for level in 0..<loaded_texture.mip_levels {
+                mip_offset := loaded_texture.mip_offsets[level]
+                
+                append(&copy_regions, vk.BufferImageCopy {
+                    bufferOffset     = auto_cast mip_offset,
+                    imageSubresource = { aspectMask = { .COLOR }, mipLevel = level, layerCount = 1 },
+                    imageExtent      = { width = loaded_texture.width >> level, height = loaded_texture.height >> level, depth = 1 },
+                })
+            }
+            
+            vk.CmdCopyBufferToImage(cmd, source_buffer.buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
+            
+            pipeline_barrier_begin()
+                add_image_barrier_transition_from_last(&texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
+            pipeline_barrier_end(cmd)
+            
+            check(vk.EndCommandBuffer(cmd))
+            
+            once_submit_info := vk.SubmitInfo {
+                sType = .SUBMIT_INFO,
+                commandBufferCount = 1,
+                pCommandBuffers    = &cmd,
+            }
+            
+            check(vk.QueueSubmit(gpu.queue, 1, &once_submit_info, fence))
+            
+            check(vk.WaitForFences(gpu.device, 1, &fence, waitAll = true, timeout = MaxTimeout))
+            
+            sampler := create_sampler(gpu.device, .LINEAR, .LINEAR, cast(f32) loaded_texture.mip_levels, true)
+            defer_destroy(vk.DestroySampler, sampler)
+            
+            texture_descriptors[index] = vk.DescriptorImageInfo{ 
+                sampler = sampler, 
+                imageView = texture.view, 
+                imageLayout = texture.last_transition.layout
+            }
+        }
+    }
     
     ////////////////////////////////////////////////
     
@@ -536,7 +524,7 @@ main :: proc () {
         
         // @api should this be begin pipeline, which just always takes in the dependencies and does a reload and recreate itself?
         if reload_shaders_if_needed(watchers, shader_allocator, &draw_cull_shader) || !pipeline_is_valid(cull_pipeline) {
-            cull_pipeline = create_compute_pipeline(&gpu, draw_cull_shader, 0, cull_pipeline)
+            cull_pipeline = gpu_create_compute_pipeline(&gpu, draw_cull_shader, cull_pipeline)
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, &depth_reduce_shader) || !pipeline_is_valid(depth_pipeline) {
@@ -622,33 +610,28 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
+        check(vk.ResetCommandPool(gpu.device, gpu.command_pools[frame_index], {}))
         // @api expecting the user to pass the frame index is a source for mistakes
-        cb := gpu_begin_the_command_buffer_of_the_current_frame(&gpu, frame_index)
+        cmd := gpu_begin_command_recording(&gpu, frame_index, gpu.queue)
         
-        check(vk.BeginCommandBuffer(cb, &vk.CommandBufferBeginInfo { sType = .COMMAND_BUFFER_BEGIN_INFO, flags = { .ONE_TIME_SUBMIT } }))
-        
-        gpu_profile_frame_begin(gpu.device, cb)
+        gpu_profile_frame_begin(gpu.device, cmd)
         
         ////////////////////////////////////////////////
         
-        gpu_labeled_region_begin(cb, "culling", {0.0, 0.6, 0.8, 1.0})
+        gpu_labeled_region_begin(cmd, "culling", {0.0, 0.6, 0.8, 1.0})
             gpu_profile_zone_begin("culling")
             
-            pipeline_barrier_begin() // @todo(viktor): is this barrier/transition before the fill necessary?
-            add_buffer_barrier(&draw_command_count_buffer, {}, {}, { .TRANSFER }, { .TRANSFER_WRITE })
-            pipeline_barrier_end(cb)
+            // @todo(viktor): is this barrier/transition before the fill necessary?
+            gpu_barrier(cmd, {}, { .TRANSFER })
             
             ////////////////////////////////////////////////
             
-            vk.CmdFillBuffer(cb, draw_command_count_buffer.buffer, 0, size_of(dccb_view^), 0)
+            vk.CmdFillBuffer(cmd, draw_command_count_buffer.buffer, 0, size_of(dccb_view^), 0)
             
             ////////////////////////////////////////////////
             
-            pipeline_barrier_begin()
-                // :OcclusionCull: the memory barrier for the depth pyramid had a parameters, but just for the late pass (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=10157)
-                add_buffer_barrier(&draw_command_buffer, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .INDIRECT_COMMAND_READ, .SHADER_READ }, { .COMPUTE_SHADER }, { .SHADER_WRITE, .SHADER_READ })
-                add_buffer_barrier_transition_from_last(&draw_command_count_buffer, { .COMPUTE_SHADER }, { .SHADER_WRITE, .SHADER_READ })
-            pipeline_barrier_end(cb)
+            // :OcclusionCull: the memory barrier for the depth pyramid had a parameters, but just for the late pass (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=10157)
+            gpu_barrier(cmd, { .DRAW_INDIRECT, .MESH_SHADER_EXT, .TRANSFER }, { .COMPUTE_SHADER })
             
             ////////////////////////////////////////////////
             
@@ -689,35 +672,31 @@ main :: proc () {
                 camera_p                = cam_pos,
             }
             
-            bind_pipeline(cb, cull_pipeline)
+            gpu_set_pipeline(cmd, cull_pipeline)
+            
                 // @shader cull.comp
-                push_constants_pointer(cb, cull_pipeline, &frame.cull_globals)
-                
-                vk.CmdDispatch(cb, get_group_count(draw_cull_shader, len(draws)))
+                // @cleanup get_group_count
+                gpu_dispatch(cmd, &frame.cull_globals.gpu.address, uv3{get_group_count(draw_cull_shader, len(draws))})
+                // push_constants_pointer(cmd, cull_pipeline, &frame.cull_globals.gpu.address)
             
             ////////////////////////////////////////////////
             
-            pipeline_barrier_begin()
-            add_buffer_barrier_transition_from_last(&draw_command_buffer, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .INDIRECT_COMMAND_READ, .SHADER_READ })
-            add_buffer_barrier_transition_from_last(&draw_command_count_buffer, { .DRAW_INDIRECT }, { .INDIRECT_COMMAND_READ })
-            pipeline_barrier_end(cb)
-            
-            ////////////////////////////////////////////////
-            
+            // @todo(viktor): should these be combined into one api call?
+            gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
             // this apparently needs to happend before we do anything related to rendering
             pipeline_barrier_begin()
                 add_image_barrier(&gpu.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL)
                 add_image_barrier(&gpu.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
-            pipeline_barrier_end(cb)
+            pipeline_barrier_end(cmd)
             
             ////////////////////////////////////////////////
             
             gpu_profile_zone_end()
-        gpu_labeled_region_end(cb)
+        gpu_labeled_region_end(cmd)
         
         ////////////////////////////////////////////////
         // Setting these outside of rendering-sections means they persist across all sections.
-        vk.CmdSetViewport(cb, 0, 1, &vk.Viewport {
+        vk.CmdSetViewport(cmd, 0, 1, &vk.Viewport {
             x      = 0,
             y      = 0,
             width  = cast(f32) gpu.swapchain_size.x,
@@ -726,7 +705,7 @@ main :: proc () {
             maxDepth = 1,
         })
         
-        vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D { extent = to_extent(gpu.swapchain_size) })
+        vk.CmdSetScissor(cmd, 0, 1, &vk.Rect2D { extent = to_extent(gpu.swapchain_size) })
         
         ////////////////////////////////////////////////
         
@@ -744,34 +723,34 @@ main :: proc () {
         frame.draw_globals.cpu^ = draw_globals
         
         gpu_profile_zone_begin("rendering early pass")
-        gpu_labeled_region_begin(cb, "rendering early pass", {0.6, 0.1, 07, 1.0})
-        begin_rendering(cb, &gpu, {0.07, 0.07, 0.07, 1}, early = true)
+        gpu_labeled_region_begin(cmd, "rendering early pass", {0.6, 0.1, 07, 1.0})
+        begin_rendering(cmd, &gpu, {0.07, 0.07, 0.07, 1}, early = true)
                 
             if print_profile_and_stats {
                 vk.ResetQueryPool(gpu.device, stats_pool, 0, stats_count)
-                vk.CmdBeginQuery(cb, stats_pool, 0, {})
+                vk.CmdBeginQuery(cmd, stats_pool, 0, {})
             }
             
-            gpu_labeled_region_begin(cb, "meshlets", {0.0, 0.6, 0.8, 1.0})
+            gpu_labeled_region_begin(cmd, "meshlets", {0.0, 0.6, 0.8, 1.0})
             gpu_profile_zone_begin("meshlets")
             
-            bind_pipeline(cb, meshlet_pipeline)
+            gpu_set_pipeline(cmd, meshlet_pipeline)
                 // @shader meshlet.task meshlet.mesh meshlet.frag
-                vk.CmdBindDescriptorSets(cb, meshlet_pipeline.bind_point, meshlet_pipeline.layout, 0, 1, &textures_descriptor_set, 0, nil)
+                vk.CmdBindDescriptorSets(cmd, meshlet_pipeline.bind_point, meshlet_pipeline.layout, 0, 1, &textures_descriptor_set, 0, nil)
                 
-                push_constants(cb, meshlet_pipeline, &frame.draw_globals)
+                push_constants(cmd, meshlet_pipeline, &frame.draw_globals)
                 
-                vk.CmdDrawMeshTasksIndirectCountEXT(cb, draw_command_buffer.buffer, auto_cast offset_of(Draw_Command, command), draw_command_count_buffer.buffer, 0, len(draws), size_of(Draw_Command))
+                vk.CmdDrawMeshTasksIndirectCountEXT(cmd, draw_command_buffer.buffer, auto_cast offset_of(Draw_Command, command), draw_command_count_buffer.buffer, 0, len(draws), size_of(Draw_Command))
             
             gpu_profile_zone_end()
-            gpu_labeled_region_end(cb)
+            gpu_labeled_region_end(cmd)
             
             if print_profile_and_stats {
-                vk.CmdEndQuery(cb, stats_pool, 0)
+                vk.CmdEndQuery(cmd, stats_pool, 0)
             }
             
-        end_rendering(cb)
-        gpu_labeled_region_end(cb)
+        end_rendering(cmd)
+        gpu_labeled_region_end(cmd)
         gpu_profile_zone_end()
         
         ////////////////////////////////////////////////
@@ -781,20 +760,20 @@ main :: proc () {
         pipeline_barrier_begin()
             add_image_barrier_transition_from_last(&gpu.depth_buffer, { .COMPUTE_SHADER }, { .SHADER_READ }, .SHADER_READ_ONLY_OPTIMAL, { .DEPTH })
             add_image_barrier(&stuff.depth_pyramid, {}, {}, .UNDEFINED,  { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL)
-        pipeline_barrier_end(cb)
+        pipeline_barrier_end(cmd)
         
         ////////////////////////////////////////////////
         
         gpu_profile_zone_begin("depth pyramid building")
-        gpu_labeled_region_begin(cb, "depth pyramid building", {0.4, 0.8, 0, 1.0})
+        gpu_labeled_region_begin(cmd, "depth pyramid building", {0.4, 0.8, 0, 1.0})
         
-        bind_pipeline(cb, depth_pipeline)
+        gpu_set_pipeline(cmd, depth_pipeline)
             
             updates: [dynamic; 32] DescriptorUpdateData
             prev_mip: ^Depth_Pyramid_Mip
             for &mip, mip_level in stuff.depth_pyramid_mips {
                 // @shaders depth_reduce.comp
-                push_constants_value(cb, depth_pipeline, Depth_Globals { size = cast(v2) mip.size })
+                push_constants_value(cmd, depth_pipeline, Depth_Globals { size = cast(v2) mip.size })
                 
                 clear(&updates)
                 append(&updates, DescriptorUpdateData { image = { 
@@ -808,32 +787,32 @@ main :: proc () {
                     mip.view,
                     .GENERAL,
                 } })
-                vk.CmdPushDescriptorSetWithTemplate(cb, depth_pipeline.update_template, depth_pipeline.layout, 0, raw_data(&updates))
+                vk.CmdPushDescriptorSetWithTemplate(cmd, depth_pipeline.update_template, depth_pipeline.layout, 0, raw_data(&updates))
                 
-                vk.CmdDispatch(cb, get_group_count(depth_reduce_shader, **mip.size))
+                vk.CmdDispatch(cmd, get_group_count(depth_reduce_shader, **mip.size))
                 
                 pipeline_barrier_begin()
                     add_image_barrier_transition_from_last(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
-                pipeline_barrier_end(cb, { .BY_REGION })
+                pipeline_barrier_end(cmd, { .BY_REGION })
             }
         
-        gpu_labeled_region_end(cb)
+        gpu_labeled_region_end(cmd)
         gpu_profile_zone_end()
         
         ////////////////////////////////////////////////
         
         pipeline_barrier_begin()
             add_image_barrier_transition_from_last(&gpu.depth_buffer, {.EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH })
-        pipeline_barrier_end(cb)
+        pipeline_barrier_end(cmd)
         
         ////////////////////////////////////////////////
         
         gpu_profile_zone_begin("rendering late pass")
-        gpu_labeled_region_begin(cb, "rendering late pass", {0.6, 0.1, 07, 1.0})
-        begin_rendering(cb, &gpu, {}, early = false)
+        gpu_labeled_region_begin(cmd, "rendering late pass", {0.6, 0.1, 07, 1.0})
+        begin_rendering(cmd, &gpu, {}, early = false)
             
-        end_rendering(cb)
-        gpu_labeled_region_end(cb)
+        end_rendering(cmd)
+        gpu_labeled_region_end(cmd)
         gpu_profile_zone_end()
         
         ////////////////////////////////////////////////
@@ -847,13 +826,13 @@ main :: proc () {
                 } else {
                     add_image_barrier_transition_from_last(&stuff.depth_pyramid, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
                 }
-            pipeline_barrier_end(cb)
+            pipeline_barrier_end(cmd)
                 
             destination := gpu.swapchain_images[gpu.image_index]
             if !display_pyramid {
                 source := gpu.color_buffer
                 
-                vk.CmdCopyImage(cb, source.image, source.last_transition.layout, destination.image, destination.last_transition.layout, 1, &vk.ImageCopy {
+                vk.CmdCopyImage(cmd, source.image, source.last_transition.layout, destination.image, destination.last_transition.layout, 1, &vk.ImageCopy {
                     srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     extent         = to_extent(gpu.swapchain_size, 1),
@@ -864,7 +843,7 @@ main :: proc () {
                 mip_size  := cast(iv2) stuff.depth_pyramid_mips[display_pyramid_mip_level].size
                 dest_size := cast(iv2) gpu.swapchain_size
                 
-                vk.CmdBlitImage(cb, source.image, source.last_transition.layout, destination.image, destination.last_transition.layout, 1, &vk.ImageBlit {
+                vk.CmdBlitImage(cmd, source.image, source.last_transition.layout, destination.image, destination.last_transition.layout, 1, &vk.ImageBlit {
                     srcSubresource = { aspectMask = { .COLOR }, layerCount = 1, mipLevel = cast(u32) display_pyramid_mip_level },
                     dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     srcOffsets = { {0, 0, 0}, {mip_size.x, mip_size.y,   1}},
@@ -874,7 +853,7 @@ main :: proc () {
             
             pipeline_barrier_begin()
                 add_image_barrier_transition_from_last(&gpu.swapchain_images[gpu.image_index], {}, {}, .PRESENT_SRC_KHR)
-            pipeline_barrier_end(cb)
+            pipeline_barrier_end(cmd)
         
         gpu_profile_zone_end()
         
@@ -882,12 +861,12 @@ main :: proc () {
         
         gpu_profile_frame_end()
         
-        vk.EndCommandBuffer(cb)
+        vk.EndCommandBuffer(cmd)
         
         ////////////////////////////////////////////////
         
         // @cleanup dont pass the frameindex, this is a place that could cause mistakes
-        gpu_end_the_command_buffer_and_submit_and_present_the_queue(&gpu, frame_index, &cb)
+        gpu_end_the_command_buffer_and_submit_and_present_the_queue(&gpu, frame_index, &cmd)
         
         gpu_profile_collate_times(&gpu, gpu.device, print_profile_and_stats)
         

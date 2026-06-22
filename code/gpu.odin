@@ -1,6 +1,7 @@
 #+vet explicit-allocators !unused-procedures
 package main
 
+import "base:intrinsics"
 import "base:runtime"
 
 import "core:fmt"
@@ -33,9 +34,8 @@ Gpu :: struct {
     device_properties: vk.PhysicalDeviceProperties2, 
     memory_properties: vk.PhysicalDeviceMemoryProperties,
     
-    device:       vk.Device,
-    command_pool: vk.CommandPool,
-    queue:        vk.Queue,
+    device: vk.Device,
+    queue:  vk.Queue, // this is the graphics and compute queue, we could also create a queue just for transfers/copying
     
     // @incomplete this is never initialized. It may help performance if we need to create/recreate many pipelines.
     pipeline_cache: vk.PipelineCache,
@@ -45,7 +45,7 @@ Gpu :: struct {
     timeline_semaphore: vk.Semaphore,
     signal_value: u64,
     
-    command_buffers:          [MaxFramesInFlight] vk.CommandBuffer,
+    command_pools:            [MaxFramesInFlight] vk.CommandPool,
     image_aquired_semaphores: [MaxFramesInFlight] vk.Semaphore,
     
     ////////////////////////////////////////////////
@@ -56,7 +56,7 @@ Gpu :: struct {
     render_completes: [dynamic] vk.Semaphore,
     
     swapchain_size:   uv2,
-    swapchain_format: vk.Format, // @cleanup is this always just the color_buffers format?
+    swapchain_format: vk.Format,
     
     // @todo(viktor): these should also be part of the app, as we are already passing special usage flags based on what the app wants to do
     color_buffer: Image,
@@ -330,33 +330,26 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
         ////////////////////////////////////////////////
         
         for &sema in result.image_aquired_semaphores {
-            sema = create_semaphore(result.device)
+            sema = gpu_create_semaphore(&result)
             defer_destroy(vk.DestroySemaphore, sema)
         }
             
-        result.timeline_semaphore = create_semaphore(result.device, timeline_initial_value = MaxFramesInFlight)
+        result.timeline_semaphore = gpu_create_timeline_semaphore(&result, MaxFramesInFlight)
         defer_destroy(vk.DestroySemaphore, result.timeline_semaphore)
             
         ////////////////////////////////////////////////
         
         {
-            command_pool_create_info := vk.CommandPoolCreateInfo {
-                sType = .COMMAND_POOL_CREATE_INFO,
-                flags            = { .RESET_COMMAND_BUFFER },
-                queueFamilyIndex = queue_family_index,
+            for &pool in result.command_pools {
+                command_pool_create_info := vk.CommandPoolCreateInfo {
+                    sType = .COMMAND_POOL_CREATE_INFO,
+                    flags            = { .RESET_COMMAND_BUFFER },
+                    queueFamilyIndex = queue_family_index,
+                }
+                
+                check(vk.CreateCommandPool(result.device, &command_pool_create_info, nil, &pool))
+                defer_destroy(vk.DestroyCommandPool, pool)
             }
-            
-            check(vk.CreateCommandPool(result.device, &command_pool_create_info, nil, &result.command_pool))
-            
-            command_buffer_allocate_info := vk.CommandBufferAllocateInfo {
-                sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-                commandPool        = result.command_pool,
-                commandBufferCount = len(result.command_buffers),
-            }
-            
-            check(vk.AllocateCommandBuffers(result.device, &command_buffer_allocate_info, &result.command_buffers[0]))
-            
-            defer_destroy(vk.DestroyCommandPool, result.command_pool)
         }
     }
     
@@ -425,23 +418,10 @@ gpu_deinit :: proc (gpu: ^Gpu) {
 ////////////////////////////////////////////////
 
 wait_for_the_gpu_to_be_ready_for_the_next_frame :: proc (gpu: ^Gpu) -> (frame_index: u32, should_restart_frame: bool) {
-    gpu.signal_value += 1
-    wait_value := gpu.signal_value - MaxFramesInFlight
-    
-    wait_info := vk.SemaphoreWaitInfo {
-        sType = .SEMAPHORE_WAIT_INFO,
-        semaphoreCount = 1,
-        pSemaphores    = &gpu.timeline_semaphore,
-        pValues        = &wait_value,
-    }
-    
-    wait_result := vk.WaitSemaphores(gpu.device, &wait_info, MaxTimeout)
-    if wait_result == .TIMEOUT {
-        gpu.should_recreate_swapchain = true
-        return 0, true
-    }
-    
-    check(wait_result)
+    // if gpu.signal_value > MaxFramesInFlight {
+        // @todo(viktor): we could remove the if by starting the semaphore with a initial value of MaxFramesInFlight
+        gpu_wait_semaphore(gpu, gpu.timeline_semaphore, gpu.signal_value + 1 - MaxFramesInFlight)
+    // }
     
     ////////////////////////////////////////////////
     
@@ -636,6 +616,516 @@ create_sampler :: proc (device: vk.Device, filter: vk.Filter, mipmap_mode: vk.Sa
     
     result: vk.Sampler
     check(vk.CreateSampler(device, &sampler_create_info, nil, &result))
+    
+    return result
+}
+
+
+
+
+////////////////////////////////////////////////
+
+
+//             No graphics api
+
+
+////////////////////////////////////////////////
+
+
+
+Memory_Types :: enum {
+    cpu_mapped_gpu_memory, // for fast gpu read, and direct cpu copying into
+    gpu_only_memory,       // for texture data, or big gpu-only buffers
+    cpu_cached,            // for readback
+}
+
+
+// @api with scalar_block_layout, do we ever need an alignment parameter?
+// it seems that base structs should still be aligned by 16 bytes to make the best use of the loading hardware
+// this does not change with scalar block layout, as that just reduces padding issues between cpu and gpu.
+gpu_allocate :: proc { gpu_allocate_size, gpu_allocate_slice, gpu_allocate_struct }
+gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16) -> pmm {
+    // @cleanup and use alignment
+    _, result := gpu_make_buffer_size(gpu, size, { .STORAGE_BUFFER, .SHADER_DEVICE_ADDRESS })
+    return result
+}
+gpu_allocate_slice :: proc (gpu: ^Gpu, $T: typeid/ [] $E, #any_int count: int) -> [] E {
+    data := gpu_allocate_size(gpu, size_of(T) * count, align_of(E))
+    result := slice_from_parts(E, data, count)
+    return result
+}
+gpu_allocate_struct :: proc (gpu: ^Gpu, $T: typeid) -> ^T {
+    data := gpu_allocate_size(gpu, size_of(T), align_of(T))
+    result := cast(^T) data
+    return result
+}
+
+gpu_free :: proc (gpu: ^Gpu, pointer: pmm) {
+    unimplemented()
+}
+
+////////////////////////////////////////////////
+ 
+// @todo upload_bump_allocator bump_allocate(size) -> xx
+
+xx :: struct {
+    cpu: pmm,
+    gpu: pmm,
+}
+
+/* 
+
+// Load a mesh using a 3rd party library
+auto mesh = createMesh("mesh.obj");
+auto upload = uploadBumpAllocator.allocate(mesh.byteSize); // Custom bump allocator (wraps a gpuMalloc ptr)
+mesh.load(upload.cpu);
+
+// Allocate GPU-only memory and copy into it
+void* meshGpu = gpuMalloc(mesh.byteSize, MEMORY_GPU);
+gpuMemCpy(commandBuffer, meshGpu, upload.gpu);
+
+*/
+
+// @api provide a version that allows multiple dest, source pairs with a single wait, or make it begin-end for now?
+gpu_mem_copy :: proc (gpu: ^Gpu, command_buffer: vk.CommandBuffer, destination: xx, source: pmm) {
+    command_buffer := command_buffer
+    
+    fence := create_fence(gpu.device)
+    defer vk.DestroyFence(gpu.device, fence, nil)
+    
+    // pipeline_barrier_begin()
+    //     add_image_barrier(&texture, {}, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
+    // pipeline_barrier_end(command_buffer)
+    
+    // copy_regions := make([dynamic] vk.BufferImageCopy, context.temp_allocator)
+    // for level in 0..<loaded_texture.mip_levels {
+    //     mip_offset := loaded_texture.mip_offsets[level]
+        
+    //     append(&copy_regions, vk.BufferImageCopy {
+    //         bufferOffset     = auto_cast mip_offset,
+    //         imageSubresource = { aspectMask = { .COLOR }, mipLevel = level, layerCount = 1 },
+    //         imageExtent      = { width = loaded_texture.width >> level, height = loaded_texture.height >> level, depth = 1 },
+    //     })
+    // }
+    
+    // vk.CmdCopyBufferToImage(command_buffer, source_buffer.buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
+    
+    // pipeline_barrier_begin()
+    //     add_image_barrier_transition_from_last(&texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
+    // pipeline_barrier_end(command_buffer)
+    
+    check(vk.EndCommandBuffer(command_buffer))
+    
+    once_submit_info := vk.SubmitInfo {
+        sType = .SUBMIT_INFO,
+        commandBufferCount = 1,
+        pCommandBuffers    = &command_buffer,
+    }
+    
+    check(vk.QueueSubmit(gpu.queue, 1, &once_submit_info, fence))
+    
+    check(vk.WaitForFences(gpu.device, 1, &fence, waitAll = true, timeout = MaxTimeout))
+}
+
+////////////////////////////////////////////////
+// Root arguments
+
+/* 
+
+    // Common header...
+    struct alignas(16) Data
+    {
+        // Uniform data
+        float16x4 color; // 16-bit float vector
+        uint16x2 offset; // 16-bit integer vector
+        const uint8* lut; // pointer to 8-bit data array
+
+        // Pointers to in/out data arrays
+        const uint32* input;
+        uint32* output;
+    };
+
+    // CPU code...
+    gpuSetPipeline(commandBuffer, computePipeline);
+
+    auto data = myBumpAllocator.allocate<Data>(); // Custom bump allocator (wraps gpuMalloc ptr, see appendix)
+    data.cpu->color = {1.0f, 0.0f, 0.0f, 1.0f};
+    data.cpu->offset = {16, 0};
+    data.cpu->lut = luts.gpu + 64; // GPU pointers support pointer math (no need for offset API)
+    data.cpu->input = input.gpu;
+    data.cpu->output = output.gpu;
+
+    gpuDispatch(commandBuffer, data.gpu, uvec3(128, 1, 1));
+
+    // GPU kernel...
+    [groupsize = (64, 1, 1)]
+    void main(uint32x3 threadId : SV_ThreadID, const Data* data)
+    {
+        uint32 value = data->input[threadId.x]; 
+        // TODO: Code using color, offset, lut, etc...
+        data->output[threadId.x] = value;
+    }
+
+*/
+
+// Inputs should be marked as constant array and 
+// the most important fields should be at the start of the struct, as they are preloaded
+// to enable uniformity the data should be always marked as readonly
+// by convention buffers should not alias into each other
+
+the_bound_pipeline: Pipeline
+
+gpu_set_pipeline :: proc (command_buffer: vk.CommandBuffer, pipeline: Pipeline) {
+    vk.CmdBindPipeline(command_buffer, pipeline.bind_point, pipeline.pipeline)
+    the_bound_pipeline = pipeline
+}
+
+// @api make gpu_data type safer
+gpu_dispatch :: proc (command_buffer: vk.CommandBuffer, gpu_data: pmm, group_size: uv3) {
+    assert(the_bound_pipeline.pipeline != 0, "no pipeline was bound")
+    
+    vk.CmdPushConstants(command_buffer, the_bound_pipeline.layout, the_bound_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), gpu_data)
+    
+    vk.CmdDispatch(command_buffer, **group_size)
+}
+
+////////////////////////////////////////////////
+// Texture bindings
+// @todo
+
+/* 
+
+    // App startup: Allocate a texture descriptor heap (for example 65536 descriptors)
+    GpuTextureDescriptor *textureHeap = gpuMalloc<GpuTextureDescriptor>(65536);
+
+    // Load an image using a 3rd party library
+    auto pngImage = pngLoad("cat.png");
+    auto uploadMemory = uploadBumpAllocator.allocate(pngImage.byteSize); // Custom bump allocator (wraps gpuMalloc ptr)
+    pngImage.load(uploadMemory.cpu);
+
+    // Allocate GPU memory for our texture (optimal layout with metadata)
+    GpuTextureDesc textureDesc { .dimensions = pngImage.dimensions, .format = FORMAT_RGBA8_UNORM, .usage = SAMPLED };
+    GpuTextureSizeAlign textureSizeAlign = gpuTextureSizeAlign(textureDesc);
+    void *texturePtr = gpuMalloc(textureSizeAlign.size, textureSizeAlign.align, MEMORY_GPU);
+    GpuTexture texture = gpuCreateTexture(textureDesc, texturePtr);
+
+    // Create a 256-bit texture view descriptor and store it
+    textureHeap[0] = gpuTextureViewDescriptor(texture, { .format = FORMAT_RGBA8_UNORM });
+
+    // Batched upload: begin
+    GpuCommandBuffer uploadCommandBuffer = gpuStartCommandRecording(queue);
+
+    // Copy all textures here!
+    gpuCopyToTexture(uploadCommandBuffer, texturePtr, uploadMemory.gpu, texture);
+    // TODO other textures...
+
+    // Batched upload: end
+    gpuBarrier(uploadCommandBuffer, STAGE_TRANSFER, STAGE_ALL, HAZARD_DESCRIPTORS);
+    gpuSubmit(queue, { uploadCommandBuffer });
+
+    // Later during rendering...
+    gpuSetActiveTextureHeapPtr(commandBuffer, gpuHostToDevicePointer(textureHeap));
+
+*/
+
+// Gpu_Texture_Descriptor
+// Gpu_Texture_Desc
+// Gpu_Texture_View_Descriptor
+
+// gpu_texture_size_align
+// gpu_create_texture
+// gpu_create_texture_view
+
+// gpu_start_command_recording(queue)
+// gpu_set_active_texture_heap_ptr
+
+/* 
+
+    // Common header...
+    struct alignas(16) Data
+    {
+        uint32 srcTextureBase;
+        uint32 dstTexture;
+        float32x2 invDimensions;
+    };
+
+    // GPU kernel...
+    const Texture textureHeap[];
+
+    [groupsize = (8, 8, 1)]
+    void main(uint32x3 threadId : SV_ThreadID, const Data* data)
+    {
+        Texture textureColor = textureHeap[data->srcTextureBase + 0];
+        Texture textureNormal = textureHeap[data->srcTextureBase + 1];
+        Texture texturePBR = textureHeap[data->srcTextureBase + 2];
+
+        Sampler sampler = {.minFilter = LINEAR, .magFilter = LINEAR}; // Embedded sampler (Metal-style)
+
+        float32x2 uv = float32x2(threadId.xy) * data->invDimensions;
+
+        float32x4 color = sample(textureColor, sampler, uv);
+        float32x4 normal = sample(textureNormal, sampler, uv);
+        float32x4 pbr = sample(texturePBR, sampler, uv);
+
+        float32x4 lit = calculateLighting(color, normal, pbr);
+
+        TextureRW dstTexture = TextureRW(textureHeap[data->dstTexture]);
+        dstTexture[threadId.xy] = lit;
+    }
+        
+    [groupsize = (8, 8, 1)]
+    void main(uint32x3 threadId : SV_ThreadID, const Data* data)
+    {
+        // Non-uniform "buffer data" is not an issue with pointer semantics! 
+        Material* material = data->materialMap[threadId.xy];
+
+        // Non-uniform texture heap index
+        uint32 textureBase = NonUniformResourceIndex(material.textureBase);
+
+        Texture textureColor = textureHeap[textureBase + 0];
+        Texture textureNormal = textureHeap[textureBase + 1];
+        Texture texturePBR = textureHeap[textureBase + 2];
+
+        Sampler sampler = {.minFilter = LINEAR, .magFilter = LINEAR};
+
+        float32x2 uv = float32x2(threadId.xy) * data->invDimensions;
+
+        float32x4 color = sample(textureColor, sampler, uv);
+        float32x4 normal = sample(textureNormal, sampler, uv);
+        float32x4 pbr = sample(texturePBR, sampler, uv);
+        
+        color *= material.color;
+        pbr *= material.pbr;
+
+        // Rest of the shader
+    }
+
+*/
+
+////////////////////////////////////////////////
+// Shader pipelines
+
+gpu_create_compute_pipeline :: proc (gpu: ^Gpu, shader: Shader, old: Pipeline_pc($PC)) -> Pipeline_pc(PC) {
+    if pipeline_is_valid(old) {
+        check(vk.DeviceWaitIdle(gpu.device))
+        destroy_pipeline(gpu.device, old)
+    }
+    
+    assert(shader.stage == .COMPUTE)
+    
+    result: Pipeline_pc(PC)
+    result.bind_point    = .COMPUTE
+    result.shader_stages = { .COMPUTE }
+    
+    size := cast(u32) (size_of(vk.DeviceAddress) when intrinsics.type_is_pointer(PC) else size_of(PC))
+    
+    result.layout = create_pipeline_layout(gpu.device, result.shader_stages, size_of_push_constant = size)
+    
+    create_info := vk.ComputePipelineCreateInfo {
+        sType = .COMPUTE_PIPELINE_CREATE_INFO,
+        layout = result.layout,
+        stage  = { 
+            sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
+            stage = { shader.stage }, 
+            pName = "main", 
+            pNext = &vk.ShaderModuleCreateInfo {
+                sType    = .SHADER_MODULE_CREATE_INFO,
+                codeSize = len(shader.bytes),
+                pCode    = cast(^u32) &shader.bytes[0],
+            },
+        },
+    }
+    
+    check(vk.CreateComputePipelines(gpu.device, gpu.pipeline_cache, 1, &create_info, nil, &result.i.pipeline))
+    
+    return result
+}
+
+////////////////////////////////////////////////
+// Shader constants
+
+/* 
+
+// Common header...
+struct alignas(16) Constants
+{
+    int32 qualityLevel;
+    uint8* blueNoiseLUT;
+};
+
+// CPU code...
+Constants constants { .qualityLevel = 2, blueNoiseLUT = blueNoiseLUT.gpu };
+
+auto shaderIR = loadFile("computeShader.ir");
+GpuPipeline computePipeline = gpuCreateComputePipeline(shaderIR, &constants);
+
+// GPU kernel...
+[groupsize = (8, 8, 1)]
+void main(uint32x3 threadId : SV_ThreadID, const Data* data, const Constants constants)
+{
+    if (constants.qualityLevel == 3)
+    {
+        // Dead code eliminated
+    }
+}
+
+*/
+
+////////////////////////////////////////////////
+// Barriers and fences
+
+Hazard_Flag :: enum u32 {
+    // If you write to the texture descriptor heap (uncommon), you need to add a special flag.
+    Descriptors,
+    // @todo(viktor): 
+    
+}
+Hazard_Flags :: bit_set[Hazard_Flag; u32]
+
+// @todo(viktor): check where niagara uses dependency flags and add it
+gpu_barrier :: proc (command_buffer: vk.CommandBuffer, source_stage, destination_stage: vk.PipelineStageFlags2, hazard := Hazard_Flags {}) {
+    // @study vk.DependencyFlags
+    info := vk.DependencyInfo {
+        sType = .DEPENDENCY_INFO,
+        
+        memoryBarrierCount = 1,
+        pMemoryBarriers    = &vk.MemoryBarrier2 {
+            sType = .MEMORY_BARRIER_2,
+            srcStageMask = source_stage,
+            dstStageMask = destination_stage,
+            // srcAccessMask = vk.AccessFlags2., // @todo(viktor): set based on hazards
+            // dstAccessMask: AccessFlags2,
+        },
+    }
+    
+    // @todo(viktor):  is this sufficient?
+    if .COLOR_ATTACHMENT_OUTPUT in destination_stage {
+        info.pMemoryBarriers[0].dstAccessMask += { .COLOR_ATTACHMENT_WRITE, .DEPTH_STENCIL_ATTACHMENT_WRITE }
+    }
+    
+    vk.CmdPipelineBarrier2(command_buffer, &info)
+}
+
+/* 
+
+gpuSignalAfter(commandBuffer, STAGE_RASTER_COLOR_OUT, gpuPtr, counter, SIGNAL_ATOMIC_MAX);
+// Put independent work here
+gpuWaitBefore(commandBuffer, STAGE_PIXEL_SHADER, gpuPtr, counter++, OP_GREATER_EQUAL);
+
+*/
+
+gpu_signal_after :: proc (command_buffer: vk.CommandBuffer, stage: vk.PipelineStageFlags2, gpu_pointer: pmm, count: u64, signal_op: any) {
+    unimplemented()
+}
+gpu_wait_before :: proc (command_buffer: vk.CommandBuffer, stage: vk.PipelineStageFlags2, gpu_pointer: pmm, value: u64, wait_op: any) {
+    unimplemented()
+}
+
+/* 
+
+#define FRAMES_IN_FLIGHT 2
+
+GpuSemaphore frameSemaphore = gpuCreateSemaphore(0);
+uint64 nextFrame = 1;
+
+while (running)
+{
+    if (nextFrame > FRAMES_IN_FLIGHT) 
+    {
+        gpuWaitSemaphore(frameSemaphore, nextFrame - FRAMES_IN_FLIGHT);
+    }
+    
+    // Render the frame here
+
+    gpuSubmit(queue, {commandBuffer}, frameSemaphore, nextFrame++);
+}
+
+gpuDestroySemaphore(frameSemaphore);
+
+*/
+
+MaxTimeout :: max(u64)
+
+gpu_create_semaphore :: proc (gpu: ^Gpu) -> vk.Semaphore {
+    info := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO }
+    
+    result: vk.Semaphore
+    check(vk.CreateSemaphore(gpu.device, &info, nil, &result))
+    
+    return result
+}
+
+gpu_create_timeline_semaphore :: proc (gpu: ^Gpu, initial_value: u64) -> vk.Semaphore {
+    info := vk.SemaphoreCreateInfo { 
+        sType = .SEMAPHORE_CREATE_INFO,
+        pNext = &vk.SemaphoreTypeCreateInfo {
+            sType = .SEMAPHORE_TYPE_CREATE_INFO,
+            semaphoreType = .TIMELINE,
+            initialValue  = initial_value,
+        },
+    }
+    
+    result: vk.Semaphore
+    check(vk.CreateSemaphore(gpu.device, &info, nil, &result))
+    
+    return result
+}
+
+gpu_destroy_semaphore :: proc (gpu: ^Gpu, semaphore: vk.Semaphore) {
+    vk.DestroySemaphore(gpu.device, semaphore, nil)
+}
+
+gpu_wait_semaphore :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, wait_value: u64) {
+    semaphores := [?] vk.Semaphore { semaphore }
+    values     := [?] u64 { wait_value }
+    
+    info := vk.SemaphoreWaitInfo {
+        sType = .SEMAPHORE_WAIT_INFO,
+        semaphoreCount = len(semaphores),
+        pSemaphores    = &semaphores[0],
+        pValues        = &values[0],
+    }
+    
+    wait_result := vk.WaitSemaphores(gpu.device, &info, MaxTimeout)
+    if wait_result == .TIMEOUT {
+        gpu.should_recreate_swapchain = true
+        unimplemented("recreate immediatly and wait again or just return?")
+    }
+    check(wait_result)
+}
+
+gpu_submit :: proc (gpu: ^Gpu, queue: vk.Queue, semaphore: vk.Semaphore, signal_value: u64, command_buffers: ..vk.CommandBuffer) {
+    semaphore_info := vk.SemaphoreSubmitInfo {
+        sType = .SEMAPHORE_SUBMIT_INFO,
+        semaphore = semaphore,
+        value     = signal_value,
+        // @api should this be exposed?
+        stageMask = { .ALL_COMMANDS }
+    }
+    
+    // @todo(viktor): what about the image_aquired semaphores? are they still needed with timeline semaphores?
+    unimplemented()
+}
+
+////////////////////////////////////////////////
+// Command Buffers
+
+// @todo(viktor): queue is ignored, we need to allocate from a pool created with the correct queue_family_index
+gpu_begin_command_recording :: proc (gpu: ^Gpu, frame_index: u32, _: vk.Queue) -> vk.CommandBuffer {
+    info := vk.CommandBufferAllocateInfo {
+        sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+        commandPool        = gpu.command_pools[frame_index],
+        commandBufferCount = 1,
+    }
+    
+    result: vk.CommandBuffer
+    check(vk.AllocateCommandBuffers(gpu.device, &info, &result))
+    
+    begin_info := vk.CommandBufferBeginInfo { 
+        sType = .COMMAND_BUFFER_BEGIN_INFO, 
+        flags = { .ONE_TIME_SUBMIT } 
+    }
+    check(vk.BeginCommandBuffer(result, &begin_info))
     
     return result
 }

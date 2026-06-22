@@ -137,9 +137,10 @@ recreate_swapchain :: proc (gpu: ^Gpu, new_size: uv2) {
         resize(&gpu.render_completes, image_count)
         
         for &it in gpu.render_completes {
-            it = create_semaphore(gpu.device)
+            it = gpu_create_semaphore(gpu)
         }
     }
+    
     images: [dynamic; 64] vk.Image
     assert(image_count <= cap(images))
     resize(&images, image_count)
@@ -227,7 +228,6 @@ add_buffer_barrier_transition_from_last :: proc (buffer: ^Buffer, dst_stage: vk.
     add_buffer_barrier(buffer, last.stage, last.access, dst_stage, dst_access)
 }
 
-// @todo(viktor): check where niagara uses dependency flags and add it
 pipeline_barrier_end :: proc (command_buffer: vk.CommandBuffer, flags := vk.DependencyFlags {}) {
     assert(barrier_state.is_open)
     
@@ -557,18 +557,11 @@ end_rendering :: proc (cb: vk.CommandBuffer) {
 
 ////////////////////////////////////////////////
 
-gpu_begin_the_command_buffer_of_the_current_frame :: proc (gpu: ^Gpu, frame_index: u32) -> vk.CommandBuffer {
-    result := gpu.command_buffers[frame_index]
-    
-    check(vk.ResetCommandBuffer(result, {}))
-    
-    return result
-}
-
 gpu_end_the_command_buffer_and_submit_and_present_the_queue :: proc (gpu: ^Gpu, frame_index: u32, command_buffer: ^vk.CommandBuffer) {
     // we handed out the command buffer and now ask for it to be returned. After this point it has no use, therefore we destroy the users value.
     defer command_buffer^ = nil
     
+    gpu.signal_value += 1
     semaphore_info := [?] vk.SemaphoreSubmitInfo {
         {
             sType = .SEMAPHORE_SUBMIT_INFO,
@@ -800,25 +793,6 @@ gpu_labeled_region_end :: proc (cb: vk.CommandBuffer) {
 }
 
 ////////////////////////////////////////////////
-
-MaxTimeout :: max(u64)
-
-create_semaphore :: proc (device: vk.Device, flags: vk.SemaphoreCreateFlags = {}, timeline_initial_value: Maybe(u64) = nil) -> vk.Semaphore {
-    create_info := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO, flags = flags }
-    
-    if timeline_value, is_timeline := timeline_initial_value.?; is_timeline {
-        create_info.pNext = &vk.SemaphoreTypeCreateInfo {
-            sType = .SEMAPHORE_TYPE_CREATE_INFO,
-            semaphoreType = .TIMELINE,
-            initialValue = timeline_value,
-        }
-    }
-    
-    result: vk.Semaphore
-    check(vk.CreateSemaphore(device, &create_info, nil, &result))
-    
-    return result
-}
 
 create_fence :: proc (device: vk.Device, flags: vk.FenceCreateFlags = {}) -> vk.Fence {
     result: vk.Fence
