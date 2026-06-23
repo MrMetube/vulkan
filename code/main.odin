@@ -419,11 +419,19 @@ main :: proc () {
     quit: bool
     last_time := time.tick_now()
     
-    // @cleanup into a debug struct
-    culling_enabled: bool = true
-    lod_enabled:     bool = true
-    display_pyramid: bool
-    display_pyramid_mip_level: i32 = 0
+    debug: struct {
+        culling_enabled: bool,
+        lod_enabled:     bool,
+        display_pyramid: bool,
+        display_pyramid_mip_level: i32,
+        
+        cpu_time:  f64,
+        gpu_time:  f64,
+        cull_time: f64,
+    } = {
+        culling_enabled = true,
+        lod_enabled     = true,
+    }
     
     // @correctness ensure that this is enough and that we did not overflow inside of a frame and override someone elses data for a shader
     frame_bump_allocators: [MaxFramesInFlight] Bump_Allocator
@@ -431,9 +439,6 @@ main :: proc () {
         bump = bump_allocator_make_temporary(&gpu, 1 * Megabyte)
     }
     
-    cull_delta: f64
-    cpu_time: f64
-    gpu_time: f64
     for !quit {
         free_all(context.temp_allocator)
         
@@ -466,11 +471,11 @@ main :: proc () {
             case .KEY_DOWN:
                 switch event.key.key {
                 case sdl.K_SPACE: space_down = true
-                case sdl.K_C:     culling_enabled = !culling_enabled
-                case sdl.K_L:     lod_enabled     = !lod_enabled
-                case sdl.K_O:     display_pyramid = !display_pyramid
-                case sdl.K_PLUS:  display_pyramid_mip_level = clamp(display_pyramid_mip_level+1, 0, cast(i32) len(stuff.depth_pyramid_mips)-1)
-                case sdl.K_MINUS: display_pyramid_mip_level = clamp(display_pyramid_mip_level-1, 0, cast(i32) len(stuff.depth_pyramid_mips)-1)
+                case sdl.K_C:     debug.culling_enabled = !debug.culling_enabled
+                case sdl.K_L:     debug.lod_enabled     = !debug.lod_enabled
+                case sdl.K_O:     debug.display_pyramid = !debug.display_pyramid
+                case sdl.K_PLUS:  debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level+1, 0, cast(i32) len(stuff.depth_pyramid_mips)-1)
+                case sdl.K_MINUS: debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level-1, 0, cast(i32) len(stuff.depth_pyramid_mips)-1)
                 case sdl.K_P:     print_profile_and_stats = true
                 }
             case .KEY_UP:
@@ -561,7 +566,7 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        gpu_wait_semaphore(&gpu, frame_semaphore, next_frame + 1 - MaxFramesInFlight)
+        gpu_wait_semaphore(&gpu, frame_semaphore, next_frame - MaxFramesInFlight)
         frame_index, restart := get_the_next_frame(&gpu, frame_semaphore)
         if restart { continue }
         
@@ -608,31 +613,6 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        cpu_time = time_smoothed_blend(delta_time_64, cpu_time, delta_time_64)
-        
-        {
-            view :: proc (seconds: f64) -> time.Duration {
-                return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
-            }
-            
-            extra: string
-            if display_pyramid {
-                extra = fmt.tprintf(", displaying depth mip level %v", display_pyramid_mip_level)
-            }
-            title := fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, cull time: %.3v, culling %v, level of detail %v%v",
-                view(cpu_time), 
-                view(gpu_time), 
-                view(cull_delta), 
-                culling_enabled ? "on" : "off",
-                lod_enabled     ? "on" : "off",
-                extra,
-            )
-            // @todo(viktor): how can we record how many triangles we have rendered after culling?
-            sdl.SetWindowTitle(window, title)
-        }
-        
-        ////////////////////////////////////////////////
-        
         check(vk.ResetCommandPool(gpu.device, gpu.command_pools[frame_index], {}))
         // @api expecting the user to pass the frame index is a source for mistakes
         cmd := gpu_begin_command_recording(&gpu, frame_index, gpu.queue)
@@ -665,7 +645,7 @@ main :: proc () {
             draw_distance: f32 = 100
             
             frustum_planes: [6] v4
-            if culling_enabled {
+            if debug.culling_enabled {
                 view_projection := projection * view
                 cam_forward := v3{0, 0, -1}
                 
@@ -695,8 +675,8 @@ main :: proc () {
                 draw_command_buffer = draw_command_buffer,
                 draw_command_count  = draw_command_count_buffer.address,
                 
-                lod_enabled             = cast(b32) lod_enabled,
-                frustum_culling_enabled = cast(b32) culling_enabled,
+                lod_enabled             = cast(b32) debug.lod_enabled,
+                frustum_culling_enabled = cast(b32) debug.culling_enabled,
                 draw_count              = auto_cast len(draws),
                 camera_p                = cam_pos,
             }
@@ -844,7 +824,7 @@ main :: proc () {
         
             pipeline_barrier_begin()
                 add_image_barrier(&gpu.swapchain_images[gpu.image_index], { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
-                if !display_pyramid {
+                if !debug.display_pyramid {
                     add_image_barrier_transition_from_last(&stuff.color_buffer, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
                 } else {
                     add_image_barrier_transition_from_last(&stuff.depth_pyramid, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
@@ -852,7 +832,7 @@ main :: proc () {
             pipeline_barrier_end(cmd)
                 
             destination := gpu.swapchain_images[gpu.image_index]
-            if !display_pyramid {
+            if !debug.display_pyramid {
                 vk.CmdCopyImage(cmd, stuff.color_buffer.image, stuff.color_buffer.last_transition.layout, destination.image, destination.last_transition.layout, 1, &vk.ImageCopy {
                     srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
@@ -861,11 +841,11 @@ main :: proc () {
             } else {
                 source := stuff.depth_pyramid
                 
-                mip_size  := cast(iv2) stuff.depth_pyramid_mips[display_pyramid_mip_level].size
+                mip_size  := cast(iv2) stuff.depth_pyramid_mips[debug.display_pyramid_mip_level].size
                 dest_size := cast(iv2) gpu.swapchain_size
                 
                 vk.CmdBlitImage(cmd, source.image, source.last_transition.layout, destination.image, destination.last_transition.layout, 1, &vk.ImageBlit {
-                    srcSubresource = { aspectMask = { .COLOR }, layerCount = 1, mipLevel = cast(u32) display_pyramid_mip_level },
+                    srcSubresource = { aspectMask = { .COLOR }, layerCount = 1, mipLevel = cast(u32) debug.display_pyramid_mip_level },
                     dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     srcOffsets = { {0, 0, 0}, {mip_size.x, mip_size.y,   1}},
                     dstOffsets = { {0, 0, 0}, {dest_size.x, dest_size.y, 1}},
@@ -890,35 +870,59 @@ main :: proc () {
         gpu_end_the_command_buffer_and_submit_and_present_the_queue(&gpu, frame_semaphore, next_frame, frame_index, &cmd)
         next_frame += 1
         
-        gpu_profile_collate_times(&gpu, gpu.device, print_profile_and_stats)
-        
-        gpu_delta  := gpu_profile_get_zone("frame").total_time_with_children
-        cull_delta  = gpu_profile_get_zone("culling").total_time
-        // this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
-        if gpu_delta >= 0 {
-            gpu_time = time_smoothed_blend(delta_time_64, gpu_time, gpu_delta)
-        }
-        
         ////////////////////////////////////////////////
         
-        if print_profile_and_stats {
-            stats_result: [128] u64
-            size := cast(int) size_of_slice(stats_result[:])
-            query_result := vk.GetQueryPoolResults(gpu.device, stats_pool, 0, 1, size, &stats_result[0], size_of(stats_result[0]), { ._64, .WAIT })
-            check(query_result)
+        {
+            gpu_profile_collate_times(&gpu, gpu.device, print_profile_and_stats)
             
-            fmt.println("------------------------------------\nStats:")
-            bits := [?] vk.QueryPipelineStatisticFlag {
-                .COMPUTE_SHADER_INVOCATIONS,
-                .TASK_SHADER_INVOCATIONS_EXT,
-                .MESH_SHADER_INVOCATIONS_EXT,
-                .FRAGMENT_SHADER_INVOCATIONS,
+            gpu_delta  := gpu_profile_get_zone("frame").total_time_with_children
+            cull_delta := gpu_profile_get_zone("culling").total_time
+            
+            debug.cpu_time  = time_smoothed_blend(delta_time_64, debug.cpu_time, delta_time_64)
+            debug.cull_time = time_smoothed_blend(delta_time_64, debug.cull_time, cull_delta)
+            // this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
+            if gpu_delta >= 0 {
+                debug.gpu_time = time_smoothed_blend(delta_time_64, debug.gpu_time, gpu_delta)
             }
             
-            for bit, index in bits {
-                fmt.printfln("  %v = %v", bit, view_magnitude(stats_result[index]))
+            view :: proc (seconds: f64) -> time.Duration {
+                return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
             }
-            fmt.printfln("-------------------------------------")
+            
+            extra: string
+            if debug.display_pyramid {
+                extra = fmt.tprintf(", displaying depth mip level %v", debug.display_pyramid_mip_level)
+            }
+            title := fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, cull time: %.3v, culling %v, level of detail %v%v",
+                view(debug.cpu_time), 
+                view(debug.gpu_time), 
+                view(debug.cull_time), 
+                debug.culling_enabled ? "on" : "off",
+                debug.lod_enabled     ? "on" : "off",
+                extra,
+            )
+            // @todo(viktor): how can we record how many triangles we have rendered after culling?
+            sdl.SetWindowTitle(window, title)
+            
+            if print_profile_and_stats {
+                stats_result: [128] u64
+                size := cast(int) size_of_slice(stats_result[:])
+                query_result := vk.GetQueryPoolResults(gpu.device, stats_pool, 0, 1, size, &stats_result[0], size_of(stats_result[0]), { ._64, .WAIT })
+                check(query_result)
+                
+                fmt.println("------------------------------------\nStats:")
+                bits := [?] vk.QueryPipelineStatisticFlag {
+                    .COMPUTE_SHADER_INVOCATIONS,
+                    .TASK_SHADER_INVOCATIONS_EXT,
+                    .MESH_SHADER_INVOCATIONS_EXT,
+                    .FRAGMENT_SHADER_INVOCATIONS,
+                }
+                
+                for bit, index in bits {
+                    fmt.printfln("  %v = %v", bit, view_magnitude(stats_result[index]))
+                }
+                fmt.printfln("-------------------------------------")
+            }
         }
     }
     
