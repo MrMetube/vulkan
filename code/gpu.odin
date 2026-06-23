@@ -1,15 +1,16 @@
 #+vet explicit-allocators !unused-procedures
 package main
 
- /////////////////////////////////////////////////////////////////////
-//                                                                  //
-//                                                                  //
-//                       No graphics api                            //
-//                                                                  //
-//              (or as little as possible with Vulkan)              // 
-//                                                                  // 
-// based on: https://www.sebastianaaltonen.com/blog/no-graphics-api //
-/////////////////////////////////////////////////////////////////////
+    //////////////////////////////////////////////////////////////////////
+   //                                                                  //
+   //                                                                  //
+   //                       No graphics api                            //
+   //                                                                  //
+   //              (or as little as possible with Vulkan)              // 
+   //                                                                  // 
+   //                                                                  //
+   // based on: https://www.sebastianaaltonen.com/blog/no-graphics-api //
+  //////////////////////////////////////////////////////////////////////
 
 import "base:runtime"
 
@@ -23,14 +24,6 @@ import sdl "vendor:sdl3"
 MaxFramesInFlight :: 2
 
 Gpu :: struct {
-    // @cleanup
-    image_index: u32, 
-    absolute_frame_index: u32,
-    should_recreate_swapchain: bool,
-    
-    ////////////////////////////////////////////////
-    // stuff that exists only once
-    
     instance:          vk.Instance,
     physical_device:   vk.PhysicalDevice,
     surface:           vk.SurfaceKHR,
@@ -39,6 +32,12 @@ Gpu :: struct {
     
     device: vk.Device,
     
+    // @incomplete this is never initialized. It may help performance if we need to create/recreate many pipelines.
+    pipeline_cache: vk.PipelineCache,
+    
+    // @study as all command buffers are one time submits, do we even need to ensure they are not reused between frames/free at end of the frame
+    // Can this just be a single command pool for per frame command buffers, and if there is a second queue then we need another command pool,
+    // Or do we actually never need to reset it anyways?
     command_pools:            [MaxFramesInFlight] vk.CommandPool,
     image_aquired_semaphores: [MaxFramesInFlight] vk.Semaphore,
     
@@ -46,10 +45,9 @@ Gpu :: struct {
     
     queue: vk.Queue, // this is the graphics and compute queue, we could also create a queue just for transfers/copying
     
-    // @incomplete this is never initialized. It may help performance if we need to create/recreate many pipelines.
-    pipeline_cache: vk.PipelineCache,
-    
+    swapchain_state:  Swapchain_State,
     swapchain_format: vk.Format,
+    image_index: u32, 
     
     ////////////////////////////////////////////////
     // these all have the same lifetime as the swapchain
@@ -59,6 +57,13 @@ Gpu :: struct {
     swapchain: vk.SwapchainKHR,
     swapchain_images: [dynamic] Image, // this is only an image to make use of the last: Transition
     render_completes: [dynamic] vk.Semaphore,
+}
+
+Swapchain_State :: enum { 
+    Dirty,
+    Was_Resized,
+    Ok,
+    Window_Is_Minimized,
 }
 
 ////////////////////////////////////////////////
@@ -202,7 +207,7 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
         
         ////////////////////////////////////////////////
         
-        check(sdl.Vulkan_CreateSurface(window, result.instance, nil, &result.surface))
+        check_sdl(sdl.Vulkan_CreateSurface(window, result.instance, nil, &result.surface))
     }
     
     ////////////////////////////////////////////////
@@ -370,7 +375,8 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
         break get_swapchain_format
     }
     
-    recreate_swapchain(&result, sdl_get_window_size(window))
+    ok := gpu_recreate_swapchain_if_needed(&result)
+    assert(ok)
     
     return result
 }
@@ -379,7 +385,7 @@ gpu_deinit :: proc (gpu: ^Gpu) {
     defer gpu^ = {}
     
     destroy_all_handles(gpu.device)
-    destroy_swapchain(gpu)
+    gpu_destroy_swapchain(gpu)
     
     vk.DestroyDevice(gpu.device, nil)
     
@@ -987,7 +993,7 @@ destroy_pipeline :: proc (gpu: ^Gpu, pipeline: Pipeline) {
 // GpuQueue gpuCreateQueue(/* DEVICE & QUEUE CREATION DETAILS OMITTED */);
 
 // @todo(viktor): queue is ignored, we need to allocate from a pool created with the correct queue_family_index
-gpu_begin_command_recording :: proc (gpu: ^Gpu, frame_index: u32, _: vk.Queue) -> vk.CommandBuffer {
+gpu_begin_command_recording :: proc (gpu: ^Gpu, frame_index: u64, _: vk.Queue) -> vk.CommandBuffer {
     info := vk.CommandBufferAllocateInfo {
         sType = .COMMAND_BUFFER_ALLOCATE_INFO,
         commandPool        = gpu.command_pools[frame_index],
@@ -1041,6 +1047,8 @@ gpu_submit :: proc (queue: vk.Queue, semaphore: vk.Semaphore, signal_value: u64,
 ////////////////////////////////////////////////
 // Semaphores
 
+MaxTimeout :: max(u64)
+
 gpu_create_semaphore :: proc (gpu: ^Gpu) -> vk.Semaphore {
     info := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO }
     
@@ -1066,7 +1074,7 @@ gpu_create_timeline_semaphore :: proc (gpu: ^Gpu, initial_value: u64) -> vk.Sema
     return result
 }
 
-gpu_wait_semaphore :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, wait_value: u64, timeout := MaxTimeout) {
+gpu_wait_semaphore :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, wait_value: u64, timeout := MaxTimeout) -> (timed_out: bool) {
     semaphores := [?] vk.Semaphore { semaphore }
     values     := [?] u64 { wait_value }
     
@@ -1079,10 +1087,11 @@ gpu_wait_semaphore :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, wait_value: u64,
     
     wait_result := vk.WaitSemaphores(gpu.device, &info, timeout)
     if wait_result == .TIMEOUT {
-        gpu.should_recreate_swapchain = true
-        unimplemented("recreate immediatly and wait again or just return?")
+        timed_out = true
     }
     check(wait_result)
+    
+    return timed_out
 }
 
 gpu_destroy_semaphore :: proc (gpu: ^Gpu, semaphore: vk.Semaphore) {
@@ -1141,8 +1150,6 @@ gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: pm
 
 // @todo
 // void gpuSetActiveTextureHeapPtr(GpuCommandBuffer cb, void *ptrGpu);
-
-MaxTimeout :: max(u64)
 
 // @todo(viktor): check where niagara uses dependency flags and add it
 gpu_barrier :: proc (command_buffer: vk.CommandBuffer, before, after: vk.PipelineStageFlags2, hazard := Hazard_Flags {}) {

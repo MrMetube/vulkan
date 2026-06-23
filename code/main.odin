@@ -14,6 +14,7 @@ import vk  "vendor:vulkan"
 
 Optimized :: ODIN_OPTIMIZATION_MODE == .Speed
 
+// @todo(viktor): make this runtime changeable
 VSync :: true when !Optimized else false
 
 ////////////////////////////////////////////////
@@ -141,11 +142,11 @@ Vertex :: struct {
 main :: proc () {
     defer sdl.Quit()
     
-    check(sdl.InitSubSystem({ .VIDEO }))
+    check_sdl(sdl.InitSubSystem({ .VIDEO }))
     defer sdl.QuitSubSystem({ .VIDEO })
     
     window := sdl.CreateWindow("How to Vulkan", 1280, 720, sdl.WINDOW_VULKAN | sdl.WINDOW_RESIZABLE)
-    check(window != nil)
+    check_sdl(window != nil)
     defer sdl.DestroyWindow(window)
     
     ////////////////////////////////////////////////
@@ -399,6 +400,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
+    absolute_frame_index: u64
     next_frame: u64 = MaxFramesInFlight+1
     frame_semaphore := gpu_create_timeline_semaphore(&gpu, MaxFramesInFlight)
     defer_destroy(vk.DestroySemaphore, frame_semaphore)
@@ -485,9 +487,6 @@ main :: proc () {
                 
             case .MOUSE_WHEEL:
                 mouse_wheel_delta = event.wheel.y
-                
-            case .WINDOW_RESIZED:
-                gpu.should_recreate_swapchain = true
             }
         }
         
@@ -518,18 +517,31 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        // @todo(viktor): if the window is minimized we can never get it back up and visible
-        if gpu.should_recreate_swapchain {
-            gpu.should_recreate_swapchain = false
-            
-            vk.DeviceWaitIdle(gpu.device)
-            recreate_swapchain(&gpu, sdl_get_window_size(window))
+        gpu_wait_semaphore(&gpu, frame_semaphore, next_frame - MaxFramesInFlight)
+        
+        frame_index := absolute_frame_index % MaxFramesInFlight
+        absolute_frame_index += 1
+        
+        if gpu_recreate_swapchain_if_needed(&gpu) {
+            ok := get_next_image(&gpu, frame_semaphore, frame_index)
+            assert(ok)
+        }
+        
+        if gpu.swapchain_state == .Was_Resized {
+            gpu.swapchain_state = .Ok
             recreate_stuff(&gpu, &stuff)
         }
         
+        assert(gpu.swapchain_state != .Dirty)
+        
+        if gpu.swapchain_state == .Window_Is_Minimized { continue }
+        
+        bump := &frame_bump_allocators[frame_index]
+        
+        ////////////////////////////////////////////////
+        
         watchers_check_for_modification(watchers)
         
-        // @api should this be begin pipeline, which just always takes in the dependencies and does a reload and recreate itself?
         if reload_shaders_if_needed(watchers, shader_allocator, &draw_cull_shader) || !pipeline_is_valid(cull_pipeline) {
             destroy_pipeline(&gpu, cull_pipeline)
             
@@ -563,14 +575,6 @@ main :: proc () {
             destroy_pipeline(&gpu, meshlet_pipeline)
             meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, task, mesh, frag, raster_description, textures_descriptor_set_layout)
         }
-        
-        ////////////////////////////////////////////////
-        
-        gpu_wait_semaphore(&gpu, frame_semaphore, next_frame - MaxFramesInFlight)
-        frame_index, restart := get_the_next_frame(&gpu, frame_semaphore)
-        if restart { continue }
-        
-        bump := &frame_bump_allocators[frame_index]
         
         ////////////////////////////////////////////////
         
@@ -867,7 +871,8 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         // @cleanup dont pass the frameindex, this is a place that could cause mistakes
-        gpu_end_the_command_buffer_and_submit_and_present_the_queue(&gpu, frame_semaphore, next_frame, frame_index, &cmd)
+        end_of_frame_submit(&gpu, frame_semaphore, next_frame, frame_index, &cmd)
+        present_the_queue(&gpu)
         next_frame += 1
         
         ////////////////////////////////////////////////
@@ -958,10 +963,7 @@ main :: proc () {
 
 ////////////////////////////////////////////////
 
-get_the_next_frame :: proc (gpu: ^Gpu, semaphore: vk.Semaphore) -> (frame_index: u32, should_restart_frame: bool) {
-    frame_index = gpu.absolute_frame_index % MaxFramesInFlight
-    gpu.absolute_frame_index += 1
-    
+get_next_image :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, frame_index: u64) -> bool {
     info := vk.AcquireNextImageInfoKHR {
         sType = .ACQUIRE_NEXT_IMAGE_INFO_KHR,
         
@@ -973,12 +975,11 @@ get_the_next_frame :: proc (gpu: ^Gpu, semaphore: vk.Semaphore) -> (frame_index:
     
     result := vk.AcquireNextImage2KHR(gpu.device, &info, &gpu.image_index)
     if result == .ERROR_OUT_OF_DATE_KHR || result == .SUBOPTIMAL_KHR {
-        gpu.should_recreate_swapchain = true
-        return 0, true
+        return false
     }
     check(result)
     
-    return frame_index, false
+    return true
 }
 
 render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, color_buffer, depth_buffer: Image, clear_color: v4, early: bool) {
@@ -1042,21 +1043,13 @@ delete_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swa
 
 ////////////////////////////////////////////////
 
-sdl_get_window_size :: proc (window: ^sdl.Window) -> uv2 {
-    result: iv2
-    sdl.GetWindowSize(window, &result.x, &result.y)
-    return cast(uv2) result
-}
-
-////////////////////////////////////////////////
-
-check :: proc { check_vulkan, check_sdl, check_ktx }
-check_vulkan :: proc (result: vk.Result, loc := #caller_location) {
+check :: proc (result: vk.Result, loc := #caller_location) {
     if result != .SUCCESS {
         fmt.printf("%v:%v:%v: Vulkan call returned %v", loc.file_path, loc.line, loc.column, result)
         intrinsics.debug_trap()
     }
 }
+
 check_sdl :: proc (result: bool, loc := #caller_location) {
     if !result {
         fmt.printf("%v:%v:%v: SDL call returned %v", loc.file_path, loc.line, loc.column, sdl.GetError())

@@ -25,7 +25,7 @@ load_ktx_texture :: proc (filename: string, allocator: Allocator) -> Loaded_Text
     data, err := os.read_entire_file(filename, allocator); assert(err == nil)
     
     texture: ^ktx.Texture
-    check(ktx.Texture_CreateFromMemory(&data[0], len(data), { .LOAD_IMAGE_DATA }, &texture))
+    check_ktx(ktx.Texture_CreateFromMemory(&data[0], len(data), { .LOAD_IMAGE_DATA }, &texture))
     defer ktx.Texture1_Destroy(cast(^ktx.Texture1) texture)
     
     result: Loaded_Texture

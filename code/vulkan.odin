@@ -1,11 +1,6 @@
 #+vet explicit-allocators
 package main
 
-import "base:intrinsics"
-import "base:runtime"
-
-_ :: runtime
-
 import "core:fmt"
 import "core:time"
 
@@ -89,7 +84,11 @@ destroy_all_handles :: proc (device: vk.Device) {
 
 ////////////////////////////////////////////////
 
-recreate_swapchain :: proc (gpu: ^Gpu, new_size: uv2) {
+gpu_recreate_swapchain_if_needed :: proc (gpu: ^Gpu) -> (can_render: bool) {
+    if gpu.swapchain_state != .Dirty && gpu.swapchain_state != .Window_Is_Minimized {
+        return true
+    }
+    
     vk.DeviceWaitIdle(gpu.device)
     
     surface_capabilities: vk.SurfaceCapabilitiesKHR
@@ -97,11 +96,9 @@ recreate_swapchain :: proc (gpu: ^Gpu, new_size: uv2) {
     
     // :Linux: Wayland had a special value for surface_capabilities.currentExtent.width
     swapchain_extent := surface_capabilities.currentExtent
-    if swapchain_extent.width == 0 && swapchain_extent.height == 0 {
-        if gpu.swapchain == 0 {
-            assert(false, "Welp :(")
-        }
-        return
+    if swapchain_extent.width == 0 || swapchain_extent.height == 0 {
+        gpu.swapchain_state = .Window_Is_Minimized
+        return false
     }
     
     old_swapchain := gpu.swapchain
@@ -120,8 +117,7 @@ recreate_swapchain :: proc (gpu: ^Gpu, new_size: uv2) {
         
         oldSwapchain = old_swapchain,
     }
-    assert(swapchain_extent == vk.Extent2D{ **new_size })
-    gpu.swapchain_size = new_size
+    gpu.swapchain_size = { swapchain_extent.width, swapchain_extent.height }
     
     previous_image_count := cast(u32) len(gpu.swapchain_images)
     
@@ -131,7 +127,16 @@ recreate_swapchain :: proc (gpu: ^Gpu, new_size: uv2) {
     check(vk.GetSwapchainImagesKHR(gpu.device, gpu.swapchain, &image_count, nil))
     
     if old_swapchain != 0 {
-        destroy_swapchain(gpu, old_swapchain, image_count_did_change = previous_image_count != image_count)
+        // @copypasta a bit redundant with destroy_swapchain, but combining both leads to a mess
+        if previous_image_count != image_count {
+            for &it in gpu.render_completes {
+                vk.DestroySemaphore(gpu.device, it, nil)
+            }
+            clear(&gpu.render_completes)
+            clear(&gpu.swapchain_images) // The swapchain's images are allocated for us, so we can just drop the handles.
+        }
+        
+        vk.DestroySwapchainKHR(gpu.device, old_swapchain, nil)
     }
     
     if previous_image_count != image_count {
@@ -149,21 +154,19 @@ recreate_swapchain :: proc (gpu: ^Gpu, new_size: uv2) {
     check(vk.GetSwapchainImagesKHR(gpu.device, gpu.swapchain, &image_count, &images[0]))
     for image, index in images {
         gpu.swapchain_images[index].image = image
-    
     }
+    
+    gpu.swapchain_state = .Was_Resized
+    return true
 }
 
-// @cleanup this isnt a good design
-destroy_swapchain :: proc (gpu: ^Gpu, old_swapchain: vk.SwapchainKHR = 0, image_count_did_change := true) { 
-    if image_count_did_change {
-        for &it in gpu.render_completes {
-            vk.DestroySemaphore(gpu.device, it, nil)
-        }
-        clear(&gpu.render_completes)
-        clear(&gpu.swapchain_images) // The swapchain's images are allocated for us, so we can just drop the handles.
+gpu_destroy_swapchain :: proc (gpu: ^Gpu) { 
+    for &it in gpu.render_completes {
+        vk.DestroySemaphore(gpu.device, it, nil)
     }
-    
-    vk.DestroySwapchainKHR(gpu.device, old_swapchain != 0 ? old_swapchain : gpu.swapchain, nil)
+    clear(&gpu.render_completes)
+    clear(&gpu.swapchain_images) // The swapchain's images are allocated for us, so we can just drop the handles.
+    vk.DestroySwapchainKHR(gpu.device, gpu.swapchain, nil)
 }
 
 ////////////////////////////////////////////////
@@ -334,7 +337,7 @@ create_update_template :: proc (device: vk.Device, bind_point: vk. PipelineBindP
 
 ////////////////////////////////////////////////
 
-gpu_end_the_command_buffer_and_submit_and_present_the_queue :: proc (gpu: ^Gpu, timeline_semaphore: vk.Semaphore, signal_value: u64, frame_index: u32, command_buffer: ^vk.CommandBuffer) {
+end_of_frame_submit :: proc (gpu: ^Gpu, timeline_semaphore: vk.Semaphore, signal_value: u64, frame_index: u64, command_buffer: ^vk.CommandBuffer) {
     // we handed out the command buffer and now ask for it to be returned. After this point it has no use, therefore we destroy the users value.
     defer command_buffer^ = nil
     
@@ -369,8 +372,11 @@ gpu_end_the_command_buffer_and_submit_and_present_the_queue :: proc (gpu: ^Gpu, 
         signalSemaphoreInfoCount = len(semaphore_info),
         pSignalSemaphoreInfos    = raw_data(&semaphore_info),
     }
-    vk.QueueSubmit2(gpu.queue, 1, &submit_info, 0)
     
+    check(vk.QueueSubmit2(gpu.queue, 1, &submit_info, 0))
+}
+
+present_the_queue :: proc (gpu: ^Gpu) {
     present_info := vk.PresentInfoKHR {
         sType = .PRESENT_INFO_KHR,
         waitSemaphoreCount = 1,
@@ -380,11 +386,11 @@ gpu_end_the_command_buffer_and_submit_and_present_the_queue :: proc (gpu: ^Gpu, 
         pImageIndices      = &gpu.image_index,
     }
     
-    present_result := vk.QueuePresentKHR(gpu.queue, &present_info)
-    if present_result == .ERROR_OUT_OF_DATE_KHR {
-        gpu.should_recreate_swapchain = true
+    result := vk.QueuePresentKHR(gpu.queue, &present_info)
+    if result == .ERROR_OUT_OF_DATE_KHR {
+        gpu.swapchain_state = .Dirty
     } else {
-        check(present_result)
+        check(result)
     }
 }
 
