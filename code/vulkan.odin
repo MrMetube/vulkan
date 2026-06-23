@@ -52,8 +52,6 @@ Buffer :: struct {
     buffer:  vk.Buffer,
     memory:  vk.DeviceMemory,
     address: vk.DeviceAddress,
-    
-    last_transition: Transition,
 }
 
 Transition :: struct {
@@ -175,7 +173,6 @@ gpu_destroy_swapchain :: proc (gpu: ^Gpu) {
 barrier_state: struct {
     is_open:  bool,
     image_barriers:  [dynamic] vk.ImageMemoryBarrier2,
-    buffer_barriers: [dynamic] vk.BufferMemoryBarrier2,
 }
 
 pipeline_barrier_begin :: proc () {
@@ -200,30 +197,9 @@ add_image_barrier :: proc (image: ^Image, src_stage: vk.PipelineStageFlags2, src
     image.last_transition = { dst_stage, dst_access, new_layout }
 }
 
-add_buffer_barrier :: proc (buffer: ^Buffer, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2) {
-    assert(barrier_state.is_open)
-    
-    append(&barrier_state.buffer_barriers, vk.BufferMemoryBarrier2 {
-        sType = .BUFFER_MEMORY_BARRIER_2,
-        srcAccessMask = src_access,
-        dstAccessMask = dst_access,
-        srcStageMask  = src_stage,
-        dstStageMask  = dst_stage,
-        buffer = buffer.buffer,
-        size   = auto_cast vk.WHOLE_SIZE,
-    })
-    
-    buffer.last_transition = { stage = dst_stage, access = dst_access }
-}
-
 add_image_barrier_transition_from_last :: proc (image: ^Image, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
     last := image.last_transition
     add_image_barrier(image, last.stage, last.access, last.layout, dst_stage, dst_access, new_layout, aspect_mask)
-}
-
-add_buffer_barrier_transition_from_last :: proc (buffer: ^Buffer, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2) {
-    last := buffer.last_transition
-    add_buffer_barrier(buffer, last.stage, last.access, dst_stage, dst_access)
 }
 
 pipeline_barrier_end :: proc (command_buffer: vk.CommandBuffer, flags := vk.DependencyFlags {}) {
@@ -234,12 +210,9 @@ pipeline_barrier_end :: proc (command_buffer: vk.CommandBuffer, flags := vk.Depe
         dependencyFlags          = flags, 
         imageMemoryBarrierCount  = auto_cast len(barrier_state.image_barriers),
         pImageMemoryBarriers     = raw_data(barrier_state.image_barriers),
-        bufferMemoryBarrierCount = auto_cast len(barrier_state.buffer_barriers),
-        pBufferMemoryBarriers    = raw_data(barrier_state.buffer_barriers),
     })
     
     clear(&barrier_state.image_barriers)
-    clear(&barrier_state.buffer_barriers)
     barrier_state.is_open = false
 }
 
@@ -337,7 +310,7 @@ create_update_template :: proc (device: vk.Device, bind_point: vk. PipelineBindP
 
 ////////////////////////////////////////////////
 
-end_of_frame_submit :: proc (gpu: ^Gpu, timeline_semaphore: vk.Semaphore, signal_value: u64, frame_index: u64, command_buffer: ^vk.CommandBuffer) {
+end_of_frame_submit :: proc (gpu: ^Gpu, queue: vk.Queue, timeline_semaphore: vk.Semaphore, signal_value: u64, frame_index: u64, command_buffer: ^vk.CommandBuffer) {
     // we handed out the command buffer and now ask for it to be returned. After this point it has no use, therefore we destroy the users value.
     defer command_buffer^ = nil
     
@@ -373,10 +346,10 @@ end_of_frame_submit :: proc (gpu: ^Gpu, timeline_semaphore: vk.Semaphore, signal
         pSignalSemaphoreInfos    = raw_data(&semaphore_info),
     }
     
-    check(vk.QueueSubmit2(gpu.queue, 1, &submit_info, 0))
+    check(vk.QueueSubmit2(queue, 1, &submit_info, 0))
 }
 
-present_the_queue :: proc (gpu: ^Gpu) {
+present_the_queue :: proc (gpu: ^Gpu, queue: vk.Queue) {
     present_info := vk.PresentInfoKHR {
         sType = .PRESENT_INFO_KHR,
         waitSemaphoreCount = 1,
@@ -386,7 +359,7 @@ present_the_queue :: proc (gpu: ^Gpu) {
         pImageIndices      = &gpu.image_index,
     }
     
-    result := vk.QueuePresentKHR(gpu.queue, &present_info)
+    result := vk.QueuePresentKHR(queue, &present_info)
     if result == .ERROR_OUT_OF_DATE_KHR {
         gpu.swapchain_state = .Dirty
     } else {

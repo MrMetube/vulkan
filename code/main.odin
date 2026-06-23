@@ -173,13 +173,9 @@ main :: proc () {
     db_view,   draw_buffer          := gpu_allocate(&gpu, [] Draw,      256 * Megabyte / size_of(Draw),    memory = memory)
     mb_view,   mesh_buffer          := gpu_allocate(&gpu, [] Mesh,      256 * Megabyte / size_of(Mesh),    memory = memory)
     dcb_view,  draw_command_buffer  := gpu_allocate(&gpu, [] Draw_Command, 256 * Megabyte / size_of(Draw_Command), memory = memory, usage = vk.BufferUsageFlags {  .STORAGE_BUFFER, .INDIRECT_BUFFER })
-    dccb_view, draw_command_count_buffer := gpu_allocate_type(&gpu, u32, memory = memory, usage = { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
+    dccb_view, draw_command_count := gpu_allocate_type(&gpu, u32, memory = memory, usage = { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
     
     unused(dcb_view)
-    
-    // @cleanup a Cmd needs these buffers, we should wrap with gpu_xx
-    draw_command_buffer_buffer       := the_allocations[draw_command_buffer].buffer
-    draw_command_count_buffer_buffer := the_allocations[draw_command_count_buffer.address].buffer
     
     geometry: Geometry
     {
@@ -232,6 +228,16 @@ main :: proc () {
     texture_descriptors: [len(textures)] vk.DescriptorImageInfo
     
     {
+        upload_bump := bump_allocator_make_temporary(&gpu, 256 * Megabyte, usage = { .TRANSFER_SRC })
+        defer bump_allocator_delete(&gpu, &upload_bump)
+        
+        cmd := gpu_begin_command_recording(&gpu, gpu.transfer_command_pool, gpu.transfer_queue)
+        upload_semaphore := gpu_create_timeline_semaphore(&gpu, 0)
+        defer gpu_destroy_semaphore(&gpu, upload_semaphore)
+        
+        default_sampler := create_sampler(&gpu, .LINEAR, .LINEAR, anisotropy = true)
+        defer_destroy(vk.DestroySampler, default_sampler)
+        
         // @cleanup to do the copy into gpu memory ourselves, we need the tiling to be .LINEAR and not .OPTIMAL, 
         // but in that case we cannot specify any mip_levels. :(
         for &texture, index in textures {
@@ -239,56 +245,41 @@ main :: proc () {
             
             loaded_texture := load_ktx_texture(filename, context.temp_allocator)
             
-            texture = gpu_make_image(&gpu, {loaded_texture.width, loaded_texture.height}, loaded_texture.format, { .TRANSFER_DST, .SAMPLED }, { .COLOR }, mip_levels = loaded_texture.mip_levels)
+            // @todo make a default with mip_count = 1 and so on
+            description: Image_Desc
+            description.size = { loaded_texture.width, loaded_texture.height }
+            description.format = loaded_texture.format
+            description.mip_count = 1
             
-            source_buffer_data, source_buffer := gpu_allocate_slice(&gpu, [] u8, len(loaded_texture.data), usage = { .TRANSFER_SRC })
-            source_buffer_buffer := the_allocations[source_buffer].buffer
-            defer gpu_free(&gpu, source_buffer)
+            texture      = gpu_allocate_image(&gpu, description, { .TRANSFER_DST, .SAMPLED })
+            texture.view = gpu_create_image_view(&gpu, texture, 0, description.mip_count, { .COLOR })
             
-            // @waste just load directly into this buffer
-            copy(source_buffer_data, loaded_texture.data)
             
-            ////////////////////////////////////////////////
+            texture_descriptors[index] = gpu_texture_descriptor(texture.view, .READ_ONLY_OPTIMAL, default_sampler)
             
-            cmd := gpu_begin_command_recording(&gpu, 0, gpu.queue)
-            
-            // @todo(viktor): could we just have one semaphore and wait after the loop?
-            upload_semaphore := gpu_create_timeline_semaphore(&gpu, 0)
-            defer gpu_destroy_semaphore(&gpu, upload_semaphore)
+            // @waste we should have loaded all data into here if possible
+            cpu_data, gpu_data := bump_allocate(&upload_bump, cast(u32) len(loaded_texture.data), alignment = 32)
+            copy(cpu_data, loaded_texture.data)
             
             pipeline_barrier_begin()
                 add_image_barrier(&texture, {}, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
             pipeline_barrier_end(cmd)
             
-            copy_regions := make([dynamic] vk.BufferImageCopy, context.temp_allocator)
-            for level in 0..<loaded_texture.mip_levels {
-                mip_offset := loaded_texture.mip_offsets[level]
-                
-                append(&copy_regions, vk.BufferImageCopy {
-                    bufferOffset     = auto_cast mip_offset,
-                    imageSubresource = { aspectMask = { .COLOR }, mipLevel = level, layerCount = 1 },
-                    imageExtent      = { width = loaded_texture.width >> level, height = loaded_texture.height >> level, depth = 1 },
-                })
-            }
-            
-            vk.CmdCopyBufferToImage(cmd, source_buffer_buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
+            gpu_copy_to_texture(&gpu, cmd, texture, gpu_data, description.size)
             
             pipeline_barrier_begin()
                 add_image_barrier_transition_from_last(&texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
             pipeline_barrier_end(cmd)
-            
-            gpu_submit(gpu.queue, upload_semaphore, 1, cmd)
-            gpu_wait_semaphore(&gpu, upload_semaphore, 1)
-            
-            sampler := create_sampler(gpu.device, .LINEAR, .LINEAR, cast(f32) loaded_texture.mip_levels, true)
-            defer_destroy(vk.DestroySampler, sampler)
-            
-            texture_descriptors[index] = vk.DescriptorImageInfo{ 
-                sampler     = sampler, 
-                imageView   = texture.view, 
-                imageLayout = texture.last_transition.layout,
-            }
         }
+            
+        gpu_barrier(cmd, { .TRANSFER }, { .ALL_COMMANDS }, { .descriptors })
+        
+        gpu_submit(gpu.transfer_queue, upload_semaphore, 1, cmd)
+        gpu_wait_semaphore(&gpu, upload_semaphore, 1)
+        
+        // @incomplete
+        // // Later during rendering...
+        // gpuSetActiveTextureHeapPtr(commandBuffer, gpuHostToDevicePointer(textureHeap));
     }
     
     ////////////////////////////////////////////////
@@ -619,7 +610,7 @@ main :: proc () {
         
         check(vk.ResetCommandPool(gpu.device, gpu.command_pools[frame_index], {}))
         // @api expecting the user to pass the frame index is a source for mistakes
-        cmd := gpu_begin_command_recording(&gpu, frame_index, gpu.queue)
+        cmd := gpu_begin_command_recording(&gpu, gpu.command_pools[frame_index], gpu.general_queue)
         
         gpu_profile_frame_begin(gpu.device, cmd)
         
@@ -633,7 +624,10 @@ main :: proc () {
             
             ////////////////////////////////////////////////
             
-            vk.CmdFillBuffer(cmd, draw_command_count_buffer_buffer, 0, size_of(dccb_view^), 0)
+            {
+                count_buffer := gpu_reflect_get_buffer(draw_command_count.address).buffer
+                vk.CmdFillBuffer(cmd, count_buffer, 0, size_of(dccb_view^), 0)
+            }
             
             ////////////////////////////////////////////////
             
@@ -677,7 +671,7 @@ main :: proc () {
                 draw_buffer         = draw_buffer,
                 mesh_buffer         = mesh_buffer,
                 draw_command_buffer = draw_command_buffer,
-                draw_command_count  = draw_command_count_buffer.address,
+                draw_command_count  = draw_command_count.address,
                 
                 lod_enabled             = cast(b32) debug.lod_enabled,
                 frustum_culling_enabled = cast(b32) debug.culling_enabled,
@@ -748,7 +742,7 @@ main :: proc () {
                 
                 // @api it would be way nicer to be able to combine the address of a buffer with the offset directly, removing two arguments.
                 // But I dont know how to then get back to the buffer and offset for vulkans api. :(
-                gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer_buffer, draw_command_count_buffer_buffer, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command), 0)
+                gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer, draw_command_count.address, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command), 0)
             
             gpu_profile_zone_end()
             gpu_labeled_region_end(cmd)
@@ -871,8 +865,8 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         // @cleanup dont pass the frameindex, this is a place that could cause mistakes
-        end_of_frame_submit(&gpu, frame_semaphore, next_frame, frame_index, &cmd)
-        present_the_queue(&gpu)
+        end_of_frame_submit(&gpu, gpu.general_queue, frame_semaphore, next_frame, frame_index, &cmd)
+        present_the_queue(&gpu, gpu.general_queue)
         next_frame += 1
         
         ////////////////////////////////////////////////
@@ -942,7 +936,7 @@ main :: proc () {
     gpu_free(&gpu, mesh_buffer)
     gpu_free(&gpu, draw_buffer)
     gpu_free(&gpu, draw_command_buffer)
-    gpu_free(&gpu, draw_command_count_buffer)
+    gpu_free(&gpu, draw_command_count)
     
     for &bump in frame_bump_allocators {
         bump_allocator_delete(&gpu, &bump)
@@ -953,7 +947,8 @@ main :: proc () {
     destroy_pipeline(&gpu, depth_pipeline)
     
     for texture in textures {
-        gpu_delete(&gpu, texture)
+        gpu_destroy_texture_view(&gpu, texture.view)
+        gpu_free_image(&gpu, texture)
     }
     
     delete_stuff(&gpu, &stuff, final = true)
@@ -1000,7 +995,7 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_S
     delete_stuff(gpu, stuff)
     
     if stuff.depth_sampler == 0 {
-        stuff.depth_sampler = create_sampler(gpu.device, .NEAREST, .NEAREST)
+        stuff.depth_sampler = create_sampler(gpu, .NEAREST, .NEAREST)
     }
     
     // Ensures that all reductions are at most 2x2 which makes sure they are conservative.
@@ -1008,35 +1003,40 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_S
     // Each mip level is a quarter of the size of the previous, as we half both dimensions each time.
     mip_count := 1 + max(integer_log2(pyramid_size.x), integer_log2(pyramid_size.y))
     
-    // @waste this makes an image view over all mips, which we never use. its creation could be skipped. the aspect mask parameter is only relevant when in image view is requested.
-    stuff.depth_pyramid = gpu_make_image(gpu, pyramid_size, .R32_SFLOAT, { .SAMPLED, .STORAGE, .TRANSFER_SRC }, { .COLOR }, mip_levels = mip_count)
+    
+    stuff.depth_pyramid = gpu_allocate_image(gpu, {pyramid_size, .R32_SFLOAT, mip_count}, { .SAMPLED, .STORAGE, .TRANSFER_SRC })
+    // :Stencil: add the .STENCIL mask bit
+    stuff.depth_buffer = gpu_allocate_image(gpu, {gpu.swapchain_size, stuff.depth_buffer.format, 1}, { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED })
+    stuff.color_buffer = gpu_allocate_image(gpu, {gpu.swapchain_size, gpu.swapchain_format, 1}, { .COLOR_ATTACHMENT, .TRANSFER_SRC })
     
     for i in 0..<mip_count {
         mip := append_into(&stuff.depth_pyramid_mips)
-        mip.view = create_image_view(gpu.device, stuff.depth_pyramid, i, 1, { .COLOR })
+        mip.view = gpu_create_image_view(gpu, stuff.depth_pyramid, i, 1, { .COLOR })
         mip.size = pyramid_size
         mip.size.x >>= i
         mip.size.y >>= i
         mip.size = vec_max(mip.size, 1)
     }
-        
-    // :Stencil: add the .STENCIL mask bit
-    stuff.depth_buffer = gpu_make_image(gpu, gpu.swapchain_size, stuff.depth_buffer.format, { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED }, { .DEPTH })
-    stuff.color_buffer = gpu_make_image(gpu, gpu.swapchain_size, gpu.swapchain_format,      { .COLOR_ATTACHMENT, .TRANSFER_SRC },    { .COLOR })
+    
+    stuff.depth_buffer.view = gpu_create_image_view(gpu, stuff.depth_buffer, 0, 1, { .DEPTH })
+    stuff.color_buffer.view = gpu_create_image_view(gpu, stuff.color_buffer, 0, 1, { .COLOR })
 }
 
 delete_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain, final := false) {
-    gpu_delete(gpu, stuff.depth_pyramid)
+    gpu_free_image(gpu, stuff.depth_pyramid)
     
-    gpu_delete(gpu, stuff.depth_buffer)
-    gpu_delete(gpu, stuff.color_buffer)
+    gpu_free_image(gpu, stuff.depth_buffer)
+    gpu_free_image(gpu, stuff.color_buffer)
+    gpu_destroy_texture_view(gpu, stuff.depth_buffer.view)
+    gpu_destroy_texture_view(gpu, stuff.color_buffer.view)
     
     for &it in stuff.depth_pyramid_mips {
-        vk.DestroyImageView(gpu.device, it.view, nil)
+        gpu_destroy_texture_view(gpu, it.view)
     }
     clear(&stuff.depth_pyramid_mips)
     
     if final {
+        // @todo(viktor): make gpu_destroy_sampler
         vk.DestroySampler(gpu.device, stuff.depth_sampler, nil)
     }
 }

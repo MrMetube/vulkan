@@ -20,6 +20,7 @@ import vk  "vendor:vulkan"
 import sdl "vendor:sdl3"
 
 // @todo import the cpu profiler and extract the common parts with the gpu profiler,
+// @todo make a list of the api like c forward declarations
 
 MaxFramesInFlight :: 2
 
@@ -38,12 +39,15 @@ Gpu :: struct {
     // @study as all command buffers are one time submits, do we even need to ensure they are not reused between frames/free at end of the frame
     // Can this just be a single command pool for per frame command buffers, and if there is a second queue then we need another command pool,
     // Or do we actually never need to reset it anyways?
-    command_pools:            [MaxFramesInFlight] vk.CommandPool,
-    image_aquired_semaphores: [MaxFramesInFlight] vk.Semaphore,
     
     ////////////////////////////////////////////////
     
-    queue: vk.Queue, // this is the graphics and compute queue, we could also create a queue just for transfers/copying
+    general_queue: vk.Queue,
+    command_pools:            [MaxFramesInFlight] vk.CommandPool,
+    image_aquired_semaphores: [MaxFramesInFlight] vk.Semaphore,
+    
+    transfer_queue: vk.Queue,
+    transfer_command_pool: vk.CommandPool,
     
     swapchain_state:  Swapchain_State,
     swapchain_format: vk.Format,
@@ -92,7 +96,7 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
                 sType = .INSTANCE_CREATE_INFO,
                 pApplicationInfo = &vk.ApplicationInfo {
                     sType = .APPLICATION_INFO,
-                    pApplicationName = "How to Vulkan",
+                    pApplicationName = "Vulkan Renderer",
                     apiVersion = vk.API_VERSION_1_4,
                 },
                 enabledExtensionCount   = auto_cast len(instance_extensions),
@@ -213,8 +217,6 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
     ////////////////////////////////////////////////
     
     {
-        queue_family_index: u32
-        
         device_extensions := [] cstring { 
             vk.KHR_SWAPCHAIN_EXTENSION_NAME,
             vk.EXT_MESH_SHADER_EXTENSION_NAME,
@@ -298,6 +300,8 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             },
         }
         
+        queue_family_index: u32
+        
         device_create_info := vk.DeviceCreateInfo {
             sType = .DEVICE_CREATE_INFO,
             
@@ -307,8 +311,8 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             pQueueCreateInfos    = &vk.DeviceQueueCreateInfo {
                 sType = .DEVICE_QUEUE_CREATE_INFO,
                 queueFamilyIndex = queue_family_index,
-                queueCount       = 1,
-                pQueuePriorities = raw_data([]f32{ 1 }),
+                queueCount       = 2,
+                pQueuePriorities = raw_data([]f32{ 1, 0 }),
             },
             
             enabledExtensionCount   = auto_cast len(device_extensions),
@@ -321,17 +325,11 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
         
         ////////////////////////////////////////////////
         
-        vk.GetDeviceQueue(result.device, queue_family_index, 0, &result.queue)
+        vk.GetDeviceQueue(result.device, queue_family_index, 0, &result.general_queue)
+        vk.GetDeviceQueue(result.device, queue_family_index, 1, &result.transfer_queue)
         
         vk.GetPhysicalDeviceMemoryProperties(result.physical_device, &result.memory_properties)
         
-        ////////////////////////////////////////////////
-        
-        for &sema in result.image_aquired_semaphores {
-            sema = gpu_create_semaphore(&result)
-            defer_destroy(vk.DestroySemaphore, sema)
-        }
-            
         ////////////////////////////////////////////////
         
         {
@@ -345,6 +343,21 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
                 check(vk.CreateCommandPool(result.device, &command_pool_create_info, nil, &pool))
                 defer_destroy(vk.DestroyCommandPool, pool)
             }
+            
+            command_pool_create_info := vk.CommandPoolCreateInfo {
+                sType = .COMMAND_POOL_CREATE_INFO,
+                flags            = { .RESET_COMMAND_BUFFER },
+                queueFamilyIndex = queue_family_index,
+            }
+            
+            check(vk.CreateCommandPool(result.device, &command_pool_create_info, nil, &result.transfer_command_pool))
+            defer_destroy(vk.DestroyCommandPool, result.transfer_command_pool)
+        }
+        ////////////////////////////////////////////////
+        
+        for &sema in result.image_aquired_semaphores {
+            sema = gpu_create_semaphore(&result)
+            defer_destroy(vk.DestroySemaphore, sema)
         }
     }
     
@@ -407,7 +420,7 @@ Memory_Kind :: enum u32 {
 Hazard_Flags :: bit_set[Hazard_Flag; u32]
 Hazard_Flag :: enum u32 {
     draw_arguments, // Indirect Draw Commands modify possibly prefetched data
-    descriptors,    // If you write to the texture descriptor heap
+    descriptors,    // If you write to the texture descriptor heap @todo make gpu_barrier respect this
     depth_stencil,  
 }
 
@@ -420,17 +433,11 @@ Gpu_Texture_Kind :: enum u32 {
     Cube_Array,
 }
 
-Gpu_Usage_Flags :: vk.ImageUsageFlags /* bit_set[Usage_Flag; u32]
-Usage_Flag ::  enum u32 {
-    sampled,
-    storage,
-    color_attachment,
-    depth_stencil_attachment,
-    // ...
-} */
+Gpu_Usage_Flags :: vk.ImageUsageFlags
 
 ////////////////////////////////////////////////
 
+// @cleanup migrate to image_desc and delete this
 Texture_Desc :: struct {
     kind: Gpu_Texture_Kind,
     dimensions: uv3,
@@ -446,8 +453,6 @@ Texture_Desc :: struct {
 Texture_Descriptor :: struct {
     data: [4] u64,
 }
-
-Texture :: distinct u64
 
 Topology :: vk.PrimitiveTopology
 Cull     :: enum { None, CCW, CW, All }
@@ -507,11 +512,25 @@ Color_Mask :: vk.ColorComponentFlags
 Gpu_Address :: struct ($T: typeid) { address: vk.DeviceAddress }
 
 // @todo(viktor): can we find a way not to store this metadata per allocation?
-the_allocations: map[vk.DeviceAddress] Buffer
+_the_buffer_allocations: map[vk.DeviceAddress] Buffer_Allocation
+Buffer_Allocation :: struct {
+    buffer: Buffer,
+    offset: u32,
+}
 
-// @api with scalar_block_layout, do we ever need an alignment parameter?
-// it seems that base structs should still be aligned by 16 bytes to make the best use of the loading hardware
-// this does not change with scalar block layout, as that just reduces padding issues between cpu and gpu.
+gpu_reflect_get_allocation :: proc (address: vk.DeviceAddress) -> Buffer_Allocation {
+    alloc, ok := _the_buffer_allocations[address]
+    assert(ok)
+    return alloc
+} 
+gpu_reflect_get_buffer :: proc (address: vk.DeviceAddress) -> Buffer {
+    alloc := gpu_reflect_get_allocation(address)
+    return alloc.buffer
+}
+gpu_reflect_set_allocation :: proc (address: vk.DeviceAddress, buffer: Buffer, offset: u32 = 0) {
+    _the_buffer_allocations[address] = { buffer, offset }
+}
+
 gpu_allocate :: proc { gpu_allocate_size, gpu_allocate_slice, gpu_allocate_type }
 gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (cpu_result: pmm, gpu_result: vk.DeviceAddress) {
     usage := usage
@@ -524,53 +543,39 @@ gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Me
     case .Readback: flags = { .HOST_VISIBLE, .HOST_COHERENT, .HOST_CACHED }
     }
     
-    // @cleanup inline and simplify
-    gpu_make_buffer :: proc (gpu: ^Gpu, #any_int size: vk.DeviceSize, usage: vk.BufferUsageFlags, flags: vk.MemoryPropertyFlags) -> (Buffer, pmm) {
-        assert(gpu.device != nil)
-        
-        create_info := vk.BufferCreateInfo {
-            sType = .BUFFER_CREATE_INFO,
-            size  = size,
-            usage = usage,
-        }
-        
-        result: Buffer
-        check(vk.CreateBuffer(gpu.device, &create_info, nil, &result.buffer))
-        
-        requirements: vk.MemoryRequirements
-        vk.GetBufferMemoryRequirements(gpu.device, result.buffer, &requirements)
-        
-        uses_address := .SHADER_DEVICE_ADDRESS in usage
-        
-        result.memory = select_memory_type_and_allocate(gpu, requirements, flags, add_device_address_flag = uses_address)
-        
-        check(vk.BindBufferMemory(gpu.device, result.buffer, result.memory, 0))
-        
-        pointer: pmm
-        vk.MapMemory(gpu.device, result.memory, 0, size, {}, &pointer)
-        
-        if uses_address {
-            adress_create_info := vk.BufferDeviceAddressInfo {
-                sType = .BUFFER_DEVICE_ADDRESS_INFO,
-                buffer = result.buffer,
-            }
-            
-            result.address = vk.GetBufferDeviceAddress(gpu.device, &adress_create_info)
-            
-            assert(result.address != 0)
-        }
-        
-        return result, pointer
+    buffer: Buffer
+    create_info := vk.BufferCreateInfo {
+        sType = .BUFFER_CREATE_INFO,
+        size  = auto_cast size,
+        usage = usage,
     }
     
-    // @cleanup and use alignment
-    buffer, result := gpu_make_buffer(gpu, size, usage, flags = flags)
-    cpu_result = result
+    check(vk.CreateBuffer(gpu.device, &create_info, nil, &buffer.buffer))
+    
+    requirements: vk.MemoryRequirements
+    vk.GetBufferMemoryRequirements(gpu.device, buffer.buffer, &requirements)
+    if requirements.alignment < cast(vk.DeviceSize) alignment {
+        requirements.alignment = cast(vk.DeviceSize) alignment
+    }
+    
+    buffer.memory = select_memory_type_and_allocate(gpu, requirements, flags, add_device_address_flag = true)
+    
+    check(vk.BindBufferMemory(gpu.device, buffer.buffer, buffer.memory, 0))
+    
+    vk.MapMemory(gpu.device, buffer.memory, 0, auto_cast size, {}, &cpu_result)
+    
+    adress_create_info := vk.BufferDeviceAddressInfo {
+        sType = .BUFFER_DEVICE_ADDRESS_INFO,
+        buffer = buffer.buffer,
+    }
+    
+    buffer.address = vk.GetBufferDeviceAddress(gpu.device, &adress_create_info)
+    assert(buffer.address != 0)
     
     info := vk.BufferDeviceAddressInfo { sType  = .BUFFER_DEVICE_ADDRESS_INFO, buffer = buffer.buffer }
     gpu_result = vk.GetBufferDeviceAddress(gpu.device, &info)
     
-    the_allocations[gpu_result] = buffer
+    gpu_reflect_set_allocation(gpu_result, buffer)
     
     return cpu_result, gpu_result
 }
@@ -588,7 +593,7 @@ gpu_allocate_type :: proc (gpu: ^Gpu, $T: typeid, memory: Memory_Kind = .Default
 
 gpu_free :: proc { gpu_free_pointer, gpu_free_address }
 gpu_free_pointer :: proc (gpu: ^Gpu, pointer: vk.DeviceAddress) {
-    buffer := the_allocations[pointer]
+    buffer := gpu_reflect_get_buffer(pointer)
     vk.FreeMemory(gpu.device,    buffer.memory, nil)
     vk.DestroyBuffer(gpu.device, buffer.buffer, nil)
 }
@@ -602,54 +607,99 @@ gpu_free_address :: proc (gpu: ^Gpu, address: Gpu_Address($T)) {
 ////////////////////////////////////////////////
 // Textures
 
-// @todo
-// GpuTextureSizeAlign gpuTextureSizeAlign(GpuTextureDesc desc);
-// GpuTexture gpuCreateTexture(GpuTextureDesc desc, void* ptrGpu);
-// GpuTextureDescriptor gpuTextureViewDescriptor(GpuTexture texture, GpuViewDesc desc);
-// GpuTextureDescriptor gpuRWTextureViewDescriptor(GpuTexture texture, GpuViewDesc desc);
+// @cleanup @placement
+Image_Desc :: struct {
+    size:      uv2,
+    format:    Format,
+    mip_count: u32,
+}
 
-/* 
+// @copypasta this can be compressed with allocate_size
+gpu_allocate_image :: proc (gpu: ^Gpu, desc: Image_Desc, usage: vk.ImageUsageFlags) -> Image {
+    create_info := vk.ImageCreateInfo {
+        sType = .IMAGE_CREATE_INFO,
+        imageType     = .D2,
+        format        = desc.format,
+        extent        = { desc.size.x, desc.size.y, 1 },
+        mipLevels     = desc.mip_count,
+        arrayLayers   = 1,
+        samples       = { ._1 },
+        tiling        = .OPTIMAL,
+        usage         = usage,
+        initialLayout = .UNDEFINED,
+    }
+    
+    result: Image
+    result.format = desc.format
+    check(vk.CreateImage(gpu.device, &create_info, nil, &result.image))
+    
+    requirements: vk.MemoryRequirements
+    vk.GetImageMemoryRequirements(gpu.device, result.image, &requirements)
+    
+    result.memory = select_memory_type_and_allocate(gpu, requirements, { .DEVICE_LOCAL })
+    
+    check(vk.BindImageMemory(gpu.device, result.image, result.memory, 0))
+    
+    return result
+}
 
-    // App startup: Allocate a texture descriptor heap (for example 65536 descriptors)
-    GpuTextureDescriptor *textureHeap = gpuMalloc<GpuTextureDescriptor>(65536);
+gpu_create_image_view :: proc (gpu: ^Gpu, image: Image, mip_base: u32, mip_count: u32, aspect_mask: vk.ImageAspectFlags) -> vk.ImageView {
+    view_create_info := vk.ImageViewCreateInfo {
+        sType = .IMAGE_VIEW_CREATE_INFO,
+        image    = image.image,
+        viewType = .D2,
+        format   = image.format,
+        subresourceRange = { aspectMask = aspect_mask, baseMipLevel = mip_base, levelCount = mip_count, layerCount = 1 },
+    }
+    
+    result: vk.ImageView
+    check(vk.CreateImageView(gpu.device, &view_create_info, nil, &result))
+    
+    return result
+}
 
-    // Load an image using a 3rd party library
-    auto pngImage = pngLoad("cat.png");
-    auto uploadMemory = uploadBumpAllocator.allocate(pngImage.byteSize); // Custom bump allocator (wraps gpuMalloc ptr)
-    pngImage.load(uploadMemory.cpu);
+create_sampler :: proc (gpu: ^Gpu, filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, max_lod: f32 = 16, anisotropy: b32 = false) -> vk.Sampler {
+    sampler_create_info := vk.SamplerCreateInfo {
+        sType = .SAMPLER_CREATE_INFO,
+        
+        magFilter  = filter,
+        minFilter  = filter,
+        mipmapMode = mipmap_mode,
+        
+        addressModeU = .CLAMP_TO_EDGE,
+        addressModeV = .CLAMP_TO_EDGE,
+        addressModeW = .CLAMP_TO_EDGE,
+        
+        anisotropyEnable = anisotropy,
+        maxAnisotropy    = anisotropy ? 8 : 0,
+        maxLod           = max_lod,
+    }
+    
+    result: vk.Sampler
+    check(vk.CreateSampler(gpu.device, &sampler_create_info, nil, &result))
+    
+    return result
+}
 
-    // Allocate GPU memory for our texture (optimal layout with metadata)
-    GpuTextureDesc textureDesc { .dimensions = pngImage.dimensions, .format = FORMAT_RGBA8_UNORM, .usage = SAMPLED };
-    GpuTextureSizeAlign textureSizeAlign = gpuTextureSizeAlign(textureDesc);
-    void *texturePtr = gpuMalloc(textureSizeAlign.size, textureSizeAlign.align, MEMORY_GPU);
-    GpuTexture texture = gpuCreateTexture(textureDesc, texturePtr);
+gpu_texture_descriptor :: proc (view: vk.ImageView, layout: vk.ImageLayout, sampler: vk.Sampler) -> vk.DescriptorImageInfo {
+    result: vk.DescriptorImageInfo
+    result.imageLayout = layout
+    result.imageView   = view
+    result.sampler     = sampler
+    return result
+}
 
-    // Create a 256-bit texture view descriptor and store it
-    textureHeap[0] = gpuTextureViewDescriptor(texture, { .format = FORMAT_RGBA8_UNORM });
+gpu_free_image :: proc (gpu: ^Gpu, image: Image) {
+    vk.DestroyImage(gpu.device, image.image, nil)
+    vk.FreeMemory(gpu.device,   image.memory, nil)
+}
 
-    // Batched upload: begin
-    GpuCommandBuffer uploadCommandBuffer = gpuStartCommandRecording(queue);
+gpu_destroy_texture_view :: proc (gpu: ^Gpu, view: vk.ImageView) {
+    vk.DestroyImageView(gpu.device, view, nil)
+}
 
-    // Copy all textures here!
-    gpuCopyToTexture(uploadCommandBuffer, texturePtr, uploadMemory.gpu, texture);
-    // TODO other textures...
 
-    // Batched upload: end
-    gpuBarrier(uploadCommandBuffer, STAGE_TRANSFER, STAGE_ALL, HAZARD_DESCRIPTORS);
-    gpuSubmit(queue, { uploadCommandBuffer });
-
-    // Later during rendering...
-    gpuSetActiveTextureHeapPtr(commandBuffer, gpuHostToDevicePointer(textureHeap));
-
-*/
-
-// Gpu_Texture_Descriptor
-// Gpu_Texture_Desc
-// Gpu_Texture_View_Descriptor
-
-// gpu_texture_size_align
 // gpu_create_texture
-// gpu_create_texture_view
 
 // gpu_set_active_texture_heap_ptr
 
@@ -767,7 +817,7 @@ gpu_create_graphics_pipeline :: proc (gpu: ^Gpu, vertex, fragment: Shader, info:
 
 gpu_create_graphics_meshlet_pipeline :: proc { gpu_create_graphics_meshlet_pipeline_tmp, gpu_create_graphics_meshlet_pipeline_mp }
 
-// @todo(viktor): get rid of the set_layout which should only be the textures actually, just make the texture_heap a parameter
+// @todo(viktor): get rid of the set_layout which should only be the textures actually, just make it the texture_heap a parameter
 gpu_create_graphics_meshlet_pipeline_tmp :: proc (gpu: ^Gpu, task, mesh, frag: Shader, info: Raster_Desc, set_layout: vk.DescriptorSetLayout) -> Pipeline {
     assert(task.stage == .TASK_EXT)
     assert(mesh.stage == .MESH_EXT)
@@ -993,10 +1043,10 @@ destroy_pipeline :: proc (gpu: ^Gpu, pipeline: Pipeline) {
 // GpuQueue gpuCreateQueue(/* DEVICE & QUEUE CREATION DETAILS OMITTED */);
 
 // @todo(viktor): queue is ignored, we need to allocate from a pool created with the correct queue_family_index
-gpu_begin_command_recording :: proc (gpu: ^Gpu, frame_index: u64, _: vk.Queue) -> vk.CommandBuffer {
+gpu_begin_command_recording :: proc (gpu: ^Gpu, command_pool: vk.CommandPool, _: vk.Queue) -> vk.CommandBuffer {
     info := vk.CommandBufferAllocateInfo {
         sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-        commandPool        = gpu.command_pools[frame_index],
+        commandPool        = command_pool,
         commandBufferCount = 1,
     }
     
@@ -1105,47 +1155,27 @@ gpu_destroy_semaphore :: proc (gpu: ^Gpu, semaphore: vk.Semaphore) {
 // Commands
 
 // void gpuMemCpy(GpuCommandBuffer cb, void* destGpu, void* srcGpu,);
-// void gpuCopyToTexture(GpuCommandBuffer cb, void* destGpu, void* srcGpu, GpuTexture texture);
 // void gpuCopyFromTexture(GpuCommandBuffer cb, void* destGpu, void* srcGpu, GpuTexture texture);
 
-// @api provide a version that allows multiple dest, source pairs with a single wait, or make it begin-end for now?
 gpu_copy :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: any, source: pmm) {
-    semaphore := gpu_create_timeline_semaphore(gpu, 0)
-    defer gpu_destroy_semaphore(gpu, semaphore)
-    
-    // pipeline_barrier_begin()
-    //     add_image_barrier(&texture, {}, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
-    // pipeline_barrier_end(cmd)
-    
-    // copy_regions := make([dynamic] vk.BufferImageCopy, context.temp_allocator)
-    // for level in 0..<loaded_texture.mip_levels {
-    //     mip_offset := loaded_texture.mip_offsets[level]
-        
-    //     append(&copy_regions, vk.BufferImageCopy {
-    //         bufferOffset     = auto_cast mip_offset,
-    //         imageSubresource = { aspectMask = { .COLOR }, mipLevel = level, layerCount = 1 },
-    //         imageExtent      = { width = loaded_texture.width >> level, height = loaded_texture.height >> level, depth = 1 },
-    //     })
-    // }
-    
-    // vk.CmdCopyBufferToImage(cmd, source_buffer.buffer, texture.image, .TRANSFER_DST_OPTIMAL, auto_cast len(copy_regions), raw_data(copy_regions))
-    
-    // pipeline_barrier_begin()
-    //     add_image_barrier_transition_from_last(&texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
-    // pipeline_barrier_end(cmd)
-    
-    check(vk.EndCommandBuffer(cmd))
-    
-    gpu_submit(gpu.queue, semaphore, 1, cmd)
-    gpu_wait_semaphore(gpu, semaphore, 1)
+    unimplemented()
 }
 
-gpu_copy_to_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: pmm, source: pmm, texture: Texture) {
+// @api size is redundant, maybe the Image struct should just store it for anyone to use
+gpu_copy_to_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: Image, source: vk.DeviceAddress, size: uv2) {
+    alloc := gpu_reflect_get_allocation(source)
     
+    region := vk.BufferImageCopy {
+        bufferOffset = cast(vk.DeviceSize) alloc.offset,
+        imageSubresource = { aspectMask = { .COLOR }, mipLevel = 0, layerCount = 1 },
+        imageExtent      = { width = size.x, height = size.y, depth = 1 },
+    }
+    
+    vk.CmdCopyBufferToImage(cmd, alloc.buffer.buffer, destination.image, destination.last_transition.layout, 1, &region)
 }
 
-gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: pmm, source: pmm, texture: Texture) {
-    
+gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: pmm, source: pmm) {
+    unimplemented()
 }
 
 // @todo
@@ -1200,8 +1230,6 @@ gpu_set_scissor :: proc (cmd: vk.CommandBuffer, offset: iv2 = 0, size: uv2) {
 // @todo(viktor): 
 // void gpuSetDepthStencilState(GpuCommandBuffer cb, GpuDepthStencilState state);
 // void gpuSetBlendState(GpuCommandBuffer cb, GpuBlendState state); 
-
-// void gpuDispatchIndirect(GpuCommandBuffer cb, void* dataGpu, void* gridDimensionsGpu);
 
 Render_Target :: struct {
     texture: Image,
@@ -1274,6 +1302,8 @@ gpu_end_render_pass :: proc (cmd: vk.CommandBuffer) {
     vk.CmdEndRendering(cmd)
 }
 
+// void gpuDispatchIndirect(GpuCommandBuffer cb, void* dataGpu, void* gridDimensionsGpu);
+
 // void gpuDrawIndexedInstanced(GpuCommandBuffer cb, void* vertexDataGpu, void* pixelDataGpu, void* indicesGpu, uint32 indexCount, uint32 instanceCount);
 // void gpuDrawIndexedInstancedIndirect(GpuCommandBuffer cb, void* vertexDataGpu, void* pixelDataGpu, void* indicesGpu, void* argsGpu);
 // void gpuDrawIndexedInstancedIndirectMulti(GpuCommandBuffer cb, void* dataVxGpu, uint32 vxStride, void* dataPxGpu, uint32 pxStride, void* argsGpu, void* drawCountGpu);
@@ -1290,8 +1320,11 @@ gpu_dispatch :: proc (command_buffer: vk.CommandBuffer, pointer_to_the_gpu_addre
     vk.CmdDispatch(command_buffer, **group_size)
 }
 
-gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, commands, count: vk.Buffer, max_count: u32, stride: u32, command_offset: umm, count_offset: umm) {
-    vk.CmdDrawMeshTasksIndirectCountEXT(cmd, commands, auto_cast command_offset, count, auto_cast  count_offset, max_count, size_of(Draw_Command))
+gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, commands, count: vk.DeviceAddress, max_count: u32, stride: u32, command_offset: umm, count_offset: umm) {
+    // @speed
+    commands_buffer := gpu_reflect_get_buffer(commands).buffer
+    count_buffer    := gpu_reflect_get_buffer(count).buffer
+    vk.CmdDrawMeshTasksIndirectCountEXT(cmd, commands_buffer, auto_cast command_offset, count_buffer, auto_cast  count_offset, max_count, stride)
 }
 
 
@@ -1299,38 +1332,6 @@ gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, commands, count
 
 ////////////////////////////////////////////////
 // @cleanup @placement
-
-gpu_make_image :: proc (gpu: ^Gpu, size: uv2, format: vk.Format, usage: vk.ImageUsageFlags, aspect_mask: vk.ImageAspectFlags, flags := vk.MemoryPropertyFlags { .DEVICE_LOCAL }, mip_levels : u32 = 1) -> Image {
-    assert(gpu.device != nil)
-    
-    create_info := vk.ImageCreateInfo {
-        sType = .IMAGE_CREATE_INFO,
-        imageType     = .D2,
-        format        = format,
-        extent        = { size.x, size.y, 1 },
-        mipLevels     = mip_levels,
-        arrayLayers   = 1,
-        samples       = { ._1 },
-        tiling        = .OPTIMAL,
-        usage         = usage,
-        initialLayout = .UNDEFINED,
-    }
-    
-    result: Image
-    result.format = format
-    check(vk.CreateImage(gpu.device, &create_info, nil, &result.image))
-    
-    requirements: vk.MemoryRequirements
-    vk.GetImageMemoryRequirements(gpu.device, result.image, &requirements)
-    
-    result.memory = select_memory_type_and_allocate(gpu, requirements, flags)
-    
-    check(vk.BindImageMemory(gpu.device, result.image, result.memory, 0))
-    
-    result.view = create_image_view(gpu.device, result, 0, mip_levels, aspect_mask)
-    
-    return result
-}
 
 select_memory_type_and_allocate :: proc (gpu: ^Gpu, requirements: vk.MemoryRequirements, flags: vk.MemoryPropertyFlags, add_device_address_flag := false) -> vk.DeviceMemory {
     properties := gpu.memory_properties
@@ -1367,51 +1368,4 @@ select_memory_type_and_allocate :: proc (gpu: ^Gpu, requirements: vk.MemoryRequi
     check(vk.AllocateMemory(gpu.device, &allocate_info, nil, &memory))
     
     return memory
-}
-
-gpu_delete :: proc { gpu_delete_image }
-gpu_delete_image :: proc (gpu: ^Gpu, image: Image) {
-    assert(gpu.device != nil)
-    
-    vk.DestroyImageView(gpu.device, image.view, nil)
-    vk.DestroyImage(gpu.device,     image.image, nil)
-    vk.FreeMemory(gpu.device,       image.memory, nil)
-}
-
-create_image_view :: proc (device: vk.Device, image: Image, mip_base: u32, mip_count: u32, aspect_mask: vk.ImageAspectFlags) -> vk.ImageView {
-    view_create_info := vk.ImageViewCreateInfo {
-        sType = .IMAGE_VIEW_CREATE_INFO,
-        image    = image.image,
-        viewType = .D2,
-        format   = image.format,
-        subresourceRange = { aspectMask = aspect_mask, baseMipLevel = mip_base, levelCount = mip_count, layerCount = 1 },
-    }
-    
-    result: vk.ImageView
-    check(vk.CreateImageView(device, &view_create_info, nil, &result))
-    
-    return result
-}
-
-create_sampler :: proc (device: vk.Device, filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, max_lod: f32 = 16, anisotropy: b32 = false) -> vk.Sampler {
-    sampler_create_info := vk.SamplerCreateInfo {
-        sType = .SAMPLER_CREATE_INFO,
-        
-        magFilter  = filter,
-        minFilter  = filter,
-        mipmapMode = mipmap_mode,
-        
-        addressModeU = .CLAMP_TO_EDGE,
-        addressModeV = .CLAMP_TO_EDGE,
-        addressModeW = .CLAMP_TO_EDGE,
-        
-        anisotropyEnable = anisotropy,
-        maxAnisotropy    = anisotropy ? 8 : 0,
-        maxLod           = max_lod,
-    }
-    
-    result: vk.Sampler
-    check(vk.CreateSampler(device, &sampler_create_info, nil, &result))
-    
-    return result
 }
