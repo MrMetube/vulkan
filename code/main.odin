@@ -64,8 +64,8 @@ Cull_Globals :: struct #all_or_none {
 
 // @shader
 Draw_Globals :: struct {
-    view:       m4,
-    projection: m4,
+    view_from_world:      m4,
+    projection_from_view: m4,
     light_pos:  [4] v4,
     
     draw_command_buffer: vk.DeviceAddress "Draw_Command",
@@ -399,7 +399,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    next_frame: u64 = MaxFramesInFlight
+    next_frame: u64 = MaxFramesInFlight+1
     frame_semaphore := gpu_create_timeline_semaphore(&gpu, MaxFramesInFlight)
     defer_destroy(vk.DestroySemaphore, frame_semaphore)
     
@@ -730,8 +730,8 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         // @shaders meshlet pipeline
-        draw_globals.projection = projection
-        draw_globals.view       = view
+        draw_globals.projection_from_view = projection
+        draw_globals.view_from_world      = view
         
         draw_globals.draw_command_buffer = draw_command_buffer
         draw_globals.draw_buffer         = draw_buffer
@@ -887,8 +887,8 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         // @cleanup dont pass the frameindex, this is a place that could cause mistakes
-        next_frame += 1
         gpu_end_the_command_buffer_and_submit_and_present_the_queue(&gpu, frame_semaphore, next_frame, frame_index, &cmd)
+        next_frame += 1
         
         gpu_profile_collate_times(&gpu, gpu.device, print_profile_and_stats)
         

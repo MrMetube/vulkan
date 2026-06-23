@@ -80,10 +80,10 @@ void main() {
         vec3 n = vec3(vertex.v.n[0], vertex.v.n[1], vertex.v.n[2]) / 127.0 - 1.0;
         
         Mesh_Result_Smooth result;
-        view_p = globals.view * view_p;
+        view_p = globals.view_from_world * view_p;
         
-        vec4 position = globals.projection * (globals.view * view_p);
-        result.normal = mat3(globals.view) * n;
+        vec4 position = globals.projection_from_view * view_p;
+        result.normal = mat3(globals.view_from_world) * n;
         result.uv     = vertex.v.uv;
         
         for (int li = 0; li < 4; li++) {

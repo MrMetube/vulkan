@@ -60,7 +60,7 @@ void main() {
             
             cone_axis = rotate(draw.v.orientation, cone_axis);
             
-            vec3 camera_position = mat3(globals.view) * globals.view[3].xyz;
+            vec3 camera_position = mat3(globals.view_from_world) * globals.view_from_world[3].xyz;
             
             accept = !cone_cull(center, radius, cone_axis, cone_cutoff, camera_position);
         }

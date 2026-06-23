@@ -1066,7 +1066,7 @@ gpu_create_timeline_semaphore :: proc (gpu: ^Gpu, initial_value: u64) -> vk.Sema
     return result
 }
 
-gpu_wait_semaphore :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, wait_value: u64) {
+gpu_wait_semaphore :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, wait_value: u64, timeout := MaxTimeout) {
     semaphores := [?] vk.Semaphore { semaphore }
     values     := [?] u64 { wait_value }
     
@@ -1077,7 +1077,7 @@ gpu_wait_semaphore :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, wait_value: u64)
         pValues        = &values[0],
     }
     
-    wait_result := vk.WaitSemaphores(gpu.device, &info, MaxTimeout)
+    wait_result := vk.WaitSemaphores(gpu.device, &info, timeout)
     if wait_result == .TIMEOUT {
         gpu.should_recreate_swapchain = true
         unimplemented("recreate immediatly and wait again or just return?")

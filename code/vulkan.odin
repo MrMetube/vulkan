@@ -90,6 +90,8 @@ destroy_all_handles :: proc (device: vk.Device) {
 ////////////////////////////////////////////////
 
 recreate_swapchain :: proc (gpu: ^Gpu, new_size: uv2) {
+    vk.DeviceWaitIdle(gpu.device)
+    
     surface_capabilities: vk.SurfaceCapabilitiesKHR
     check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(gpu.physical_device, gpu.surface, &surface_capabilities))
     
@@ -118,7 +120,7 @@ recreate_swapchain :: proc (gpu: ^Gpu, new_size: uv2) {
         
         oldSwapchain = old_swapchain,
     }
-    
+    assert(swapchain_extent == vk.Extent2D{ **new_size })
     gpu.swapchain_size = new_size
     
     previous_image_count := cast(u32) len(gpu.swapchain_images)
