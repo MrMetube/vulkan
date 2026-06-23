@@ -224,8 +224,8 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     // this will hold literally all textures, expand if needed and let the shader index into it via Draw.texture_index
-    textures: [3] Image
-    texture_descriptors: [len(textures)] vk.DescriptorImageInfo
+    textures: [1024] Image
+    texture_descriptors: [3] vk.DescriptorImageInfo
     
     {
         upload_bump := bump_allocator_make_temporary(&gpu, 256 * Megabyte, usage = { .TRANSFER_SRC })
@@ -238,21 +238,18 @@ main :: proc () {
         default_sampler := create_sampler(&gpu, .LINEAR, .LINEAR, anisotropy = true)
         defer_destroy(vk.DestroySampler, default_sampler)
         
-        // @cleanup to do the copy into gpu memory ourselves, we need the tiling to be .LINEAR and not .OPTIMAL, 
-        // but in that case we cannot specify any mip_levels. :(
-        for &texture, index in textures {
+        for &texture, index in textures[:3] {
             filename := fmt.tprintf("tutorial/suzanne%v.ktx", index)
             
             loaded_texture := load_ktx_texture(filename, context.temp_allocator)
             
-            // @todo make a default with mip_count = 1 and so on
-            description: Image_Desc
-            description.size = { loaded_texture.width, loaded_texture.height }
-            description.format = loaded_texture.format
-            description.mip_count = 1
+            description := default_texture_desc()
+            description.size.xy = { loaded_texture.width, loaded_texture.height }
+            description.format  = loaded_texture.format
+            description.usage   = { .TRANSFER_DST, .SAMPLED }
             
-            texture      = gpu_allocate_image(&gpu, description, { .TRANSFER_DST, .SAMPLED })
-            texture.view = gpu_create_image_view(&gpu, texture, 0, description.mip_count, { .COLOR })
+            texture      = gpu_allocate_texture(&gpu, description)
+            texture.view = gpu_create_texture_view(&gpu, texture, 0, description.mip_count, { .COLOR })
             
             
             texture_descriptors[index] = gpu_texture_descriptor(texture.view, .READ_ONLY_OPTIMAL, default_sampler)
@@ -283,7 +280,10 @@ main :: proc () {
     }
     
     ////////////////////////////////////////////////
-    
+
+    // @todo(viktor): migrate the depth_pyramid image into the textures array. make it manage all textures, and let stuff just hold onto a handle inside that array.
+    // @study does this setup allow us to add more textures as needed and leave slots empty in the mean time?
+    // @study how many textures can we index into like this? is there a limit defined by the gpu?    
     textures_descriptor_set_layout: vk.DescriptorSetLayout
     textures_descriptor_set:        vk.DescriptorSet
     {
@@ -339,11 +339,11 @@ main :: proc () {
         
         write_desc_set := vk.WriteDescriptorSet {
             sType = .WRITE_DESCRIPTOR_SET,
-            dstSet = textures_descriptor_set,
+            dstSet     = textures_descriptor_set,
             dstBinding = 0,
+            descriptorType  = .COMBINED_IMAGE_SAMPLER,
             descriptorCount = cast(u32) len(texture_descriptors),
-            descriptorType = .COMBINED_IMAGE_SAMPLER,
-            pImageInfo = &texture_descriptors[0],
+            pImageInfo      = &texture_descriptors[0],
         }
         vk.UpdateDescriptorSets(gpu.device, 1, &write_desc_set, 0, nil)
     }
@@ -354,9 +354,6 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    // @todo(viktor): migrate the depth_pyramid image into the textures array. make it manage all textures, and let stuff just hold onto a handle inside that array.
-    // @study does this setup allow us to add more textures as needed and leave slots empty in the mean time?
-    // @study how many textures can we index into like this? is there a limit defined by the gpu?
     depth_descriptor_set_layout := create_descriptor_set_layout(gpu.device, depth_reduce_shader)
     defer_destroy(vk.DestroyDescriptorSetLayout, depth_descriptor_set_layout)
     
@@ -1004,22 +1001,22 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_S
     mip_count := 1 + max(integer_log2(pyramid_size.x), integer_log2(pyramid_size.y))
     
     
-    stuff.depth_pyramid = gpu_allocate_image(gpu, {pyramid_size, .R32_SFLOAT, mip_count}, { .SAMPLED, .STORAGE, .TRANSFER_SRC })
+    stuff.depth_pyramid = gpu_allocate_texture(gpu, default_texture_desc(size = {pyramid_size.x, pyramid_size.y, 1}, format = .R32_SFLOAT, mip_count = mip_count, usage = { .SAMPLED, .STORAGE, .TRANSFER_SRC }))
     // :Stencil: add the .STENCIL mask bit
-    stuff.depth_buffer = gpu_allocate_image(gpu, {gpu.swapchain_size, stuff.depth_buffer.format, 1}, { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED })
-    stuff.color_buffer = gpu_allocate_image(gpu, {gpu.swapchain_size, gpu.swapchain_format, 1}, { .COLOR_ATTACHMENT, .TRANSFER_SRC })
+    stuff.depth_buffer = gpu_allocate_texture(gpu, default_texture_desc(size = {gpu.swapchain_size.x, gpu.swapchain_size.y, 1}, format = stuff.depth_buffer.format, usage = { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED }))
+    stuff.color_buffer = gpu_allocate_texture(gpu, default_texture_desc(size = {gpu.swapchain_size.x, gpu.swapchain_size.y, 1}, format = gpu.swapchain_format,      usage = { .COLOR_ATTACHMENT, .TRANSFER_SRC }))
     
     for i in 0..<mip_count {
         mip := append_into(&stuff.depth_pyramid_mips)
-        mip.view = gpu_create_image_view(gpu, stuff.depth_pyramid, i, 1, { .COLOR })
+        mip.view = gpu_create_texture_view(gpu, stuff.depth_pyramid, i, 1, { .COLOR })
         mip.size = pyramid_size
         mip.size.x >>= i
         mip.size.y >>= i
         mip.size = vec_max(mip.size, 1)
     }
     
-    stuff.depth_buffer.view = gpu_create_image_view(gpu, stuff.depth_buffer, 0, 1, { .DEPTH })
-    stuff.color_buffer.view = gpu_create_image_view(gpu, stuff.color_buffer, 0, 1, { .COLOR })
+    stuff.depth_buffer.view = gpu_create_texture_view(gpu, stuff.depth_buffer, 0, 1, { .DEPTH })
+    stuff.color_buffer.view = gpu_create_texture_view(gpu, stuff.color_buffer, 0, 1, { .COLOR })
 }
 
 delete_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain, final := false) {

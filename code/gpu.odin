@@ -424,35 +424,8 @@ Hazard_Flag :: enum u32 {
     depth_stencil,  
 }
 
-Gpu_Texture_Kind :: enum u32 {
-    _2D, // default should be 2D
-    _1D,
-    _3D,
-    Cube,
-    _2D_Array,
-    Cube_Array,
-}
-
-Gpu_Usage_Flags :: vk.ImageUsageFlags
 
 ////////////////////////////////////////////////
-
-// @cleanup migrate to image_desc and delete this
-Texture_Desc :: struct {
-    kind: Gpu_Texture_Kind,
-    dimensions: uv3,
-    
-    mip_count:    u32, // default = 1
-    layer_count:  u32, // default = 1
-    sample_count: vk.SampleCountFlags, // default = 1
-    
-    format: Format,
-    usage:  Gpu_Usage_Flags,
-}
-
-Texture_Descriptor :: struct {
-    data: [4] u64,
-}
 
 Topology :: vk.PrimitiveTopology
 Cull     :: enum { None, CCW, CW, All }
@@ -502,6 +475,34 @@ DefaultBlendDesc :: Blend_Desc {
 DefaulColorMask :: Color_Mask { .R, .G, .B, .A }
 
 Color_Mask :: vk.ColorComponentFlags
+
+Texture_Desc :: struct {
+    kind:         vk.ImageType,
+    size:         uv3,
+    format:       Format,
+    mip_count:    u32,
+    sample_count: u32,
+    usage:        vk.ImageUsageFlags,
+}
+
+default_texture_desc :: proc (
+    kind:         vk.ImageType = .D2,
+    size:         uv3 = 1,
+    format:       Format = .UNDEFINED,
+    mip_count:    u32 = 1,
+    sample_count: u32 = 1,
+    usage:        vk.ImageUsageFlags = {},
+) -> Texture_Desc {
+    result := Texture_Desc {
+        kind = kind,
+        size = size,
+        format = format,
+        mip_count = mip_count,
+        sample_count = sample_count,
+        usage = usage,
+    }
+    return result
+}
 
 
 
@@ -607,25 +608,28 @@ gpu_free_address :: proc (gpu: ^Gpu, address: Gpu_Address($T)) {
 ////////////////////////////////////////////////
 // Textures
 
-// @cleanup @placement
-Image_Desc :: struct {
-    size:      uv2,
-    format:    Format,
-    mip_count: u32,
-}
-
 // @copypasta this can be compressed with allocate_size
-gpu_allocate_image :: proc (gpu: ^Gpu, desc: Image_Desc, usage: vk.ImageUsageFlags) -> Image {
+gpu_allocate_texture :: proc (gpu: ^Gpu, desc: Texture_Desc) -> Image {
+    samples: vk.SampleCountFlag
+    switch desc.sample_count {
+    case  1: samples = ._1
+    case  2: samples = ._2
+    case  4: samples = ._4
+    case  8: samples = ._8
+    case 16: samples = ._16
+    case: unreachable()
+    }
+    
     create_info := vk.ImageCreateInfo {
         sType = .IMAGE_CREATE_INFO,
-        imageType     = .D2,
+        imageType     = desc.kind,
         format        = desc.format,
-        extent        = { desc.size.x, desc.size.y, 1 },
+        extent        = { **desc.size },
         mipLevels     = desc.mip_count,
+        samples       = { samples },
+        usage         = desc.usage,
         arrayLayers   = 1,
-        samples       = { ._1 },
         tiling        = .OPTIMAL,
-        usage         = usage,
         initialLayout = .UNDEFINED,
     }
     
@@ -643,7 +647,7 @@ gpu_allocate_image :: proc (gpu: ^Gpu, desc: Image_Desc, usage: vk.ImageUsageFla
     return result
 }
 
-gpu_create_image_view :: proc (gpu: ^Gpu, image: Image, mip_base: u32, mip_count: u32, aspect_mask: vk.ImageAspectFlags) -> vk.ImageView {
+gpu_create_texture_view :: proc (gpu: ^Gpu, image: Image, mip_base: u32, mip_count: u32, aspect_mask: vk.ImageAspectFlags) -> vk.ImageView {
     view_create_info := vk.ImageViewCreateInfo {
         sType = .IMAGE_VIEW_CREATE_INFO,
         image    = image.image,
@@ -1162,13 +1166,13 @@ gpu_copy :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: any, source: pm
 }
 
 // @api size is redundant, maybe the Image struct should just store it for anyone to use
-gpu_copy_to_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: Image, source: vk.DeviceAddress, size: uv2) {
+gpu_copy_to_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: Image, source: vk.DeviceAddress, size: uv3) {
     alloc := gpu_reflect_get_allocation(source)
     
     region := vk.BufferImageCopy {
         bufferOffset = cast(vk.DeviceSize) alloc.offset,
         imageSubresource = { aspectMask = { .COLOR }, mipLevel = 0, layerCount = 1 },
-        imageExtent      = { width = size.x, height = size.y, depth = 1 },
+        imageExtent      = { **size },
     }
     
     vk.CmdCopyBufferToImage(cmd, alloc.buffer.buffer, destination.image, destination.last_transition.layout, 1, &region)
