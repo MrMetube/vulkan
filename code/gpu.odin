@@ -140,6 +140,8 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             check(vk.CreateInstance(&instance_create_info, nil, &result.instance))
             
             vk.load_proc_addresses_instance(result.instance)
+            
+            assert(vk.GetPhysicalDeviceProperties2 != nil)
         }
         
         ////////////////////////////////////////////////
@@ -221,11 +223,18 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             vk.KHR_SWAPCHAIN_EXTENSION_NAME,
             vk.EXT_MESH_SHADER_EXTENSION_NAME,
             vk.KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME,
+            vk.EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME,
+        }
+        
+        f_dbuffer := vk.PhysicalDeviceDescriptorBufferFeaturesEXT{
+            sType            = .PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT,
+            descriptorBuffer = true,
         }
         
         // @correctness These features are still extensions, and we should query their availability.
         f_mesh := vk.PhysicalDeviceMeshShaderFeaturesEXT {
             sType = .PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
+            pNext = &f_dbuffer,
             
             meshShader = true, // 57.18% (vulkan.gpuinfo.org for "1.4 and up" on 18.06.2026)
             taskShader = true,
@@ -252,6 +261,8 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             timelineSemaphore                         = true,
             
             bufferDeviceAddress = true,
+            descriptorBindingSampledImageUpdateAfterBind = true,
+            descriptorBindingPartiallyBound= true,
             
             shaderFloat16 = true,
             shaderInt8    = true,
@@ -775,7 +786,7 @@ gpu_destroy_texture_view :: proc (gpu: ^Gpu, view: vk.ImageView) {
 // Pipelines 
 
 // @cleanup
-gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, temporary_set_layout: vk.DescriptorSetLayout = 0) -> Pipeline {
+gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, set_layout: ..vk.DescriptorSetLayout) -> Pipeline {
     // @todo(viktor): allow for optional shader constant, i.e. vulkan specialization constants
     assert(compute.stage == .COMPUTE)
     
@@ -783,11 +794,7 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, temporary_set_l
     result.bind_point    = .COMPUTE
     result.shader_stages = { .COMPUTE }
     
-    if temporary_set_layout != 0 {
-        result.layout = create_pipeline_layout(gpu, result.shader_stages, temporary_set_layout)
-    } else {
-        result.layout = create_pipeline_layout(gpu, result.shader_stages)
-    }
+    result.layout = create_pipeline_layout(gpu, result.shader_stages, ..set_layout)
     
     create_info := vk.ComputePipelineCreateInfo {
         sType = .COMPUTE_PIPELINE_CREATE_INFO,
@@ -939,6 +946,8 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
     
     create_info := vk.GraphicsPipelineCreateInfo {
         sType = .GRAPHICS_PIPELINE_CREATE_INFO,
+        
+        flags = { .DESCRIPTOR_BUFFER_EXT },
         
         pNext = &vk.PipelineRenderingCreateInfo {
             sType = .PIPELINE_RENDERING_CREATE_INFO,
@@ -1159,13 +1168,12 @@ gpu_destroy_semaphore :: proc (gpu: ^Gpu, semaphore: vk.Semaphore) {
 // Commands
 
 // void gpuMemCpy(GpuCommandBuffer cb, void* destGpu, void* srcGpu,);
-// void gpuCopyFromTexture(GpuCommandBuffer cb, void* destGpu, void* srcGpu, GpuTexture texture);
 
 gpu_copy :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: any, source: pmm) {
     unimplemented()
 }
 
-// @api size is redundant, maybe the Image struct should just store it for anyone to use
+// @api size is redundant here and for gpu_copy_to_texture, maybe the Image struct should just store it for anyone to use
 gpu_copy_to_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: Image, source: vk.DeviceAddress, size: uv3) {
     alloc := gpu_reflect_get_allocation(source)
     
@@ -1178,12 +1186,17 @@ gpu_copy_to_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: Imag
     vk.CmdCopyBufferToImage(cmd, alloc.buffer.buffer, destination.image, destination.last_transition.layout, 1, &region)
 }
 
-gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: pmm, source: pmm) {
-    unimplemented()
+gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: vk.DeviceAddress, source: Image, size: uv3) {
+    alloc := gpu_reflect_get_allocation(destination)
+    
+    region := vk.BufferImageCopy {
+        bufferOffset = cast(vk.DeviceSize) alloc.offset,
+        imageSubresource = { aspectMask = { .COLOR }, mipLevel = 0, layerCount = 1 },
+        imageExtent      = { **size },
+    }
+    
+    vk.CmdCopyImageToBuffer(cmd, source.image, source.last_transition.layout, alloc.buffer.buffer, 1, &region)
 }
-
-// @todo
-// void gpuSetActiveTextureHeapPtr(GpuCommandBuffer cb, void *ptrGpu);
 
 // @todo(viktor): check where niagara uses dependency flags and add it
 gpu_barrier :: proc (command_buffer: vk.CommandBuffer, before, after: vk.PipelineStageFlags2, hazard := Hazard_Flags {}) {
@@ -1194,12 +1207,15 @@ gpu_barrier :: proc (command_buffer: vk.CommandBuffer, before, after: vk.Pipelin
         memoryBarrierCount = 1,
         pMemoryBarriers    = &vk.MemoryBarrier2 {
             sType = .MEMORY_BARRIER_2,
+            // @todo(viktor): set based on hazards
             srcStageMask = before,
             dstStageMask = after,
-            // srcAccessMask = vk.AccessFlags2., // @todo(viktor): set based on hazards
-            // dstAccessMask: AccessFlags2,
         },
     }
+    
+    // @todo tell the gpu to flush any descriptor caches in texture samplers, or whereever
+    // if .descriptors in hazard {
+    // }
     
     vk.CmdPipelineBarrier2(command_buffer, &info)
 }

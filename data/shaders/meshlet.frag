@@ -1,6 +1,7 @@
 #version 460
 
-#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_nonuniform_qualifier: require
+// #extension GL_ARB_bindless_texture:     require
 // #extension GL_EXT_samplerless_texture_functions : enable
 
 #include "common.glslh"
@@ -10,7 +11,8 @@
 layout(location = 0) flat   in Mesh_Result_Flat mesh_result_flat_fs;
 layout(location = 1) smooth in Mesh_Result_Smooth mesh_result_smooth_fs;
 
-layout(binding = 0) uniform sampler2D textures[];
+layout(binding = 0) uniform sampler global_sampler;
+layout(binding = 1) uniform texture2D textures_heap[];
 
 layout(location = 0) out vec4 pixel_result;
 
@@ -29,8 +31,8 @@ void main(void) {
     }
     
     uint texture_index = mesh_result_flat_fs.texture_index;
+    vec3 albedo = texture(sampler2D(textures_heap[nonuniformEXT(1)], global_sampler), mesh_result_smooth_fs.uv).rgb;
     
-    vec3 albedo = texture(textures[texture_index], mesh_result_smooth_fs.uv).rgb;
     vec3 color = diffuse * albedo + specular;
     
     if (Debug) {

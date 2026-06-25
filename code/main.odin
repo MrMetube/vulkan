@@ -79,6 +79,7 @@ Draw_Globals :: struct {
 
 // @shader
 Depth_Globals :: struct {
+    texture_index: u32,
     size: v2,
 }
 
@@ -227,6 +228,8 @@ main :: proc () {
     textures: [1024] Image
     texture_descriptors: [3] vk.DescriptorImageInfo
     
+    texture_heap := create_descriptor_heap(&gpu, 65536)
+    
     {
         upload_bump := bump_allocator_make_temporary(&gpu, 256 * Megabyte, usage = { .TRANSFER_SRC })
         defer bump_allocator_delete(&gpu, &upload_bump)
@@ -267,23 +270,24 @@ main :: proc () {
             pipeline_barrier_begin()
                 add_image_barrier_transition_from_last(&texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
             pipeline_barrier_end(cmd)
+            
+            write_texture_to_heap(&gpu, &texture_heap, index, texture.view, texture.last_transition.layout)
         }
             
         gpu_barrier(cmd, { .TRANSFER }, { .ALL_COMMANDS }, { .descriptors })
         
         gpu_submit(gpu.transfer_queue, upload_semaphore, 1, cmd)
         gpu_wait_semaphore(&gpu, upload_semaphore, 1)
-        
-        // @incomplete
-        // // Later during rendering...
-        // gpuSetActiveTextureHeapPtr(commandBuffer, gpuHostToDevicePointer(textureHeap));
     }
     
     ////////////////////////////////////////////////
-
+    
+    global_sampler := create_sampler(&gpu, .LINEAR, .LINEAR, anisotropy = true)
+    
     // @todo(viktor): migrate the depth_pyramid image into the textures array. make it manage all textures, and let stuff just hold onto a handle inside that array.
-    // @study does this setup allow us to add more textures as needed and leave slots empty in the mean time?
-    // @study how many textures can we index into like this? is there a limit defined by the gpu?    
+    // @study how many textures can we index into like this? maxDescriptorSetSampledImages, maxPerStageDescriptorSampledImages
+    // @study descriptorBindingUpdateAfterBind
+    // @todo it seems we need two texture sets, one for sampling .CombinedImageSampler, and one for writing to .StorageImage
     textures_descriptor_set_layout: vk.DescriptorSetLayout
     textures_descriptor_set:        vk.DescriptorSet
     {
@@ -403,6 +407,7 @@ main :: proc () {
         pos.xz += arm(t * Tau)
     }
     
+    HEAP :: true
     
     cam_pos := v3{ 0, 0, 0}
     object_rotation: v3
@@ -561,14 +566,18 @@ main :: proc () {
             }
             
             destroy_pipeline(&gpu, meshlet_pipeline)
-            meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, task, mesh, frag, raster_description, textures_descriptor_set_layout)
+            if HEAP {
+                meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, task, mesh, frag, raster_description, texture_heap.layout)
+            } else {
+                meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, task, mesh, frag, raster_description, textures_descriptor_set_layout)
+            }
         }
         
         ////////////////////////////////////////////////
         
         entropy := seed_random_series(54654)
         when true {
-            draws := db_view[:20_000]
+            draws := db_view[:200_000]
             global_rotation := la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX)
             for &draw in draws {
                 p := random_bilateral(&entropy, v3) * {10, 10, 10} - {0, 0, 20}
@@ -578,7 +587,7 @@ main :: proc () {
                 rotation        := la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
                 draw.orientation = rotation * global_rotation
                 
-                draw.texture_index = random_index(&entropy, textures[:])
+                draw.texture_index = random_index(&entropy, texture_descriptors[:])
                 
                 mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
                 
@@ -731,9 +740,12 @@ main :: proc () {
             gpu_profile_zone_begin("meshlets")
             
             gpu_set_pipeline(cmd, meshlet_pipeline)
-                // @shader meshlet.task meshlet.mesh meshlet.frag
-                vk.CmdBindDescriptorSets(cmd, meshlet_pipeline.bind_point, meshlet_pipeline.layout, 0, 1, &textures_descriptor_set, 0, nil)
-                
+                if HEAP {
+                    gpu_set_active_texture_head_ptr(cmd, &texture_heap, 0)
+                } else {
+                    // @shader meshlet.task meshlet.mesh meshlet.frag
+                    vk.CmdBindDescriptorSets(cmd, meshlet_pipeline.bind_point, meshlet_pipeline.layout, 0, 1, &textures_descriptor_set, 0, nil)
+                }
                 
                 vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
                 

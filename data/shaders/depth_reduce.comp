@@ -1,5 +1,6 @@
 #version 460
 
+#extension GL_EXT_nonuniform_qualifier: require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64: require
 
 #include "common.glslh"
@@ -8,8 +9,16 @@ layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
 
 
 // @volatile
+// #define HEAP
+
+#ifdef HEAP
+layout(binding = 0, r32f) uniform writeonly image2D   Output;
+layout(binding = 1) uniform sampler global_sampler;
+layout(binding = 2) uniform texture2D textures_heap[];
+#else
 layout(binding = 0)       uniform           sampler2D Input;
 layout(binding = 1, r32f) uniform writeonly image2D   Output;
+#endif
 
 // @volatile
 layout(push_constant) uniform Push_Data {
@@ -20,7 +29,11 @@ layout(push_constant) uniform Push_Data {
 void main() {
     uvec2 pixel = gl_GlobalInvocationID.xy;
     
+    #ifdef HEAP
+    vec4 depth4 = textureGather(sampler2D(textures_heap[nonuniformEXT(globals.texture_index)], global_sampler), (vec2(pixel)+0.5) / globals.size);
+    #else
     vec4 depth4 = textureGather(Input, (vec2(pixel)+0.5) / globals.size);
+    #endif
     float depth = min( min(depth4.x, depth4.y), min(depth4.z, depth4.w) );
     
     imageStore(Output, ivec2(pixel), vec4(depth));

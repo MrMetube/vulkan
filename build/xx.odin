@@ -138,7 +138,7 @@ end_build :: proc (cmd: ^Cmd) {
 parse_run_and_debug_arguments :: proc () {
     runs := &the_state.runs
     
-    run_prefix := "run:"
+    run_prefix   := "run:"
     debug_prefix := "debug:"
     
     any_debug: bool
