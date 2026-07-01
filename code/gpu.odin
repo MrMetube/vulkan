@@ -535,9 +535,9 @@ gpu_reflect_get_allocation :: proc (address: vk.DeviceAddress) -> Buffer_Allocat
     assert(ok)
     return alloc
 } 
-gpu_reflect_get_buffer :: proc (address: vk.DeviceAddress) -> Buffer {
+gpu_reflect_get_buffer :: proc (address: vk.DeviceAddress) -> (Buffer, u32) {
     alloc := gpu_reflect_get_allocation(address)
-    return alloc.buffer
+    return alloc.buffer, alloc.offset
 }
 gpu_reflect_set_allocation :: proc (address: vk.DeviceAddress, buffer: Buffer, offset: u32 = 0) {
     _the_buffer_allocations[address] = { buffer, offset }
@@ -605,7 +605,8 @@ gpu_allocate_type :: proc (gpu: ^Gpu, $T: typeid, memory: Memory_Kind = .Default
 
 gpu_free :: proc { gpu_free_pointer, gpu_free_address }
 gpu_free_pointer :: proc (gpu: ^Gpu, pointer: vk.DeviceAddress) {
-    buffer := gpu_reflect_get_buffer(pointer)
+    buffer, offset := gpu_reflect_get_buffer(pointer)
+    assert(offset == 0)
     vk.FreeMemory(gpu.device,    buffer.memory, nil)
     vk.DestroyBuffer(gpu.device, buffer.buffer, nil)
 }
@@ -1331,20 +1332,20 @@ gpu_end_render_pass :: proc (cmd: vk.CommandBuffer) {
 // void gpuDrawMeshlets(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, uvec3 dim);
 // void gpuDrawMeshletsIndirect(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, void *dimGpu);
 
-// @api make gpu_data type safer
-gpu_dispatch :: proc (command_buffer: vk.CommandBuffer, pointer_to_the_gpu_address: ^^$T, group_size: uv3) {
+gpu_dispatch :: proc (command_buffer: vk.CommandBuffer, push_constant: GpuAddress($T), group_size: uv3) {
     assert(the_bound_pipeline.pipeline != 0, "no pipeline was bound")
     
-    vk.CmdPushConstants(command_buffer, the_bound_pipeline.layout, the_bound_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), pointer_to_the_gpu_address)
+    push_constant := push_constant
+    vk.CmdPushConstants(command_buffer, the_bound_pipeline.layout, the_bound_pipeline.shader_stages, 0, size_of(push_constant.p), &push_constant.p)
     
     vk.CmdDispatch(command_buffer, **group_size)
 }
 
-gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, commands, count: vk.DeviceAddress, max_count: u32, stride: u32, command_offset: umm, count_offset: umm) {
-    // @speed
-    commands_buffer := gpu_reflect_get_buffer(commands).buffer
-    count_buffer    := gpu_reflect_get_buffer(count).buffer
-    vk.CmdDrawMeshTasksIndirectCountEXT(cmd, commands_buffer, auto_cast command_offset, count_buffer, auto_cast  count_offset, max_count, stride)
+gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, commands: vk.DeviceAddress, count: GpuAddress(u32), max_count: u32, stride: u32, command_offset: umm) {
+    // @speed 
+    commands, commands_base_offset := gpu_reflect_get_buffer(commands)
+    count,    count_offset    := gpu_reflect_get_buffer(count.p)
+    vk.CmdDrawMeshTasksIndirectCountEXT(cmd, commands.buffer, auto_cast (commands_base_offset + auto_cast command_offset), count.buffer, auto_cast count_offset, max_count, stride)
 }
 
 

@@ -65,13 +65,18 @@ Cull_Globals :: struct #all_or_none {
 }
 
 // @shader
-Cull_Data :: struct {
+Cull_Data :: struct #all_or_none {
     frustum_planes: [6] v4,
     camera_p:   v3,
     draw_count: u32,
     
     frustum_culling_enabled: b32,
     lod_enabled:             b32,
+    occlusion_enabled:       b32,
+    pad:                     b32,
+    
+    pyramid_size: v2,
+    p00, p11, near_z: f32,
 }
 
 // @shader
@@ -186,14 +191,12 @@ main :: proc () {
     mb_view,   mesh_buffer           := gpu_allocate(&gpu,      [] Mesh,         256 * Megabyte / size_of(Mesh),         memory = memory)
     dvb_view,  draw_visibilty_buffer := gpu_allocate(&gpu,      [] u32,          256 * Megabyte / size_of(u32),          memory = memory, usage = { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
     dcb_view,  draw_command_buffer   := gpu_allocate(&gpu,      [] Draw_Command, 256 * Megabyte / size_of(Draw_Command), memory = memory, usage = { .STORAGE_BUFFER, .INDIRECT_BUFFER })
-    dccb_view, draw_command_count    := gpu_allocate_type(&gpu, u32,                                                     memory = memory, usage = { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
     
     dvb_cleared := false
     
     // @todo(viktor): this signifies that we dont need these to be cpu-visible memory
     unused(dvb_view)
     unused(dcb_view)
-    unused(dccb_view)
     
     geometry: Geometry
     {
@@ -365,9 +368,10 @@ main :: proc () {
     last_time := time.tick_now()
     
     debug: struct {
-        culling_enabled: bool,
-        lod_enabled:     bool,
-        display_pyramid: bool,
+        culling_enabled:   bool,
+        lod_enabled:       bool,
+        occlusion_enabled: bool,
+        display_pyramid:   bool,
         display_pyramid_mip_level: i32,
         
         cpu_time:  f64,
@@ -382,7 +386,7 @@ main :: proc () {
     // @correctness ensure that this is enough and that we did not overflow inside of a frame and override someone elses data for a shader
     frame_bump_allocators: [MaxFramesInFlight] Bump_Allocator
     for &bump in frame_bump_allocators {
-        bump = bump_allocator_make_temporary(&gpu, 1 * Megabyte)
+        bump = bump_allocator_make_temporary(&gpu, 128 * Megabyte, usage = { .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER })
     }
     
     for !quit {
@@ -417,12 +421,15 @@ main :: proc () {
             case .KEY_DOWN:
                 switch event.key.key {
                 case sdl.K_SPACE: space_down = true
-                case sdl.K_C:     debug.culling_enabled = !debug.culling_enabled
-                case sdl.K_L:     debug.lod_enabled     = !debug.lod_enabled
-                case sdl.K_O:     debug.display_pyramid = !debug.display_pyramid
+                case sdl.K_C:     debug.culling_enabled   = !debug.culling_enabled
+                case sdl.K_L:     debug.lod_enabled       = !debug.lod_enabled
+                case sdl.K_O:     debug.occlusion_enabled = !debug.occlusion_enabled
+                case sdl.K_P:     debug.display_pyramid   = !debug.display_pyramid
+                
+                case sdl.K_I:     print_profile_and_stats = true
+                
                 case sdl.K_PLUS:  debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level+1, 0, cast(i32) len(stuff.depth_pyramid_mips)-1)
                 case sdl.K_MINUS: debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level-1, 0, cast(i32) len(stuff.depth_pyramid_mips)-1)
-                case sdl.K_P:     print_profile_and_stats = true
                 }
             case .KEY_UP:
                 if event.key.key == sdl.K_SPACE {
@@ -481,6 +488,7 @@ main :: proc () {
         if gpu.swapchain_state == .Window_Is_Minimized { continue }
         
         bump := &frame_bump_allocators[frame_index]
+        bump_free_all(bump)
         
         ////////////////////////////////////////////////
         
@@ -658,25 +666,6 @@ main :: proc () {
             }
         }
         
-        
-        cull_globals_cpu, cull_globals_gpu := bump_allocate_type(bump, Cull_Globals)
-        
-        cull_globals_cpu^ = Cull_Globals {
-            draw_buffer            = draw_buffer,
-            mesh_buffer            = mesh_buffer,
-            draw_visibility_buffer = draw_visibilty_buffer,
-            draw_command_buffer    = draw_command_buffer,
-            draw_command_count     = draw_command_count.address,
-            
-            data = {
-                frustum_planes         = frustum_planes,
-                lod_enabled             = cast(b32) debug.lod_enabled,
-                frustum_culling_enabled = cast(b32) debug.culling_enabled,
-                draw_count              = auto_cast len(draws),
-                camera_p                = cam_pos,
-            },
-        }
-        
         // @todo remove this once its done by the gpu
         box0, box0_valid := get_axis_aligned_bounding_box_fast(multiply(view_from_world, d0.p + geometry.meshes[d0.mesh_index].center * d0.scale), geometry.meshes[d0.mesh_index].radius * d0.scale, screen_from_view)
         box1, box1_valid := get_axis_aligned_bounding_box_fast(multiply(view_from_world, d1.p + geometry.meshes[d1.mesh_index].center * d1.scale), geometry.meshes[d1.mesh_index].radius * d1.scale, screen_from_view)
@@ -693,23 +682,53 @@ main :: proc () {
         ////////////////////////////////////////////////
         // early cull - frustum cull & fill objects that *were* visible last frame
         
+        
+        _, draw_command_count_gpu := bump_allocate_type(bump, u32)
+        
+        cull_globals_cpu, cull_globals_gpu := bump_allocate_type(bump, Cull_Globals)
+        cull_globals_cpu^ = Cull_Globals {
+            draw_buffer            = draw_buffer,
+            mesh_buffer            = mesh_buffer,
+            draw_visibility_buffer = draw_visibilty_buffer,
+            draw_command_buffer    = draw_command_buffer,
+            draw_command_count     = draw_command_count_gpu.p,
+            
+            data = {
+                frustum_planes          = frustum_planes,
+                draw_count              = auto_cast len(draws),
+                camera_p                = cam_pos,
+                
+                lod_enabled             = cast(b32) debug.lod_enabled,
+                frustum_culling_enabled = cast(b32) debug.culling_enabled,
+                occlusion_enabled       = cast(b32) debug.occlusion_enabled,
+                pad = {},
+                
+                p00 = screen_from_view[0,0],
+                p11 = screen_from_view[1,1],
+                near_z = near_z,
+                
+                pyramid_size = cast(v2) stuff.depth_pyramid_mips[0].size,
+            },
+        }
+        
         gpu_labeled_region_begin(cmd, "early culling", {0.0, 0.6, 0.8, 1.0})
             gpu_profile_zone_begin("early culling")
             
-            gpu_barrier(cmd, {}, { .TRANSFER })
-            
             ////////////////////////////////////////////////
             
+            gpu_barrier(cmd, {}, { .TRANSFER })
+            
             {
-                count_buffer := gpu_reflect_get_buffer(draw_command_count.address).buffer
-                vk.CmdFillBuffer(cmd, count_buffer, 0, cast(vk.DeviceSize) vk.WHOLE_SIZE, 0)
+                count, offset := gpu_reflect_get_buffer(draw_command_count_gpu.p)
+                vk.CmdFillBuffer(cmd, count.buffer, cast(vk.DeviceSize) offset, gpu_size_of(draw_command_count_gpu), 0)
             }
+            
             
             if !dvb_cleared {
                 dvb_cleared = true
                 {
-                    visibility_buffer := gpu_reflect_get_buffer(draw_visibilty_buffer).buffer
-                    vk.CmdFillBuffer(cmd, visibility_buffer, 0, cast(vk.DeviceSize) len(draws) * size_of(dvb_view[0]), 1)
+                    visibility_buffer, offset := gpu_reflect_get_buffer(draw_visibilty_buffer)
+                    vk.CmdFillBuffer(cmd, visibility_buffer.buffer, cast(vk.DeviceSize) offset, cast(vk.DeviceSize) len(draws) * size_of(dvb_view[0]), 1)
                 }
             }
             
@@ -721,24 +740,21 @@ main :: proc () {
             ////////////////////////////////////////////////
             
             gpu_set_pipeline(cmd, early_cull_pipeline)
+                
+                gpu_dispatch(cmd, cull_globals_gpu, get_group_count(early_cull_shader, auto_cast len(draws)))
             
-                // @shader cull.comp
-                gpu_dispatch(cmd, &cull_globals_gpu, get_group_count(early_cull_shader, auto_cast len(draws)))
-            
-            ////////////////////////////////////////////////
-            
-            // @todo(viktor): should these be combined into one api call?
-            gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
-            // this apparently needs to happend before we do anything related to rendering
-            pipeline_barrier_begin()
-                add_image_barrier(&stuff.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL)
-                add_image_barrier(&stuff.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
-            pipeline_barrier_end(cmd)
-            
-            ////////////////////////////////////////////////
-            
-            gpu_profile_zone_end()
+        gpu_profile_zone_end()
         gpu_labeled_region_end(cmd)
+        
+        ////////////////////////////////////////////////
+        
+        // @todo(viktor): should these be combined into one api call?
+        gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
+        // this apparently needs to happend before we do anything related to rendering
+        pipeline_barrier_begin()
+            add_image_barrier(&stuff.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL)
+            add_image_barrier(&stuff.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
+        pipeline_barrier_end(cmd)
         
         ////////////////////////////////////////////////
         
@@ -782,9 +798,7 @@ main :: proc () {
                     
                     vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
                     
-                    // @api it would be way nicer to be able to combine the address of a buffer with the offset directly, removing two arguments.
-                    // But I dont know how to then get back to the buffer and offset for vulkans api. :(
-                    gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer, draw_command_count.address, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command), 0)
+                    gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer, draw_command_count_gpu, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command))
                 
                 gpu_profile_zone_end()
                 gpu_labeled_region_end(cmd)
@@ -833,7 +847,7 @@ main :: proc () {
                     depth_globals_cpu, depth_globals_gpu := bump_allocate_type(bump, Depth_Globals)
                     depth_globals_cpu^ = Depth_Globals { size = cast(v2) mip.size }
                     
-                    gpu_dispatch(cmd, &depth_globals_gpu, get_group_count(depth_reduce_shader, **mip.size))
+                    gpu_dispatch(cmd, depth_globals_gpu, get_group_count(depth_reduce_shader, **mip.size))
                     
                     pipeline_barrier_begin()
                         add_image_barrier_transition_from_last(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
@@ -855,13 +869,13 @@ main :: proc () {
         gpu_labeled_region_begin(cmd, "late culling", {0.0, 0.6, 0.8, 1.0})
             gpu_profile_zone_begin("late culling")
             
-            gpu_barrier(cmd, { .DRAW_INDIRECT, .TRANSFER }, { .TRANSFER })
-            
             ////////////////////////////////////////////////
             
+            gpu_barrier(cmd, { .DRAW_INDIRECT, .TRANSFER }, { .TRANSFER })
+            
             {
-                count_buffer := gpu_reflect_get_buffer(draw_command_count.address).buffer
-                vk.CmdFillBuffer(cmd, count_buffer, 0, cast(vk.DeviceSize) vk.WHOLE_SIZE, 0)
+                count, offset := gpu_reflect_get_buffer(draw_command_count_gpu.p)
+                vk.CmdFillBuffer(cmd, count.buffer, cast(vk.DeviceSize) offset, gpu_size_of(draw_command_count_gpu), 0)
             }
             
             ////////////////////////////////////////////////
@@ -872,15 +886,13 @@ main :: proc () {
             ////////////////////////////////////////////////
             
             gpu_set_pipeline(cmd, late_cull_pipeline)
+                
+                gpu_dispatch(cmd, cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)))
+                
+            gpu_barrier(cmd, { .DRAW_INDIRECT, .TRANSFER }, { .TRANSFER })
             
-                // @shader cull.comp
-                gpu_dispatch(cmd, &cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)))
-                ////////////////////////////////////////////////
-        
         gpu_profile_zone_end()
         gpu_labeled_region_end(cmd)
-        
-        gpu_barrier(cmd, { .DRAW_INDIRECT, .TRANSFER }, { .TRANSFER })
         
         ////////////////////////////////////////////////
         
@@ -904,9 +916,7 @@ main :: proc () {
                     
                     vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
                     
-                    // @api it would be way nicer to be able to combine the address of a buffer with the offset directly, removing two arguments.
-                    // But I dont know how to then get back to the buffer and offset for vulkans api. :(
-                    gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer, draw_command_count.address, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command), 0)
+                    gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer, draw_command_count_gpu, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command))
                 
             gpu_end_render_pass(cmd)
         gpu_labeled_region_end(cmd)
@@ -1036,7 +1046,6 @@ main :: proc () {
     gpu_free(&gpu, draw_buffer)
     gpu_free(&gpu, draw_visibilty_buffer)
     gpu_free(&gpu, draw_command_buffer)
-    gpu_free(&gpu, draw_command_count)
     
     for &bump in frame_bump_allocators {
         bump_allocator_delete(&gpu, &bump)

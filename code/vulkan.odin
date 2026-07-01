@@ -82,7 +82,7 @@ gpu_recreate_swapchain_if_needed :: proc (gpu: ^Gpu) -> (can_render: bool) {
         return true
     }
     
-    vk.DeviceWaitIdle(gpu.device)
+    check(vk.DeviceWaitIdle(gpu.device))
     
     surface_capabilities: vk.SurfaceCapabilitiesKHR
     check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(gpu.physical_device, gpu.surface, &surface_capabilities))
