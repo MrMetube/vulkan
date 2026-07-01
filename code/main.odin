@@ -33,11 +33,16 @@ Geometry :: struct {
     meshes: [dynamic] Mesh,
 }
 
+Depth_Pyramid_Mip :: struct {
+    view: vk.ImageView,
+    size: uv2,
+}
+
 Stuff_With_The_Same_Lifetime_As_The_Swapchain :: struct {
     color_buffer: Image,
     depth_buffer: Image,
     
-    depth_sampler: vk.Sampler, // well except you of course..
+    depth_sampler: vk.Sampler,
     depth_pyramid: Image,
     depth_pyramid_mips: [dynamic; 16] Depth_Pyramid_Mip,
 }
@@ -50,12 +55,18 @@ MaxTriangles :: 84
 
 // @shader cull.comp
 Cull_Globals :: struct #all_or_none {
-    frustum_planes: [6] v4,
-    draw_buffer:         vk.DeviceAddress "Draw",
-    mesh_buffer:         vk.DeviceAddress "Mesh",
-    draw_command_buffer: vk.DeviceAddress "Draw_Command",
-    draw_command_count:  vk.DeviceAddress "uint",
+    draw_buffer:            vk.DeviceAddress "Draw",
+    mesh_buffer:            vk.DeviceAddress "Mesh",
+    draw_visibility_buffer: vk.DeviceAddress "uint",
+    draw_command_buffer:    vk.DeviceAddress "Draw_Command",
+    draw_command_count:     vk.DeviceAddress "uint",
     
+    using data: Cull_Data,
+}
+
+// @shader
+Cull_Data :: struct {
+    frustum_planes: [6] v4,
     camera_p:   v3,
     draw_count: u32,
     
@@ -65,9 +76,9 @@ Cull_Globals :: struct #all_or_none {
 
 // @shader
 Draw_Globals :: struct {
-    view_from_world:      m4,
+    view_from_world:  m4,
     screen_from_view: m4,
-    light_pos:  [4] v4,
+    light_pos:        [4] v4,
     
     draw_command_buffer: vk.DeviceAddress "Draw_Command",
     draw_buffer:         vk.DeviceAddress "Draw",
@@ -168,15 +179,21 @@ main :: proc () {
     
     // @todo(viktor): draws change per frame and could also be placed in the per frame bump allocator, as we just need a gpu address
     // All the geometry data can just live in the gpu
-    vb_view,   vertex_buffer        := gpu_allocate(&gpu, [] Vertex,    256 * Megabyte / size_of(Vertex),  memory = memory)
-    mlb_view,  meshlet_buffer       := gpu_allocate(&gpu, [] Meshlet,   256 * Megabyte / size_of(Meshlet), memory = memory)
-    mdb_view,  meshlet_data_buffer  := gpu_allocate(&gpu, [] u32,       256 * Megabyte / size_of(u32),     memory = memory)
-    db_view,   draw_buffer          := gpu_allocate(&gpu, [] Draw,      256 * Megabyte / size_of(Draw),    memory = memory)
-    mb_view,   mesh_buffer          := gpu_allocate(&gpu, [] Mesh,      256 * Megabyte / size_of(Mesh),    memory = memory)
-    dcb_view,  draw_command_buffer  := gpu_allocate(&gpu, [] Draw_Command, 256 * Megabyte / size_of(Draw_Command), memory = memory, usage = vk.BufferUsageFlags {  .STORAGE_BUFFER, .INDIRECT_BUFFER })
-    dccb_view, draw_command_count := gpu_allocate_type(&gpu, u32, memory = memory, usage = { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
+    vb_view,   vertex_buffer         := gpu_allocate(&gpu,      [] Vertex,       256 * Megabyte / size_of(Vertex),       memory = memory)
+    mlb_view,  meshlet_buffer        := gpu_allocate(&gpu,      [] Meshlet,      256 * Megabyte / size_of(Meshlet),      memory = memory)
+    mdb_view,  meshlet_data_buffer   := gpu_allocate(&gpu,      [] u32,          256 * Megabyte / size_of(u32),          memory = memory)
+    db_view,   draw_buffer           := gpu_allocate(&gpu,      [] Draw,         256 * Megabyte / size_of(Draw),         memory = memory)
+    mb_view,   mesh_buffer           := gpu_allocate(&gpu,      [] Mesh,         256 * Megabyte / size_of(Mesh),         memory = memory)
+    dvb_view,  draw_visibilty_buffer := gpu_allocate(&gpu,      [] u32,          256 * Megabyte / size_of(u32),          memory = memory, usage = { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
+    dcb_view,  draw_command_buffer   := gpu_allocate(&gpu,      [] Draw_Command, 256 * Megabyte / size_of(Draw_Command), memory = memory, usage = { .STORAGE_BUFFER, .INDIRECT_BUFFER })
+    dccb_view, draw_command_count    := gpu_allocate_type(&gpu, u32,                                                     memory = memory, usage = { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
     
+    dvb_cleared := false
+    
+    // @todo(viktor): this signifies that we dont need these to be cpu-visible memory
+    unused(dvb_view)
     unused(dcb_view)
+    unused(dccb_view)
     
     geometry: Geometry
     {
@@ -219,7 +236,8 @@ main :: proc () {
         append(&meshlet_shaders, shader)
     }
     
-    draw_cull_shader    := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/draw_cull.comp",    shader_allocator)
+    early_cull_shader    := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/cull_early.comp",    shader_allocator)
+    late_cull_shader    := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/cull_late.comp",    shader_allocator)
     depth_reduce_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/depth_reduce.comp", shader_allocator)
     
     ////////////////////////////////////////////////
@@ -319,9 +337,10 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    cull_pipeline:    Pipeline
-    depth_pipeline:   Pipeline
-    meshlet_pipeline: Pipeline
+    early_cull_pipeline: Pipeline
+    late_cull_pipeline:  Pipeline
+    depth_pipeline:      Pipeline
+    meshlet_pipeline:    Pipeline
     
     ////////////////////////////////////////////////
     
@@ -353,7 +372,8 @@ main :: proc () {
         
         cpu_time:  f64,
         gpu_time:  f64,
-        cull_time: f64,
+        early_cull_time: f64,
+        late_cull_time:  f64,
     } = {
         culling_enabled = true,
         lod_enabled     = true,
@@ -466,15 +486,18 @@ main :: proc () {
         
         watchers_check_for_modification(watchers)
         
-        if reload_shaders_if_needed(watchers, shader_allocator, &draw_cull_shader) || !pipeline_is_valid(cull_pipeline) {
-            destroy_pipeline(&gpu, cull_pipeline)
-            
-            cull_pipeline = gpu_create_compute_pipeline(&gpu, draw_cull_shader)
+        if reload_shaders_if_needed(watchers, shader_allocator, &early_cull_shader) || !pipeline_is_valid(early_cull_pipeline) {
+            destroy_pipeline(&gpu, early_cull_pipeline)
+            early_cull_pipeline = gpu_create_compute_pipeline(&gpu, early_cull_shader)
+        }
+        
+        if reload_shaders_if_needed(watchers, shader_allocator, &late_cull_shader) || !pipeline_is_valid(late_cull_pipeline) {
+            destroy_pipeline(&gpu, late_cull_pipeline)
+            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, late_cull_shader)
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, &depth_reduce_shader) || !pipeline_is_valid(depth_pipeline) {
             destroy_pipeline(&gpu, depth_pipeline)
-            
             depth_pipeline = gpu_create_compute_pipeline(&gpu, depth_reduce_shader, depth_descriptor_set_layout)
             depth_pipeline.update_template = create_update_template(gpu.device, .COMPUTE, depth_pipeline.layout, depth_reduce_shader)
         }
@@ -560,8 +583,104 @@ main :: proc () {
             fmt.println(closest_index, draws[closest_index])
         }
         
+        // @todo remove this debug code
         d0 := &draws[4850]
         d1 := &draws[18774]
+        
+        ////////////////////////////////////////////////
+        
+        // @todo make use of this in the cull compute shader
+        // :ReversedZ: we assume a reversed_z projection matrix and can use that to simplify the matrix multiplications
+        // based on this paper, but then simplified to our actual use case: https://jcgt.org/published/0002/02/05/paper.pdf
+        get_axis_aligned_bounding_box_fast :: proc (center_in_view_space: v3, radius: f32, screen_from_view_reversed_z: m4) -> (Rectangle2, bool) {
+            p00    := screen_from_view_reversed_z[0,0]
+            p11    := screen_from_view_reversed_z[1,1]
+            
+            // @todo we remove the handling of clipped boxes, so we need to early out in the shader in these cases and assume that we cannot cull the mesh
+            // near_z := screen_from_view_reversed_z[2,3]
+            // if center_in_view_space.z < radius + near_z {
+            //     return {}, false
+            // }
+                            
+            // center in the x/y-z frame
+            cx := center_in_view_space.xz
+            cy := center_in_view_space.yz
+            
+            cx_length_squared := length_squared(cx)
+            cy_length_squared := length_squared(cy)
+            
+            // (cos, sin) of angle theta between c and x/y tangent vector
+            vx := v2{square_root(cx_length_squared - square(radius)), radius} / square_root(cx_length_squared)
+            vy := v2{square_root(cy_length_squared - square(radius)), radius} / square_root(cy_length_squared)
+            
+            // In the x/y-z reference frame
+            // Transform back to camera space
+            min_x := -p00 * dot(v2{vx.x,  vx.y}, cx) / dot(v2{-vx.y, vx.x}, cx)
+            max_x := -p00 * dot(v2{vx.x, -vx.y}, cx) / dot(v2{ vx.y, vx.x}, cx)
+            min_y := -p11 * dot(v2{vy.x, -vy.y}, cy) / dot(v2{ vy.y, vy.x}, cy)
+            max_y := -p11 * dot(v2{vy.x,  vy.y}, cy) / dot(v2{-vy.y, vy.x}, cy) 
+            
+            result := rect_min_max(min_x, min_y, max_x, max_y)
+            
+            // transform to clip space
+            result.min = result.min * {.5, -.5} + .5
+            result.max = result.max * {.5, -.5} + .5
+            
+            return result, true
+        }
+        
+        
+        // @important @todo once we are satisfied with the occlusion culling the near plane should be set to a more reasonable value like 0.01. the 0.1 value is just useful for debugging, as the depth values lie in a more visible range.
+        near_z: f32 = 0.1
+        screen_from_view := projection_reversed_z_infinite_far_plane(70 * RadPerDeg, cast(f32) gpu.swapchain_size.x / cast(f32) gpu.swapchain_size.y, near_z)
+        view_from_world  := translate(1, -cam_pos)
+        
+        draw_distance: f32 = 100
+        
+        frustum_planes: [6] v4
+        if debug.culling_enabled {
+            screen_from_world := screen_from_view * view_from_world
+            cam_forward := v3{0, 0, -1}
+            
+            frustum_planes[0] = get_row_v4(screen_from_world, 3) + get_row_v4(screen_from_world, 0) // x + w < 0
+            frustum_planes[1] = get_row_v4(screen_from_world, 3) - get_row_v4(screen_from_world, 0) // x - w > 0
+            frustum_planes[2] = get_row_v4(screen_from_world, 3) + get_row_v4(screen_from_world, 1) // y + w < 0
+            frustum_planes[3] = get_row_v4(screen_from_world, 3) - get_row_v4(screen_from_world, 1) // y - w > 0
+            frustum_planes[4] = get_row_v4(screen_from_world, 3) - get_row_v4(screen_from_world, 2) // z - w > 0 -- :ReversedZ:
+            
+            unused(draw_distance)
+            unused(cam_forward)
+            // @todo(viktor): also reenable in the compute shader
+            // frustum_planes[5] = v4{**cam_forward, draw_distance + dot(cam_forward, cam_pos)}          // :ReversedZ: infinite far plane
+            
+            for &plane in frustum_planes {
+                plane /= length(plane.xyz)
+            }
+        }
+        
+        
+        cull_globals_cpu, cull_globals_gpu := bump_allocate_type(bump, Cull_Globals)
+        
+        cull_globals_cpu^ = Cull_Globals {
+            draw_buffer            = draw_buffer,
+            mesh_buffer            = mesh_buffer,
+            draw_visibility_buffer = draw_visibilty_buffer,
+            draw_command_buffer    = draw_command_buffer,
+            draw_command_count     = draw_command_count.address,
+            
+            data = {
+                frustum_planes         = frustum_planes,
+                lod_enabled             = cast(b32) debug.lod_enabled,
+                frustum_culling_enabled = cast(b32) debug.culling_enabled,
+                draw_count              = auto_cast len(draws),
+                camera_p                = cam_pos,
+            },
+        }
+        
+        // @todo remove this once its done by the gpu
+        box0, box0_valid := get_axis_aligned_bounding_box_fast(multiply(view_from_world, d0.p + geometry.meshes[d0.mesh_index].center * d0.scale), geometry.meshes[d0.mesh_index].radius * d0.scale, screen_from_view)
+        box1, box1_valid := get_axis_aligned_bounding_box_fast(multiply(view_from_world, d1.p + geometry.meshes[d1.mesh_index].center * d1.scale), geometry.meshes[d1.mesh_index].radius * d1.scale, screen_from_view)
+        unused(box0, box0_valid, box1, box1_valid)
         
         ////////////////////////////////////////////////
         
@@ -572,18 +691,26 @@ main :: proc () {
         gpu_profile_frame_begin(gpu.device, cmd)
         
         ////////////////////////////////////////////////
+        // early cull - frustum cull & fill objects that *were* visible last frame
         
-        gpu_labeled_region_begin(cmd, "culling", {0.0, 0.6, 0.8, 1.0})
-            gpu_profile_zone_begin("culling")
+        gpu_labeled_region_begin(cmd, "early culling", {0.0, 0.6, 0.8, 1.0})
+            gpu_profile_zone_begin("early culling")
             
-            // @todo(viktor): is this barrier/transition before the fill necessary?
             gpu_barrier(cmd, {}, { .TRANSFER })
             
             ////////////////////////////////////////////////
             
             {
                 count_buffer := gpu_reflect_get_buffer(draw_command_count.address).buffer
-                vk.CmdFillBuffer(cmd, count_buffer, 0, size_of(dccb_view^), 0)
+                vk.CmdFillBuffer(cmd, count_buffer, 0, cast(vk.DeviceSize) vk.WHOLE_SIZE, 0)
+            }
+            
+            if !dvb_cleared {
+                dvb_cleared = true
+                {
+                    visibility_buffer := gpu_reflect_get_buffer(draw_visibilty_buffer).buffer
+                    vk.CmdFillBuffer(cmd, visibility_buffer, 0, cast(vk.DeviceSize) len(draws) * size_of(dvb_view[0]), 1)
+                }
             }
             
             ////////////////////////////////////////////////
@@ -593,99 +720,10 @@ main :: proc () {
             
             ////////////////////////////////////////////////
             
-            // @important @todo once we are satisfied with the occlusion culling the near plane should be set to a more reasonable value like 0.01. the 0.1 value is just useful for debugging, as the depth values lie in a more visible range.
-            near_z: f32 = 0.1
-            screen_from_view := projection_reversed_z_infinite_far_plane(70 * RadPerDeg, cast(f32) gpu.swapchain_size.x / cast(f32) gpu.swapchain_size.y, near_z)
-            view_from_world       := translate(1, -cam_pos)
-            
-            draw_distance: f32 = 100
-            
-            frustum_planes: [6] v4
-            if debug.culling_enabled {
-                screen_from_world := screen_from_view * view_from_world
-                cam_forward := v3{0, 0, -1}
-                
-                frustum_planes[0] = get_row_v4(screen_from_world, 3) + get_row_v4(screen_from_world, 0) // x + w < 0
-                frustum_planes[1] = get_row_v4(screen_from_world, 3) - get_row_v4(screen_from_world, 0) // x - w > 0
-                frustum_planes[2] = get_row_v4(screen_from_world, 3) + get_row_v4(screen_from_world, 1) // y + w < 0
-                frustum_planes[3] = get_row_v4(screen_from_world, 3) - get_row_v4(screen_from_world, 1) // y - w > 0
-                frustum_planes[4] = get_row_v4(screen_from_world, 3) - get_row_v4(screen_from_world, 2) // z - w > 0 -- :ReversedZ:
-                
-                unused(draw_distance)
-                unused(cam_forward)
-                // @todo(viktor): also reenable in the compute shader
-                // frustum_planes[5] = v4{**cam_forward, draw_distance + dot(cam_forward, cam_pos)}          // :ReversedZ: infinite far plane
-                
-                for &plane in frustum_planes {
-                    plane /= length(plane.xyz)
-                }
-            }
-            
-            
-            cull_globals_cpu, cull_globals_gpu := bump_allocate_type(bump, Cull_Globals)
-            
-            cull_globals_cpu^ = Cull_Globals {
-                frustum_planes      = frustum_planes,
-                draw_buffer         = draw_buffer,
-                mesh_buffer         = mesh_buffer,
-                draw_command_buffer = draw_command_buffer,
-                draw_command_count  = draw_command_count.address,
-                
-                lod_enabled             = cast(b32) debug.lod_enabled,
-                frustum_culling_enabled = cast(b32) debug.culling_enabled,
-                draw_count              = auto_cast len(draws),
-                camera_p                = cam_pos,
-            }
-            
-            
-            // :ReversedZ: we assume a reversed_z projection matrix and can use that to simplify the matrix multiplications
-            // based on this paper, but then simplified to our actual use case: https://jcgt.org/published/0002/02/05/paper.pdf
-            get_axis_aligned_bounding_box_fast :: proc (center_in_view_space: v3, radius: f32, screen_from_view_reversed_z: m4) -> (Rectangle2, bool) {
-                p00    := screen_from_view_reversed_z[0,0]
-                p11    := screen_from_view_reversed_z[1,1]
-                near_z := screen_from_view_reversed_z[2, 3]
-                
-                // @todo we remove the handling of clipped boxes, so we need to early out in the shader in these cases and assume that we cannot cull the mesh
-                // if center_in_view_space.z < radius + near_z {
-                //     return {}, false
-                // }
-                                
-                // center in the x/y-z frame
-                cx := center_in_view_space.xz
-                cy := center_in_view_space.yz
-                
-                cx_length_squared := length_squared(cx)
-                cy_length_squared := length_squared(cy)
-                
-                // (cos, sin) of angle theta between c and x/y tangent vector
-                vx := v2{square_root(cx_length_squared - square(radius)), radius} / square_root(cx_length_squared)
-                vy := v2{square_root(cy_length_squared - square(radius)), radius} / square_root(cy_length_squared)
-                
-                // In the x/y-z reference frame
-                // Transform back to camera space
-                min_x := -p00 * dot(v2{vx.x,  vx.y}, cx) / dot(v2{-vx.y, vx.x}, cx)
-                max_x := -p00 * dot(v2{vx.x, -vx.y}, cx) / dot(v2{ vx.y, vx.x}, cx)
-                min_y := -p11 * dot(v2{vy.x, -vy.y}, cy) / dot(v2{ vy.y, vy.x}, cy)
-                max_y := -p11 * dot(v2{vy.x,  vy.y}, cy) / dot(v2{-vy.y, vy.x}, cy) 
-                
-                result := rect_min_max(min_x, min_y, max_x, max_y)
-                
-                // transform to clip space
-                result.min = result.min * {.5, -.5} + .5
-                result.max = result.max * {.5, -.5} + .5
-                
-                return result, true
-            }
-            
-            // @todo remove this once its done by the gpu
-            box0, box0_valid := get_axis_aligned_bounding_box_fast(multiply(view_from_world, d0.p + geometry.meshes[d0.mesh_index].center * d0.scale), geometry.meshes[d0.mesh_index].radius * d0.scale, screen_from_view)
-            box1, box1_valid := get_axis_aligned_bounding_box_fast(multiply(view_from_world, d1.p + geometry.meshes[d1.mesh_index].center * d1.scale), geometry.meshes[d1.mesh_index].radius * d1.scale, screen_from_view)
-            unused(box0, box0_valid, box1, box1_valid)
-            
-            gpu_set_pipeline(cmd, cull_pipeline)
+            gpu_set_pipeline(cmd, early_cull_pipeline)
             
                 // @shader cull.comp
-                gpu_dispatch(cmd, &cull_globals_gpu, get_group_count(draw_cull_shader, auto_cast len(draws)))
+                gpu_dispatch(cmd, &cull_globals_gpu, get_group_count(early_cull_shader, auto_cast len(draws)))
             
             ////////////////////////////////////////////////
             
@@ -704,15 +742,9 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        // Setting these outside of rendering-sections means they persist across all sections.
-        gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
-        gpu_set_scissor(cmd,  size = gpu.swapchain_size)
-        
-        ////////////////////////////////////////////////
-        
         // @shaders meshlet pipeline
         draw_globals.screen_from_view = screen_from_view
-        draw_globals.view_from_world      = view_from_world
+        draw_globals.view_from_world  = view_from_world
         
         draw_globals.draw_command_buffer = draw_command_buffer
         draw_globals.draw_buffer         = draw_buffer
@@ -724,35 +756,44 @@ main :: proc () {
         draw_globals_cpu, draw_globals_gpu := bump_allocate_type(bump, Draw_Globals)
         draw_globals_cpu^ = draw_globals
         
-        gpu_profile_zone_begin("rendering early pass")
-        gpu_labeled_region_begin(cmd, "rendering early pass", {0.6, 0.1, 07, 1.0})
-        begin_meshlet_rendering(&gpu, cmd, stuff.color_buffer, stuff.depth_buffer, {0.07, 0.07, 0.07, 1}, early = true)
+        ////////////////////////////////////////////////
+        
+        // Setting these outside of rendering-sections means they persist across all sections.
+        gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
+        gpu_set_scissor(cmd,  size = gpu.swapchain_size)
+        
+        ////////////////////////////////////////////////
+        // early render - render objects that were visible last frame
+        
+        gpu_profile_zone_begin("early rendering pass")
+        gpu_labeled_region_begin(cmd, "early rendering pass", {0.6, 0.1, 07, 1.0})
+            begin_meshlet_rendering(&gpu, cmd, stuff.color_buffer, stuff.depth_buffer, {0.07, 0.07, 0.07, 1}, early = true)
+                    
+                if print_profile_and_stats {
+                    vk.ResetQueryPool(gpu.device, stats_pool, 0, stats_count)
+                    vk.CmdBeginQuery(cmd, stats_pool, 0, {})
+                }
                 
-            if print_profile_and_stats {
-                vk.ResetQueryPool(gpu.device, stats_pool, 0, stats_count)
-                vk.CmdBeginQuery(cmd, stats_pool, 0, {})
-            }
-            
-            gpu_labeled_region_begin(cmd, "meshlets", {0.0, 0.6, 0.8, 1.0})
-            gpu_profile_zone_begin("meshlets")
-            
-            gpu_set_pipeline(cmd, meshlet_pipeline)
-                gpu_set_active_texture_head(cmd, &texture_heap, 0)
+                gpu_labeled_region_begin(cmd, "meshlets", {0.0, 0.6, 0.8, 1.0})
+                gpu_profile_zone_begin("meshlets")
                 
-                vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
+                gpu_set_pipeline(cmd, meshlet_pipeline)
+                    gpu_set_active_texture_head(cmd, &texture_heap, 0)
+                    
+                    vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
+                    
+                    // @api it would be way nicer to be able to combine the address of a buffer with the offset directly, removing two arguments.
+                    // But I dont know how to then get back to the buffer and offset for vulkans api. :(
+                    gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer, draw_command_count.address, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command), 0)
                 
-                // @api it would be way nicer to be able to combine the address of a buffer with the offset directly, removing two arguments.
-                // But I dont know how to then get back to the buffer and offset for vulkans api. :(
-                gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer, draw_command_count.address, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command), 0)
-            
-            gpu_profile_zone_end()
-            gpu_labeled_region_end(cmd)
-            
-            if print_profile_and_stats {
-                vk.CmdEndQuery(cmd, stats_pool, 0)
-            }
-            
-        gpu_end_render_pass(cmd)
+                gpu_profile_zone_end()
+                gpu_labeled_region_end(cmd)
+                
+                if print_profile_and_stats {
+                    vk.CmdEndQuery(cmd, stats_pool, 0)
+                }
+                
+            gpu_end_render_pass(cmd)
         gpu_labeled_region_end(cmd)
         gpu_profile_zone_end()
         
@@ -766,37 +807,38 @@ main :: proc () {
         pipeline_barrier_end(cmd)
         
         ////////////////////////////////////////////////
+        // depth pyramid generation
         
         gpu_profile_zone_begin("depth pyramid building")
         gpu_labeled_region_begin(cmd, "depth pyramid building", {0.4, 0.8, 0, 1.0})
         
-        gpu_set_pipeline(cmd, depth_pipeline)
-            
-            updates: [dynamic; 32] DescriptorUpdateData
-            prev_mip: ^Depth_Pyramid_Mip
-            for &mip, mip_level in stuff.depth_pyramid_mips {
-                // @shaders depth_reduce.comp
+            gpu_set_pipeline(cmd, depth_pipeline)
                 
-                clear(&updates)
-                append(&updates, DescriptorUpdateData { image = { 
-                    stuff.depth_sampler,
-                    mip_level == 0 ? stuff.depth_buffer.view                   : prev_mip.view,
-                    mip_level == 0 ? stuff.depth_buffer.last_transition.layout : .GENERAL,
-                } })
-                append(&updates, DescriptorUpdateData { image = { stuff.depth_sampler, mip.view, .GENERAL } })
-                vk.CmdPushDescriptorSetWithTemplate(cmd, depth_pipeline.update_template, depth_pipeline.layout, 0, raw_data(&updates))
-                
-                prev_mip = &mip
-                
-                depth_globals_cpu, depth_globals_gpu := bump_allocate_type(bump, Depth_Globals)
-                depth_globals_cpu^ = Depth_Globals { size = cast(v2) mip.size }
-                
-                gpu_dispatch(cmd, &depth_globals_gpu, get_group_count(depth_reduce_shader, **mip.size))
-                
-                pipeline_barrier_begin()
-                    add_image_barrier_transition_from_last(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
-                pipeline_barrier_end(cmd, { .BY_REGION })
-            }
+                updates: [dynamic; 32] DescriptorUpdateData
+                prev_mip: ^Depth_Pyramid_Mip
+                for &mip, mip_level in stuff.depth_pyramid_mips {
+                    // @shaders depth_reduce.comp
+                    
+                    clear(&updates)
+                    append(&updates, DescriptorUpdateData { image = { 
+                        stuff.depth_sampler,
+                        mip_level == 0 ? stuff.depth_buffer.view                   : prev_mip.view,
+                        mip_level == 0 ? stuff.depth_buffer.last_transition.layout : .GENERAL,
+                    } })
+                    append(&updates, DescriptorUpdateData { image = { stuff.depth_sampler, mip.view, .GENERAL } })
+                    vk.CmdPushDescriptorSetWithTemplate(cmd, depth_pipeline.update_template, depth_pipeline.layout, 0, raw_data(&updates))
+                    
+                    prev_mip = &mip
+                    
+                    depth_globals_cpu, depth_globals_gpu := bump_allocate_type(bump, Depth_Globals)
+                    depth_globals_cpu^ = Depth_Globals { size = cast(v2) mip.size }
+                    
+                    gpu_dispatch(cmd, &depth_globals_gpu, get_group_count(depth_reduce_shader, **mip.size))
+                    
+                    pipeline_barrier_begin()
+                        add_image_barrier_transition_from_last(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
+                    pipeline_barrier_end(cmd, { .BY_REGION })
+                }
         
         gpu_labeled_region_end(cmd)
         gpu_profile_zone_end()
@@ -808,12 +850,65 @@ main :: proc () {
         pipeline_barrier_end(cmd)
         
         ////////////////////////////////////////////////
+        // late cull - frustum & occlusion cull & fill objects that were *not* visible last frame
         
-        gpu_profile_zone_begin("rendering late pass")
-        gpu_labeled_region_begin(cmd, "rendering late pass", {0.6, 0.1, 07, 1.0})
-        begin_meshlet_rendering(&gpu, cmd, stuff.color_buffer, stuff.depth_buffer, {}, early = false)
+        gpu_labeled_region_begin(cmd, "late culling", {0.0, 0.6, 0.8, 1.0})
+            gpu_profile_zone_begin("late culling")
             
-        gpu_end_render_pass(cmd)
+            gpu_barrier(cmd, { .DRAW_INDIRECT, .TRANSFER }, { .TRANSFER })
+            
+            ////////////////////////////////////////////////
+            
+            {
+                count_buffer := gpu_reflect_get_buffer(draw_command_count.address).buffer
+                vk.CmdFillBuffer(cmd, count_buffer, 0, cast(vk.DeviceSize) vk.WHOLE_SIZE, 0)
+            }
+            
+            ////////////////////////////////////////////////
+            
+            // :OcclusionCull: the memory barrier for the depth pyramid had a parameters, but just for the late pass (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=10157)
+            gpu_barrier(cmd, { .DRAW_INDIRECT, .MESH_SHADER_EXT, .TRANSFER }, { .COMPUTE_SHADER })
+            
+            ////////////////////////////////////////////////
+            
+            gpu_set_pipeline(cmd, late_cull_pipeline)
+            
+                // @shader cull.comp
+                gpu_dispatch(cmd, &cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)))
+                ////////////////////////////////////////////////
+        
+        gpu_profile_zone_end()
+        gpu_labeled_region_end(cmd)
+        
+        gpu_barrier(cmd, { .DRAW_INDIRECT, .TRANSFER }, { .TRANSFER })
+        
+        ////////////////////////////////////////////////
+        
+        // @todo(viktor): should these be combined into one api call?
+        gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
+        // this apparently needs to happend before we do anything related to rendering
+        pipeline_barrier_begin()
+            add_image_barrier_transition_from_last(&stuff.color_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL)
+            add_image_barrier_transition_from_last(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
+        pipeline_barrier_end(cmd)
+        
+        ////////////////////////////////////////////////
+        // late rendering - render objects that are visible this frame but weren't drawn in the early pass
+        
+        gpu_profile_zone_begin("late rendering pass")
+        gpu_labeled_region_begin(cmd, "late rendering pass", {0.6, 0.1, 07, 1.0})
+            begin_meshlet_rendering(&gpu, cmd, stuff.color_buffer, stuff.depth_buffer, {}, early = false)
+                
+                gpu_set_pipeline(cmd, meshlet_pipeline)
+                    gpu_set_active_texture_head(cmd, &texture_heap, 0)
+                    
+                    vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
+                    
+                    // @api it would be way nicer to be able to combine the address of a buffer with the offset directly, removing two arguments.
+                    // But I dont know how to then get back to the buffer and offset for vulkans api. :(
+                    gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer, draw_command_count.address, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command), 0)
+                
+            gpu_end_render_pass(cmd)
         gpu_labeled_region_end(cmd)
         gpu_profile_zone_end()
         
@@ -875,11 +970,13 @@ main :: proc () {
         {
             gpu_profile_collate_times(&gpu, gpu.device, print_profile_and_stats)
             
-            gpu_delta  := gpu_profile_get_zone("frame").total_time_with_children
-            cull_delta := gpu_profile_get_zone("culling").total_time
+            gpu_delta        := gpu_profile_get_zone("frame").total_time_with_children
+            early_cull_delta := gpu_profile_get_zone("early culling").total_time
+            late_cull_delta  := gpu_profile_get_zone("late culling").total_time
             
             debug.cpu_time  = time_smoothed_blend(delta_time_64, debug.cpu_time, delta_time_64)
-            debug.cull_time = time_smoothed_blend(delta_time_64, debug.cull_time, cull_delta)
+            debug.early_cull_time = time_smoothed_blend(delta_time_64, debug.early_cull_time, early_cull_delta)
+            debug.late_cull_time  = time_smoothed_blend(delta_time_64, debug.late_cull_time, late_cull_delta)
             // this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
             if gpu_delta >= 0 {
                 debug.gpu_time = time_smoothed_blend(delta_time_64, debug.gpu_time, gpu_delta)
@@ -893,10 +990,11 @@ main :: proc () {
             if debug.display_pyramid {
                 extra = fmt.tprintf(", displaying depth mip level %v", debug.display_pyramid_mip_level)
             }
-            title := fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, cull time: %.3v, culling %v, level of detail %v%v",
+            title := fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, early/late cull time: %.3v/%.3v, culling %v, level of detail %v%v",
                 view(debug.cpu_time), 
                 view(debug.gpu_time), 
-                view(debug.cull_time), 
+                view(debug.early_cull_time), 
+                view(debug.late_cull_time), 
                 debug.culling_enabled ? "on" : "off",
                 debug.lod_enabled     ? "on" : "off",
                 extra,
@@ -936,6 +1034,7 @@ main :: proc () {
     gpu_free(&gpu, meshlet_data_buffer)
     gpu_free(&gpu, mesh_buffer)
     gpu_free(&gpu, draw_buffer)
+    gpu_free(&gpu, draw_visibilty_buffer)
     gpu_free(&gpu, draw_command_buffer)
     gpu_free(&gpu, draw_command_count)
     
@@ -944,7 +1043,8 @@ main :: proc () {
     }
     
     destroy_pipeline(&gpu, meshlet_pipeline)
-    destroy_pipeline(&gpu, cull_pipeline)
+    destroy_pipeline(&gpu, early_cull_pipeline)
+    destroy_pipeline(&gpu, late_cull_pipeline)
     destroy_pipeline(&gpu, depth_pipeline)
     
     for texture in textures {

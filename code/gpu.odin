@@ -120,7 +120,7 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
                 enabled := [?] vk.ValidationFeatureEnableEXT {
                     .BEST_PRACTICES,
                     // DEBUG_PRINTF // @todo enable this, if needed
-                    .SYNCHRONIZATION_VALIDATION,
+                    // .SYNCHRONIZATION_VALIDATION, @todo reenable this once there is a frame bump allocator for: draw_command_count and such (visibility_buffer needs to survive till the next frame, but the rest has a one frame lifetime)
                 }
                 
                 instance_create_info.pNext = &vk.DebugUtilsMessengerCreateInfoEXT {

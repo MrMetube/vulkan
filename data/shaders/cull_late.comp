@@ -1,0 +1,64 @@
+#version 460
+
+#extension GL_EXT_shader_explicit_arithmetic_types_int64: require
+
+#include "common.glslh"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// @volatile
+layout(push_constant) uniform Push_Data {
+    Cull_Globals globals;
+};
+
+void main() {
+    uint draw_index = gl_GlobalInvocationID.x;
+    
+    if (draw_index >= globals.data.draw_count) return;
+    
+    if (globals.draw_visibility_buffer[draw_index].v != 0) return;
+    
+    Draw_p draw               = globals.draw_buffer[draw_index];
+    Mesh_p mesh               = globals.mesh_buffer[draw.v.mesh_index];
+    uint_p draw_command_count = globals.draw_command_count;
+    
+    vec3  center = transform(draw.v.orientation, draw.v.scale, draw.v.p, mesh.v.center);
+    float radius = draw.v.scale * mesh.v.radius;
+    
+    bool visible = true;
+    if (globals.data.frustum_culling_enabled) {
+        for (int i = 0; i < 5; i++) {
+            vec4 plane = globals.data.frustum_planes[i];
+            visible = visible && (dot(plane, vec4(center, 1)) > -radius);
+        }
+    }
+    
+    uint_p was_visible_last_frame = globals.draw_visibility_buffer[draw_index];
+    if (visible && was_visible_last_frame.v == 0) {
+        uint draw_command_index = atomicAdd(draw_command_count.v, 1);
+        
+        uint lod_index = 0;
+        if (globals.data.lod_enabled) {
+            vec3 camera_position = globals.data.camera_p;
+            
+            float lod_distance = max(1, distance(center, camera_position) - radius);
+            float log_lod_distance = log2(lod_distance);
+            lod_index = int(log_lod_distance);
+            
+            lod_index = clamp(lod_index, 0, mesh.v.lod_count-1);
+        }
+        
+        Draw_Command_p draw_command = globals.draw_command_buffer[draw_command_index];
+        draw_command.v.draw_id   = draw_index;
+        draw_command.v.lod_index = lod_index; // :DrawAndLODData:
+        
+        Mesh_LOD lod = mesh.v.lods[lod_index];
+        
+        uint meshlet_group_count = (lod.meshlet_count + TaskWidth-1) / TaskWidth;
+        draw_command.v.command.groupCountX = meshlet_group_count;
+        draw_command.v.command.groupCountY = 1;
+        draw_command.v.command.groupCountZ = 1;
+    }
+    
+    was_visible_last_frame.v = visible ? 1 : 0;
+}

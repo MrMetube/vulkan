@@ -6,11 +6,6 @@ import "core:time"
 
 import vk "vendor:vulkan"
 
-Depth_Pyramid_Mip :: struct {
-    view: vk.ImageView,
-    size: uv2,
-}
-
 Pipeline :: struct {
     pipeline: vk.Pipeline,
     layout:   vk.PipelineLayout,
@@ -24,13 +19,13 @@ Shader :: struct {
     input:  string, 
     
     stage: vk.ShaderStageFlag,
-    bytes:  [] u8,
+    bytes: [] u8,
     
     parsed: struct {
         resource_mask:      Shader_Resource_Mask,
         resource_types:     [32] vk.DescriptorType,
         use_push_constants: bool,
-        local_size:         [3] u32,
+        local_size:         uv3,
     },
         
     source_watcher: Watcher_Id,
