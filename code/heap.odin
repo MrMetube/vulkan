@@ -2,41 +2,35 @@ package main
 
 import vk "vendor:vulkan"
 
-DescriptorHeap :: struct {
-    buffer: Buffer,
-    gpu: vk.DeviceAddress,
+Descriptor_Heap :: struct {
     cpu: [] u8,
-    layout: vk.DescriptorSetLayout,
-    stride: int,
+    gpu: vk.DeviceAddress,
+    
+    layout: vk.DescriptorSetLayout, // @cleanup this is only used in creation. can we immediatly delete it afterwards?
+    
+    sampler_offset: int,
+    sampler_stride: int,
+    
+    texture_offset: int,
+    texture_stride: int,
 }
 
 // @todo(viktor): this first draft is @slop. read the docs and do a second pass:
 // https://docs.vulkan.org/refpages/latest/refpages/source/VK_EXT_descriptor_heap.html
-gpu_set_active_texture_head_ptr :: proc (cmd: vk.CommandBuffer, heap: ^DescriptorHeap, set: u32) {
-    binding_info := vk.DescriptorBufferBindingInfoEXT {
-        sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
-        address = heap.gpu,
-        usage   = { .RESOURCE_DESCRIPTOR_BUFFER_EXT },
-    }
-    vk.CmdBindDescriptorBuffersEXT(cmd, 1, &binding_info)
-    
-    buffer_index: u32
-    offset: vk.DeviceSize
-    vk.CmdSetDescriptorBufferOffsetsEXT(cmd, the_bound_pipeline.bind_point, the_bound_pipeline.layout, set, 1, &buffer_index, &offset)
-}
 
-create_descriptor_heap :: proc (gpu: ^Gpu, max_textures: u32) -> (heap: DescriptorHeap) {
+create_descriptor_heap :: proc (gpu: ^Gpu, max_textures: u32) -> (heap: Descriptor_Heap) {
     props := vk.PhysicalDeviceDescriptorBufferPropertiesEXT{
-        sType = .PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT
+        sType = .PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT,
     }
     
     device_props := vk.PhysicalDeviceProperties2 {
         sType = .PHYSICAL_DEVICE_PROPERTIES_2, 
-        pNext = &props
+        pNext = &props,
     }
     vk.GetPhysicalDeviceProperties2(gpu.physical_device, &device_props)
-    heap.stride = props.sampledImageDescriptorSize
-    sampler_stride := props.samplerDescriptorSize
+    
+    heap.sampler_stride = props.samplerDescriptorSize
+    heap.texture_stride = props.sampledImageDescriptorSize
     
     bindings := [?] vk.DescriptorSetLayoutBinding {
         {
@@ -53,6 +47,7 @@ create_descriptor_heap :: proc (gpu: ^Gpu, max_textures: u32) -> (heap: Descript
         },
     }
     
+    // @cleanup is partially bound needed?
     flags := [2] vk.DescriptorBindingFlags { {}, { .PARTIALLY_BOUND } }
     flags_info := vk.DescriptorSetLayoutBindingFlagsCreateInfo {
         sType         = .DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
@@ -69,11 +64,18 @@ create_descriptor_heap :: proc (gpu: ^Gpu, max_textures: u32) -> (heap: Descript
     }
     vk.CreateDescriptorSetLayout(gpu.device, &layout_info, nil, &heap.layout)
     
-    var_size: vk.DeviceSize = 0
-    vk.GetDescriptorSetLayoutSizeEXT(gpu.device, heap.layout, &var_size)
-    size := cast(int)var_size
+    sampler_offset: vk.DeviceSize
+    texture_offset: vk.DeviceSize
+    vk.GetDescriptorSetLayoutBindingOffsetEXT(gpu.device, heap.layout, 0, &sampler_offset)
+    vk.GetDescriptorSetLayoutBindingOffsetEXT(gpu.device, heap.layout, 1, &texture_offset)
+    heap.sampler_offset = cast(int) sampler_offset
+    heap.texture_offset = cast(int) texture_offset
     
-    cpu_ptr, gpu_addr := gpu_allocate_size(gpu, cast(umm) size, usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT })
+    device_size: vk.DeviceSize
+    vk.GetDescriptorSetLayoutSizeEXT(gpu.device, heap.layout, &device_size)
+    size := cast(int) device_size
+    
+    cpu_ptr, gpu_addr := gpu_allocate_size(gpu, cast(umm) size, usage = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SAMPLER_DESCRIPTOR_BUFFER_EXT })
     
     heap.cpu = slice_from_parts(u8, cpu_ptr, size)
     heap.gpu = gpu_addr
@@ -81,15 +83,49 @@ create_descriptor_heap :: proc (gpu: ^Gpu, max_textures: u32) -> (heap: Descript
     return heap
 }
 
-write_texture_to_heap :: proc (gpu: ^Gpu, heap: ^DescriptorHeap, index: int, view: vk.ImageView, layout: vk.ImageLayout) {
-    img_info := vk.DescriptorImageInfo{imageView = view, imageLayout = layout}
+destroy_descriptor_heap :: proc (gpu: ^Gpu, heap: Descriptor_Heap) {
+    gpu_free_pointer(gpu, heap.gpu)
+    vk.DestroyDescriptorSetLayout(gpu.device, heap.layout, nil)
+}
+
+write_texture_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: int, view: vk.ImageView, layout: vk.ImageLayout) {
+    info := vk.DescriptorImageInfo { imageView = view, imageLayout = layout }
+    
     get_info := vk.DescriptorGetInfoEXT {
         sType = .DESCRIPTOR_GET_INFO_EXT,
         type = .SAMPLED_IMAGE,
-        data = vk.DescriptorDataEXT{ pSampledImage = &img_info },
+        data = vk.DescriptorDataEXT{ pSampledImage = &info },
     }
     
-    dest_ptr := &heap.cpu[heap.stride * index]
+    texture_pointer := &heap.cpu[heap.texture_offset + heap.texture_stride * index]
     
-    vk.GetDescriptorEXT(gpu.device, &get_info, auto_cast heap.stride, dest_ptr)
+    vk.GetDescriptorEXT(gpu.device, &get_info, heap.texture_stride, texture_pointer)
+}
+
+write_global_sampler_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, sampler: vk.Sampler) {
+    sampler := sampler
+    
+    get_info := vk.DescriptorGetInfoEXT {
+        sType = .DESCRIPTOR_GET_INFO_EXT,
+        type  = .SAMPLER,
+        data  = vk.DescriptorDataEXT{ pSampler = &sampler },
+    }
+    
+    index := 0
+    sampler_pointer := &heap.cpu[heap.sampler_offset + heap.sampler_stride * index]
+    
+    vk.GetDescriptorEXT(gpu.device, &get_info, heap.sampler_stride, sampler_pointer)
+}
+
+gpu_set_active_texture_head :: proc (cmd: vk.CommandBuffer, heap: ^Descriptor_Heap, set: u32) {
+    binding_info := vk.DescriptorBufferBindingInfoEXT {
+        sType = .DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
+        address = heap.gpu,
+        usage   = { .RESOURCE_DESCRIPTOR_BUFFER_EXT, .SAMPLER_DESCRIPTOR_BUFFER_EXT },
+    }
+    vk.CmdBindDescriptorBuffersEXT(cmd, 1, &binding_info)
+    
+    buffer_index: u32
+    offset: vk.DeviceSize
+    vk.CmdSetDescriptorBufferOffsetsEXT(cmd, the_bound_pipeline.bind_point, the_bound_pipeline.layout, set, 1, &buffer_index, &offset)
 }

@@ -224,10 +224,12 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    // this will hold literally all textures, expand if needed and let the shader index into it via Draw.texture_index
+    texture_count :: 3
     textures: [1024] Image
-    texture_descriptors: [3] vk.DescriptorImageInfo
     
+    // @todo(viktor): migrate the depth_pyramid image into the texture_heap
+    // @todo it seems we need two heaps? one for sampling .CombinedImageSampler, and one for writing to .StorageImage
+    // @study how many textures can we index into like this? maxDescriptorSetSampledImages, maxPerStageDescriptorSampledImages
     texture_heap := create_descriptor_heap(&gpu, 65536)
     
     {
@@ -241,7 +243,7 @@ main :: proc () {
         default_sampler := create_sampler(&gpu, .LINEAR, .LINEAR, anisotropy = true)
         defer_destroy(vk.DestroySampler, default_sampler)
         
-        for &texture, index in textures[:3] {
+        for &texture, index in textures[:texture_count] {
             filename := fmt.tprintf("tutorial/suzanne%v.ktx", index)
             
             loaded_texture := load_ktx_texture(filename, context.temp_allocator)
@@ -253,9 +255,6 @@ main :: proc () {
             
             texture      = gpu_allocate_texture(&gpu, description)
             texture.view = gpu_create_texture_view(&gpu, texture, 0, description.mip_count, { .COLOR })
-            
-            
-            texture_descriptors[index] = gpu_texture_descriptor(texture.view, .READ_ONLY_OPTIMAL, default_sampler)
             
             // @waste we should have loaded all data into here if possible
             cpu_data, gpu_data := bump_allocate(&upload_bump, cast(u32) len(loaded_texture.data), alignment = 32)
@@ -283,74 +282,8 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     global_sampler := create_sampler(&gpu, .LINEAR, .LINEAR, anisotropy = true)
-    
-    // @todo(viktor): migrate the depth_pyramid image into the textures array. make it manage all textures, and let stuff just hold onto a handle inside that array.
-    // @study how many textures can we index into like this? maxDescriptorSetSampledImages, maxPerStageDescriptorSampledImages
-    // @study descriptorBindingUpdateAfterBind
-    // @todo it seems we need two texture sets, one for sampling .CombinedImageSampler, and one for writing to .StorageImage
-    textures_descriptor_set_layout: vk.DescriptorSetLayout
-    textures_descriptor_set:        vk.DescriptorSet
-    {
-        pool: vk.DescriptorPool
-        
-        descriptor_layout_create_info := vk.DescriptorSetLayoutCreateInfo {
-            sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            pNext = &vk.DescriptorSetLayoutBindingFlagsCreateInfo {
-                sType = .DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
-                bindingCount  = 1,
-                pBindingFlags = &vk.DescriptorBindingFlags { .VARIABLE_DESCRIPTOR_COUNT },
-            },
-            bindingCount = 1,
-            pBindings = &vk.DescriptorSetLayoutBinding {
-                binding         = 0,
-                descriptorType  = .COMBINED_IMAGE_SAMPLER,
-                descriptorCount = len(textures),
-                stageFlags      = { .FRAGMENT },
-            },
-        }
-        
-        check(vk.CreateDescriptorSetLayout(gpu.device, &descriptor_layout_create_info, nil, &textures_descriptor_set_layout))
-        defer_destroy(vk.DestroyDescriptorSetLayout, textures_descriptor_set_layout)
-        
-        descriptor_pool_create_info := vk.DescriptorPoolCreateInfo {
-            sType = .DESCRIPTOR_POOL_CREATE_INFO,
-            maxSets       = 1,
-            poolSizeCount = 1,
-            pPoolSizes    = &vk.DescriptorPoolSize {
-                type = .COMBINED_IMAGE_SAMPLER,
-                descriptorCount = len(textures),
-            },
-        }
-        
-        check(vk.CreateDescriptorPool(gpu.device, &descriptor_pool_create_info, nil, &pool))
-        defer_destroy(vk.DestroyDescriptorPool, pool)
-        
-        descriptor_count := cast(u32) len(textures)
-        
-        textures_desc_set_allocate_info := vk.DescriptorSetAllocateInfo {
-            sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
-            pNext = &vk.DescriptorSetVariableDescriptorCountAllocateInfo {
-                sType = .DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO,
-                descriptorSetCount = 1,
-                pDescriptorCounts  = &descriptor_count,
-            },
-            descriptorPool     = pool,
-            descriptorSetCount = 1,
-            pSetLayouts        = &textures_descriptor_set_layout,
-        }
-        
-        check(vk.AllocateDescriptorSets(gpu.device, &textures_desc_set_allocate_info, &textures_descriptor_set))
-        
-        write_desc_set := vk.WriteDescriptorSet {
-            sType = .WRITE_DESCRIPTOR_SET,
-            dstSet     = textures_descriptor_set,
-            dstBinding = 0,
-            descriptorType  = .COMBINED_IMAGE_SAMPLER,
-            descriptorCount = cast(u32) len(texture_descriptors),
-            pImageInfo      = &texture_descriptors[0],
-        }
-        vk.UpdateDescriptorSets(gpu.device, 1, &write_desc_set, 0, nil)
-    }
+    write_global_sampler_to_heap(&gpu, &texture_heap, global_sampler)
+    defer_destroy(vk.DestroySampler, global_sampler)
     
     ////////////////////////////////////////////////
     
@@ -406,8 +339,6 @@ main :: proc () {
         pos.xyz = v3{0, -10, 10}
         pos.xz += arm(t * Tau)
     }
-    
-    HEAP :: true
     
     cam_pos := v3{ 0, 0, 0}
     object_rotation: v3
@@ -566,11 +497,7 @@ main :: proc () {
             }
             
             destroy_pipeline(&gpu, meshlet_pipeline)
-            if HEAP {
-                meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, task, mesh, frag, raster_description, texture_heap.layout)
-            } else {
-                meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, task, mesh, frag, raster_description, textures_descriptor_set_layout)
-            }
+            meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, task, mesh, frag, raster_description, texture_heap.layout)
         }
         
         ////////////////////////////////////////////////
@@ -587,7 +514,7 @@ main :: proc () {
                 rotation        := la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
                 draw.orientation = rotation * global_rotation
                 
-                draw.texture_index = random_index(&entropy, texture_descriptors[:])
+                draw.texture_index = random_between_u32(&entropy, 0, texture_count-1)
                 
                 mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
                 
@@ -753,6 +680,7 @@ main :: proc () {
             // @todo remove this once its done by the gpu
             box0, box0_valid := get_axis_aligned_bounding_box_fast(multiply(view_from_world, d0.p + geometry.meshes[d0.mesh_index].center * d0.scale), geometry.meshes[d0.mesh_index].radius * d0.scale, screen_from_view)
             box1, box1_valid := get_axis_aligned_bounding_box_fast(multiply(view_from_world, d1.p + geometry.meshes[d1.mesh_index].center * d1.scale), geometry.meshes[d1.mesh_index].radius * d1.scale, screen_from_view)
+            unused(box0, box0_valid, box1, box1_valid)
             
             gpu_set_pipeline(cmd, cull_pipeline)
             
@@ -798,7 +726,7 @@ main :: proc () {
         
         gpu_profile_zone_begin("rendering early pass")
         gpu_labeled_region_begin(cmd, "rendering early pass", {0.6, 0.1, 07, 1.0})
-        render(&gpu, cmd, stuff.color_buffer, stuff.depth_buffer, {0.07, 0.07, 0.07, 1}, early = true)
+        begin_meshlet_rendering(&gpu, cmd, stuff.color_buffer, stuff.depth_buffer, {0.07, 0.07, 0.07, 1}, early = true)
                 
             if print_profile_and_stats {
                 vk.ResetQueryPool(gpu.device, stats_pool, 0, stats_count)
@@ -809,12 +737,7 @@ main :: proc () {
             gpu_profile_zone_begin("meshlets")
             
             gpu_set_pipeline(cmd, meshlet_pipeline)
-                if HEAP {
-                    gpu_set_active_texture_head_ptr(cmd, &texture_heap, 0)
-                } else {
-                    // @shader meshlet.task meshlet.mesh meshlet.frag
-                    vk.CmdBindDescriptorSets(cmd, meshlet_pipeline.bind_point, meshlet_pipeline.layout, 0, 1, &textures_descriptor_set, 0, nil)
-                }
+                gpu_set_active_texture_head(cmd, &texture_heap, 0)
                 
                 vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
                 
@@ -888,7 +811,7 @@ main :: proc () {
         
         gpu_profile_zone_begin("rendering late pass")
         gpu_labeled_region_begin(cmd, "rendering late pass", {0.6, 0.1, 07, 1.0})
-        render(&gpu, cmd, stuff.color_buffer, stuff.depth_buffer, {}, early = false)
+        begin_meshlet_rendering(&gpu, cmd, stuff.color_buffer, stuff.depth_buffer, {}, early = false)
             
         gpu_end_render_pass(cmd)
         gpu_labeled_region_end(cmd)
@@ -1029,6 +952,8 @@ main :: proc () {
         gpu_free_image(&gpu, texture)
     }
     
+    destroy_descriptor_heap(&gpu, texture_heap)
+    
     delete_stuff(&gpu, &stuff, final = true)
     
     gpu_deinit(&gpu)
@@ -1055,12 +980,12 @@ get_next_image :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, frame_index: u64) ->
     return true
 }
 
-render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, color_buffer, depth_buffer: Image, clear_color: v4, early: bool) {
+begin_meshlet_rendering :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, color_buffer, depth_buffer: Image, clear_color: v4, early: bool) {
     desc := Render_Pass_Desc {
         // :ReversedZ: 0 is the maximal value
         depth_target = { texture = depth_buffer, load_op = early ? .CLEAR : .LOAD, store_op = early ? .STORE : .DONT_CARE, clear_depth = 0 }, 
         color_targets = {
-            { texture = color_buffer, load_op = early ? .CLEAR : .LOAD, store_op = .STORE, clear_color = clear_color }
+            { texture = color_buffer, load_op = early ? .CLEAR : .LOAD, store_op = .STORE, clear_color = clear_color },
         }, 
         
     }

@@ -37,13 +37,5 @@ void main() {
     #endif
     float depth = min( min(depth4.x, depth4.y), min(depth4.z, depth4.w) );
     
-    if (uv.x >= globals.box1.x && uv.x <= globals.box1.z && uv.y >= globals.box1.y && uv.y <= globals.box1.w) {
-        depth = 1;
-    }
-    
-    if (uv.x >= globals.box0.x && uv.x <= globals.box0.z && uv.y >= globals.box0.y && uv.y <= globals.box0.w) {
-        depth = 0.5;
-    }
-    
     imageStore(Output, ivec2(pixel), vec4(depth));
 }

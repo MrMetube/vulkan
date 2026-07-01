@@ -151,7 +151,7 @@ vec_abs :: proc (a: $T) -> T {
 
 swap :: proc (a, b: ^$T ) { a^, b^ = b^, a^ }
 
-unused :: proc (_: $T) {}
+unused :: proc (_: ..any) {}
 
 append_into :: proc { append_into_array, append_into_fixed_array }
 append_into_array :: proc (array: ^[dynamic] $T) -> ^T {
