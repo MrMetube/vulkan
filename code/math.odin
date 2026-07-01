@@ -46,7 +46,10 @@ lane_true  :: cast(lane_u32) 0xffff_ffff
 
 lane_offset :: lane_u32{0, 1, 2, 3, 4, 5, 6, 7} when LaneWidth == 8 else ( lane_u32{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15} when LaneWidth == 16 else lane_u32{0, 1, 2, 3})
 
+m2 :: matrix[2,2] f32
+m3 :: matrix[3,3] f32
 m4 :: matrix[4,4] f32
+
 q32 :: quaternion128
 
 Rectangle   :: struct($T: typeid) { min, max: T }
@@ -717,15 +720,17 @@ projection_reversed_z_infinite_far_plane :: proc (fov_y, aspect_w_h, near_z: f32
 ////////////////////////////////////////////////
 // Rectangle operations
 
-rect_min_dimension         :: proc { rect_min_dimension_2, rect_min_dimension_v }
-rect_zero_dimension        :: proc { rect_zero_dimension_2, rect_zero_dimension_v }
-rect_min_dimension_2       :: proc (x: $Element, y, w, h: Element) -> Rectangle([2] Element) { return rect_min_dimension_v({x, y}, {w, h})              }
-rect_min_dimension_v       :: proc (min: $T, dimension: T)         -> Rectangle(T)           { return { min,                      min + dimension          } }
-rect_zero_dimension_2      :: proc (w: $Element, h: Element)       -> Rectangle([2] Element) { return rect_zero_dimension_v([2] Element{w, h})          }
-rect_zero_dimension_v      :: proc (dimension: $T)                 -> Rectangle(T)           { return { 0,                        dimension                } }
-rect_min_max               :: proc (min: $T, max: T)               -> Rectangle(T)           { return { min,                      max                      } }
-rect_center_dimension      :: proc (center: $T, dimension: T)      -> Rectangle(T)           { return { center - (dimension / 2), center + (dimension / 2) } }
-rect_center_radius :: proc (center: $T, radius: T) -> Rectangle(T)           { return { center - radius,  center + radius  } }
+rect_min_dimension    :: proc { rect_min_dimension_2, rect_min_dimension_v }
+rect_zero_dimension   :: proc { rect_zero_dimension_2, rect_zero_dimension_v }
+rect_min_max          :: proc { rect_min_max_2, rect_min_max_v }
+rect_min_dimension_2  :: proc (x: $E, y, w, h: E)                 -> Rectangle([2] E) { return { {x, y},                   {w, h}                   } }
+rect_min_dimension_v  :: proc (min: $T, dimension: T)             -> Rectangle(T)     { return { min,                      min + dimension          } }
+rect_zero_dimension_2 :: proc (w: $E, h: E)                       -> Rectangle([2] E) { return { 0,                        {w, h}                   } }
+rect_zero_dimension_v :: proc (dimension: $T)                     -> Rectangle(T)     { return { 0,                        dimension                } }
+rect_min_max_v        :: proc (min: $T, max: T)                   -> Rectangle(T)     { return { min,                      max                      } }
+rect_min_max_2        :: proc (min_x: $E, min_y, max_x, max_y: E) -> Rectangle([2] E) { return { {min_x, min_y},           {max_x, max_y}           } }
+rect_center_dimension :: proc (center: $T, dimension: T)          -> Rectangle(T)     { return { center - (dimension / 2), center + (dimension / 2) } }
+rect_center_radius    :: proc (center: $T, radius: T)             -> Rectangle(T)     { return { center - radius,          center + radius          } }
 
 rect_inverted_infinity :: proc($R: typeid) -> R {
     T :: intrinsics.type_field_type(R, "min")

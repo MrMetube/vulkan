@@ -66,7 +66,7 @@ Cull_Globals :: struct #all_or_none {
 // @shader
 Draw_Globals :: struct {
     view_from_world:      m4,
-    projection_from_view: m4,
+    screen_from_view: m4,
     light_pos:  [4] v4,
     
     draw_command_buffer: vk.DeviceAddress "Draw_Command",
@@ -79,8 +79,8 @@ Draw_Globals :: struct {
 
 // @shader
 Depth_Globals :: struct {
-    texture_index: u32,
     size: v2,
+    texture_index: u32,
 }
 
 // @shader
@@ -575,15 +575,15 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        entropy := seed_random_series(54654)
+        entropy := seed_random_series(545114)
         when true {
-            draws := db_view[:200_000]
+            draws := db_view[:20_000]
             global_rotation := la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX)
             for &draw in draws {
-                p := random_bilateral(&entropy, v3) * {10, 10, 10} - {0, 0, 20}
+                p := random_bilateral(&entropy, v3) * {10, 10, 10} + {0, 0, -10}
                 
                 draw.p           = p
-                draw.scale       = linear_blend(cast(f32) .1, .4, square(random_unilateral(&entropy, f32))) / 2
+                draw.scale       = linear_blend(cast(f32) .05, .8, power(random_unilateral(&entropy, f32), 8)) / 2
                 rotation        := la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
                 draw.orientation = rotation * global_rotation
                 
@@ -611,6 +611,30 @@ main :: proc () {
                 draw.vertex_offset = mesh.vertex_offset
             }
         }
+        
+        when false {
+            closest_squared: f32 = +Infinity
+            closest_index := -1
+            for &draw, draw_index in draws {
+                switch draw_index {
+                case 4850/* , 11906 */, 18774: continue
+                }
+                draw.scale = 0
+                switch draw_index {
+                case 2560, 13318, 11906, 4850, 17364, 5895, 8957, 16752, 11121, 4298, 12527, 18774: continue
+                }
+                squared := length_squared(draw.p - cam_pos)
+                if closest_squared > squared {
+                    closest_squared = squared
+                    closest_index = draw_index
+                }
+            }
+            
+            fmt.println(closest_index, draws[closest_index])
+        }
+        
+        d0 := &draws[4850]
+        d1 := &draws[18774]
         
         ////////////////////////////////////////////////
         
@@ -643,21 +667,22 @@ main :: proc () {
             ////////////////////////////////////////////////
             
             // @important @todo once we are satisfied with the occlusion culling the near plane should be set to a more reasonable value like 0.01. the 0.1 value is just useful for debugging, as the depth values lie in a more visible range.
-            projection := projection_reversed_z_infinite_far_plane(70 * RadPerDeg, cast(f32) gpu.swapchain_size.x / cast(f32) gpu.swapchain_size.y, 0.1)
-            view       := translate(1, -cam_pos)
+            near_z: f32 = 0.1
+            screen_from_view := projection_reversed_z_infinite_far_plane(70 * RadPerDeg, cast(f32) gpu.swapchain_size.x / cast(f32) gpu.swapchain_size.y, near_z)
+            view_from_world       := translate(1, -cam_pos)
             
             draw_distance: f32 = 100
             
             frustum_planes: [6] v4
             if debug.culling_enabled {
-                view_projection := projection * view
+                screen_from_world := screen_from_view * view_from_world
                 cam_forward := v3{0, 0, -1}
                 
-                frustum_planes[0] = get_row_v4(view_projection, 3) + get_row_v4(view_projection, 0) // x + w < 0
-                frustum_planes[1] = get_row_v4(view_projection, 3) - get_row_v4(view_projection, 0) // x - w > 0
-                frustum_planes[2] = get_row_v4(view_projection, 3) + get_row_v4(view_projection, 1) // y + w < 0
-                frustum_planes[3] = get_row_v4(view_projection, 3) - get_row_v4(view_projection, 1) // y - w > 0
-                frustum_planes[4] = get_row_v4(view_projection, 3) - get_row_v4(view_projection, 2) // z - w > 0 -- :ReversedZ:
+                frustum_planes[0] = get_row_v4(screen_from_world, 3) + get_row_v4(screen_from_world, 0) // x + w < 0
+                frustum_planes[1] = get_row_v4(screen_from_world, 3) - get_row_v4(screen_from_world, 0) // x - w > 0
+                frustum_planes[2] = get_row_v4(screen_from_world, 3) + get_row_v4(screen_from_world, 1) // y + w < 0
+                frustum_planes[3] = get_row_v4(screen_from_world, 3) - get_row_v4(screen_from_world, 1) // y - w > 0
+                frustum_planes[4] = get_row_v4(screen_from_world, 3) - get_row_v4(screen_from_world, 2) // z - w > 0 -- :ReversedZ:
                 
                 unused(draw_distance)
                 unused(cam_forward)
@@ -684,6 +709,50 @@ main :: proc () {
                 draw_count              = auto_cast len(draws),
                 camera_p                = cam_pos,
             }
+            
+            
+            // :ReversedZ: we assume a reversed_z projection matrix and can use that to simplify the matrix multiplications
+            // based on this paper, but then simplified to our actual use case: https://jcgt.org/published/0002/02/05/paper.pdf
+            get_axis_aligned_bounding_box_fast :: proc (center_in_view_space: v3, radius: f32, screen_from_view_reversed_z: m4) -> (Rectangle2, bool) {
+                p00    := screen_from_view_reversed_z[0,0]
+                p11    := screen_from_view_reversed_z[1,1]
+                near_z := screen_from_view_reversed_z[2, 3]
+                
+                // @todo we remove the handling of clipped boxes, so we need to early out in the shader in these cases and assume that we cannot cull the mesh
+                // if center_in_view_space.z < radius + near_z {
+                //     return {}, false
+                // }
+                                
+                // center in the x/y-z frame
+                cx := center_in_view_space.xz
+                cy := center_in_view_space.yz
+                
+                cx_length_squared := length_squared(cx)
+                cy_length_squared := length_squared(cy)
+                
+                // (cos, sin) of angle theta between c and x/y tangent vector
+                vx := v2{square_root(cx_length_squared - square(radius)), radius} / square_root(cx_length_squared)
+                vy := v2{square_root(cy_length_squared - square(radius)), radius} / square_root(cy_length_squared)
+                
+                // In the x/y-z reference frame
+                // Transform back to camera space
+                min_x := -p00 * dot(v2{vx.x,  vx.y}, cx) / dot(v2{-vx.y, vx.x}, cx)
+                max_x := -p00 * dot(v2{vx.x, -vx.y}, cx) / dot(v2{ vx.y, vx.x}, cx)
+                min_y := -p11 * dot(v2{vy.x, -vy.y}, cy) / dot(v2{ vy.y, vy.x}, cy)
+                max_y := -p11 * dot(v2{vy.x,  vy.y}, cy) / dot(v2{-vy.y, vy.x}, cy) 
+                
+                result := rect_min_max(min_x, min_y, max_x, max_y)
+                
+                // transform to clip space
+                result.min = result.min * {.5, -.5} + .5
+                result.max = result.max * {.5, -.5} + .5
+                
+                return result, true
+            }
+            
+            // @todo remove this once its done by the gpu
+            box0, box0_valid := get_axis_aligned_bounding_box_fast(multiply(view_from_world, d0.p + geometry.meshes[d0.mesh_index].center * d0.scale), geometry.meshes[d0.mesh_index].radius * d0.scale, screen_from_view)
+            box1, box1_valid := get_axis_aligned_bounding_box_fast(multiply(view_from_world, d1.p + geometry.meshes[d1.mesh_index].center * d1.scale), geometry.meshes[d1.mesh_index].radius * d1.scale, screen_from_view)
             
             gpu_set_pipeline(cmd, cull_pipeline)
             
@@ -714,8 +783,8 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         // @shaders meshlet pipeline
-        draw_globals.projection_from_view = projection
-        draw_globals.view_from_world      = view
+        draw_globals.screen_from_view = screen_from_view
+        draw_globals.view_from_world      = view_from_world
         
         draw_globals.draw_command_buffer = draw_command_buffer
         draw_globals.draw_buffer         = draw_buffer

@@ -29,12 +29,21 @@ layout(push_constant) uniform Push_Data {
 void main() {
     uvec2 pixel = gl_GlobalInvocationID.xy;
     
+    vec2 uv = (vec2(pixel)+0.5) / globals.size;
     #ifdef HEAP
-    vec4 depth4 = textureGather(sampler2D(textures_heap[nonuniformEXT(globals.texture_index)], global_sampler), (vec2(pixel)+0.5) / globals.size);
+    vec4 depth4 = textureGather(sampler2D(textures_heap[nonuniformEXT(globals.texture_index)], global_sampler), uv);
     #else
-    vec4 depth4 = textureGather(Input, (vec2(pixel)+0.5) / globals.size);
+    vec4 depth4 = textureGather(Input, uv);
     #endif
     float depth = min( min(depth4.x, depth4.y), min(depth4.z, depth4.w) );
+    
+    if (uv.x >= globals.box1.x && uv.x <= globals.box1.z && uv.y >= globals.box1.y && uv.y <= globals.box1.w) {
+        depth = 1;
+    }
+    
+    if (uv.x >= globals.box0.x && uv.x <= globals.box0.z && uv.y >= globals.box0.y && uv.y <= globals.box0.w) {
+        depth = 0.5;
+    }
     
     imageStore(Output, ivec2(pixel), vec4(depth));
 }

@@ -82,7 +82,7 @@ void main() {
         Mesh_Result_Smooth result;
         view_p = globals.view_from_world * view_p;
         
-        vec4 position = globals.projection_from_view * view_p;
+        vec4 position = globals.screen_from_view * view_p;
         result.normal = mat3(globals.view_from_world) * n;
         result.uv     = vertex.v.uv;
         
