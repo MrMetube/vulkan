@@ -164,21 +164,9 @@ gpu_destroy_swapchain :: proc (gpu: ^Gpu) {
 
 ////////////////////////////////////////////////
 
-@(thread_local)
-barrier_state: struct {
-    is_open:  bool,
-    image_barriers:  [dynamic] vk.ImageMemoryBarrier2,
-}
-
-pipeline_barrier_begin :: proc () {
-    assert(!barrier_state.is_open)
-    
-    barrier_state.is_open = true
-}
-
-add_image_barrier :: proc (image: ^Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
-    assert(barrier_state.is_open)
-    append(&barrier_state.image_barriers, vk.ImageMemoryBarrier2 {
+// @api image aspect mask should be derivable from the image itself. @study is it fixed per image?
+create_image_barrier :: proc (image: ^Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) -> vk.ImageMemoryBarrier2 {
+    result := vk.ImageMemoryBarrier2 {
         sType = .IMAGE_MEMORY_BARRIER_2,
         srcAccessMask = src_access,
         dstAccessMask = dst_access,
@@ -188,27 +176,37 @@ add_image_barrier :: proc (image: ^Image, src_stage: vk.PipelineStageFlags2, src
         newLayout = new_layout,
         image = image.image,
         subresourceRange = { aspectMask = aspect_mask, levelCount = vk.REMAINING_MIP_LEVELS, layerCount = vk.REMAINING_ARRAY_LAYERS },
-    })
+    }
     image.last_transition = { dst_stage, dst_access, new_layout }
-}
-
-add_image_barrier_transition_from_last :: proc (image: ^Image, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) {
-    last := image.last_transition
-    add_image_barrier(image, last.stage, last.access, last.layout, dst_stage, dst_access, new_layout, aspect_mask)
-}
-
-pipeline_barrier_end :: proc (command_buffer: vk.CommandBuffer, flags := vk.DependencyFlags {}) {
-    assert(barrier_state.is_open)
     
-    vk.CmdPipelineBarrier2(command_buffer, &vk.DependencyInfo {
+    return result
+}
+
+create_image_barrier_from_last_transition :: proc (image: ^Image, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }) -> vk.ImageMemoryBarrier2 {
+    last := image.last_transition
+    result := create_image_barrier(image, last.stage, last.access, last.layout, dst_stage, dst_access, new_layout, aspect_mask)
+    return result
+}
+
+gpu_image_barrier_from_last_transition :: proc (cmd: vk.CommandBuffer, image: ^Image, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }, flags := vk.DependencyFlags {}) {
+    barrier := create_image_barrier_from_last_transition(image, dst_stage, dst_access, new_layout, aspect_mask)
+    
+    gpu_image_barriers(cmd, barrier, flags = flags)
+}
+
+gpu_image_barrier :: proc (cmd: vk.CommandBuffer, image: ^Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, aspect_mask := vk.ImageAspectFlags { .COLOR }, flags := vk.DependencyFlags {}) {
+    barrier := create_image_barrier(image, src_stage, src_access, old_layout, dst_stage, dst_access, new_layout, aspect_mask)
+    
+    gpu_image_barriers(cmd, barrier, flags = flags)
+}
+
+gpu_image_barriers :: proc (cmd: vk.CommandBuffer, barriers: ..vk.ImageMemoryBarrier2, flags := vk.DependencyFlags {}) {
+    vk.CmdPipelineBarrier2(cmd, &vk.DependencyInfo {
         sType = .DEPENDENCY_INFO,
         dependencyFlags          = flags, 
-        imageMemoryBarrierCount  = auto_cast len(barrier_state.image_barriers),
-        pImageMemoryBarriers     = raw_data(barrier_state.image_barriers),
+        imageMemoryBarrierCount  = cast(u32) len(barriers),
+        pImageMemoryBarriers     = raw_data(barriers),
     })
-    
-    clear(&barrier_state.image_barriers)
-    barrier_state.is_open = false
 }
 
 ////////////////////////////////////////////////

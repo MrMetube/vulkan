@@ -282,15 +282,11 @@ main :: proc () {
             cpu_data, gpu_data := bump_allocate(&upload_bump, cast(u32) len(loaded_texture.data), alignment = 32)
             copy(cpu_data, loaded_texture.data)
             
-            pipeline_barrier_begin()
-                add_image_barrier(&texture, {}, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
-            pipeline_barrier_end(cmd)
+            gpu_image_barrier(cmd, &texture, {}, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
             
             gpu_copy_to_texture(&gpu, cmd, texture, gpu_data, description.size)
             
-            pipeline_barrier_begin()
-                add_image_barrier_transition_from_last(&texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL)
-            pipeline_barrier_end(cmd)
+            gpu_image_barrier_from_last_transition(cmd, &texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL) 
             
             write_texture_to_heap(&gpu, &texture_heap, index, texture.view, texture.last_transition.layout)
         }
@@ -753,10 +749,12 @@ main :: proc () {
         // @todo(viktor): should these be combined into one api call?
         gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
         // this apparently needs to happend before we do anything related to rendering
-        pipeline_barrier_begin()
-            add_image_barrier(&stuff.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL)
-            add_image_barrier(&stuff.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
-        pipeline_barrier_end(cmd, { .BY_REGION })
+        gpu_image_barriers(cmd, 
+            create_image_barrier(&stuff.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL),
+            // :Stencil: add .STENCIL to the aspect mask
+            create_image_barrier(&stuff.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }), 
+            flags = { .BY_REGION }
+        )
         
         ////////////////////////////////////////////////
         
@@ -822,10 +820,12 @@ main :: proc () {
             
             // :OcclusionCull: the barrier before the depth pyramid was missing the barrier for the pyramid.image itself (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=11592)
             
-            pipeline_barrier_begin()
-                add_image_barrier_transition_from_last(&stuff.depth_buffer, { .COMPUTE_SHADER }, { .SHADER_READ }, .SHADER_READ_ONLY_OPTIMAL, { .DEPTH })
-                add_image_barrier(&stuff.depth_pyramid, {}, {}, .UNDEFINED,  { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL)
-            pipeline_barrier_end(cmd, { .BY_REGION })
+            
+            gpu_image_barriers(cmd, 
+                create_image_barrier_from_last_transition(&stuff.depth_buffer, { .COMPUTE_SHADER }, { .SHADER_READ }, .SHADER_READ_ONLY_OPTIMAL, { .DEPTH }),
+                create_image_barrier(&stuff.depth_pyramid, {}, {}, .UNDEFINED,  { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL),
+                flags = { .BY_REGION }
+            )
             
             
             gpu_set_pipeline(cmd, depth_pipeline)
@@ -851,16 +851,12 @@ main :: proc () {
                     
                     gpu_dispatch(cmd, depth_globals_gpu, get_group_count(depth_reduce_shader, **mip.size))
                     
-                    pipeline_barrier_begin()
-                        add_image_barrier_transition_from_last(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
-                    pipeline_barrier_end(cmd, { .BY_REGION })
+                    gpu_image_barrier_from_last_transition(cmd, &stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL, flags = { .BY_REGION })
                 }
         
                 ////////////////////////////////////////////////
                 
-                pipeline_barrier_begin()
-                    add_image_barrier_transition_from_last(&stuff.depth_buffer, {.EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH })
-                pipeline_barrier_end(cmd, { .BY_REGION })
+                gpu_image_barrier_from_last_transition(cmd, &stuff.depth_buffer, {.EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }, flags = { .BY_REGION })
                 
         gpu_labeled_region_end(cmd)
         gpu_profile_zone_end()
@@ -903,10 +899,12 @@ main :: proc () {
             // @todo(viktor): should these be combined into one api call?
             gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
             // this apparently needs to happend before we do anything related to rendering
-            pipeline_barrier_begin()
-                add_image_barrier_transition_from_last(&stuff.color_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL)
-                add_image_barrier_transition_from_last(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
-            pipeline_barrier_end(cmd)
+            gpu_image_barriers(cmd, 
+                create_image_barrier_from_last_transition(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }), 
+                // :Stencil: add .STENCIL to the aspect mask
+                create_image_barrier_from_last_transition(&stuff.color_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL),
+                flags = { .BY_REGION }
+            )
             
             ////////////////////////////////////////////////
         
@@ -927,16 +925,17 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         gpu_profile_zone_begin("copy to swapchain")
-        
-            pipeline_barrier_begin()
-                add_image_barrier(&gpu.swapchain_images[gpu.image_index], { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
-                if !debug.display_pyramid {
-                    add_image_barrier_transition_from_last(&stuff.color_buffer, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
-                } else {
-                    add_image_barrier_transition_from_last(&stuff.depth_pyramid, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
-                }
-            pipeline_barrier_end(cmd, { .BY_REGION })
-                
+            
+            source_image := &stuff.color_buffer
+            if debug.display_pyramid {
+                source_image = &stuff.depth_pyramid
+            }
+            gpu_image_barriers(cmd, 
+                create_image_barrier(&gpu.swapchain_images[gpu.image_index], { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL),
+                create_image_barrier_from_last_transition(source_image, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL),
+                flags = { .BY_REGION }
+            )
+            
             destination := gpu.swapchain_images[gpu.image_index]
             if !debug.display_pyramid {
                 vk.CmdCopyImage(cmd, stuff.color_buffer.image, stuff.color_buffer.last_transition.layout, destination.image, destination.last_transition.layout, 1, &vk.ImageCopy {
@@ -958,9 +957,8 @@ main :: proc () {
                 }, .NEAREST)
             }
             
-            pipeline_barrier_begin()
-                add_image_barrier_transition_from_last(&gpu.swapchain_images[gpu.image_index], {}, {}, .PRESENT_SRC_KHR)
-            pipeline_barrier_end(cmd, { .BY_REGION })
+            
+            gpu_image_barrier_from_last_transition(cmd, &gpu.swapchain_images[gpu.image_index], {}, {}, .PRESENT_SRC_KHR, flags = { .BY_REGION })
             
         gpu_profile_zone_end()
         
