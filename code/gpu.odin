@@ -521,13 +521,18 @@ default_texture_desc :: proc (
 ////////////////////////////////////////////////
 // Memory
 
-Gpu_Address :: struct ($T: typeid) { address: vk.DeviceAddress }
+GpuAddress :: struct ($T: typeid) {
+    p: vk.DeviceAddress,
+}
+GpuSlice :: struct ($T: typeid) {
+    p: vk.DeviceAddress,
+}
 
 // @todo(viktor): can we find a way not to store this metadata per allocation?
 _the_buffer_allocations: map[vk.DeviceAddress] Buffer_Allocation
 Buffer_Allocation :: struct {
     buffer: Buffer,
-    offset: u32,
+    offset: vk.DeviceSize,
 }
 
 gpu_reflect_get_allocation :: proc (address: vk.DeviceAddress) -> Buffer_Allocation {
@@ -535,12 +540,12 @@ gpu_reflect_get_allocation :: proc (address: vk.DeviceAddress) -> Buffer_Allocat
     assert(ok)
     return alloc
 } 
-gpu_reflect_get_buffer :: proc (address: vk.DeviceAddress) -> (Buffer, u32) {
+gpu_reflect_get_buffer :: proc (address: vk.DeviceAddress) -> (Buffer, vk.DeviceSize) {
     alloc := gpu_reflect_get_allocation(address)
     return alloc.buffer, alloc.offset
 }
 gpu_reflect_set_allocation :: proc (address: vk.DeviceAddress, buffer: Buffer, offset: u32 = 0) {
-    _the_buffer_allocations[address] = { buffer, offset }
+    _the_buffer_allocations[address] = { buffer, cast(vk.DeviceSize) offset }
 }
 
 gpu_allocate :: proc { gpu_allocate_size, gpu_allocate_slice, gpu_allocate_type }
@@ -592,26 +597,30 @@ gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Me
     return cpu_result, gpu_result
 }
 
-gpu_allocate_slice :: proc (gpu: ^Gpu, $T: typeid/ [] $E, #any_int count: umm, memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (result: [] E, gpu_result: vk.DeviceAddress) {
+gpu_allocate_slice :: proc (gpu: ^Gpu, $T: typeid/ [] $E, #any_int count: umm, memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> ([] E, GpuSlice(E)) {
     cpu_pointer, gpu_pointer := gpu_allocate_size(gpu, size_of(E) * count, align_of(E), memory, usage)
-    result = slice_from_parts(E, cpu_pointer, count)
-    return result, gpu_pointer
+    result := slice_from_parts(E, cpu_pointer, count)
+    return result, { gpu_pointer }
 }
 
-gpu_allocate_type :: proc (gpu: ^Gpu, $T: typeid, memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (result: ^T, gpu_result: Gpu_Address(T)) {
+gpu_allocate_type :: proc (gpu: ^Gpu, $T: typeid, memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (^T,GpuAddress(T)) {
     cpu_pointer, gpu_pointer := gpu_allocate_size(gpu, size_of(T), align_of(T), memory, usage)
-    return cast(^T) cpu_pointer, Gpu_Address(T) { gpu_pointer }
+    result := cast(^T) cpu_pointer
+    return result, { gpu_pointer }
 }
 
-gpu_free :: proc { gpu_free_pointer, gpu_free_address }
+gpu_free :: proc { gpu_free_pointer, gpu_free_address, gpu_free_slice }
 gpu_free_pointer :: proc (gpu: ^Gpu, pointer: vk.DeviceAddress) {
     buffer, offset := gpu_reflect_get_buffer(pointer)
     assert(offset == 0)
     vk.FreeMemory(gpu.device,    buffer.memory, nil)
     vk.DestroyBuffer(gpu.device, buffer.buffer, nil)
 }
-gpu_free_address :: proc (gpu: ^Gpu, address: Gpu_Address($T)) {
-    gpu_free_pointer(gpu, address.address)
+gpu_free_address :: proc (gpu: ^Gpu, address: GpuAddress($T)) {
+    gpu_free_pointer(gpu, address.p)
+}
+gpu_free_slice :: proc (gpu: ^Gpu, slice: GpuSlice($T)) {
+    gpu_free_pointer(gpu, slice.p)
 }
 
 
@@ -1179,7 +1188,7 @@ gpu_copy_to_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: Imag
     alloc := gpu_reflect_get_allocation(source)
     
     region := vk.BufferImageCopy {
-        bufferOffset = cast(vk.DeviceSize) alloc.offset,
+        bufferOffset = alloc.offset,
         imageSubresource = { aspectMask = { .COLOR }, mipLevel = 0, layerCount = 1 },
         imageExtent      = { **size },
     }
@@ -1191,7 +1200,7 @@ gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: vk
     alloc := gpu_reflect_get_allocation(destination)
     
     region := vk.BufferImageCopy {
-        bufferOffset = cast(vk.DeviceSize) alloc.offset,
+        bufferOffset = alloc.offset,
         imageSubresource = { aspectMask = { .COLOR }, mipLevel = 0, layerCount = 1 },
         imageExtent      = { **size },
     }
@@ -1199,11 +1208,14 @@ gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: vk
     vk.CmdCopyImageToBuffer(cmd, source.image, source.last_transition.layout, alloc.buffer.buffer, 1, &region)
 }
 
-// @todo(viktor): check where niagara uses dependency flags and add it
-gpu_barrier :: proc (command_buffer: vk.CommandBuffer, before, after: vk.PipelineStageFlags2, hazard := Hazard_Flags {}) {
-    // @study vk.DependencyFlags
+gpu_barrier :: proc (command_buffer: vk.CommandBuffer, before, after: vk.PipelineStageFlags2, hazard := Hazard_Flags {}, loc := #caller_location) {
+    assert(before != {}, loc = loc)
+    assert(after != {},  loc = loc)
+    
     info := vk.DependencyInfo {
         sType = .DEPENDENCY_INFO,
+        
+        dependencyFlags = {},
         
         memoryBarrierCount = 1,
         pMemoryBarriers    = &vk.MemoryBarrier2 {
@@ -1344,8 +1356,8 @@ gpu_dispatch :: proc (command_buffer: vk.CommandBuffer, push_constant: GpuAddres
 gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, commands: vk.DeviceAddress, count: GpuAddress(u32), max_count: u32, stride: u32, command_offset: umm) {
     // @speed 
     commands, commands_base_offset := gpu_reflect_get_buffer(commands)
-    count,    count_offset    := gpu_reflect_get_buffer(count.p)
-    vk.CmdDrawMeshTasksIndirectCountEXT(cmd, commands.buffer, auto_cast (commands_base_offset + auto_cast command_offset), count.buffer, auto_cast count_offset, max_count, stride)
+    count,    count_offset         := gpu_reflect_get_buffer(count.p)
+    vk.CmdDrawMeshTasksIndirectCountEXT(cmd, commands.buffer, commands_base_offset + cast(vk.DeviceSize) command_offset, count.buffer, count_offset, max_count, stride)
 }
 
 

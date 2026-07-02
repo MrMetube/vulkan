@@ -4,6 +4,7 @@ package main
 import "base:intrinsics"
 import "core:fmt"
 import "core:os"
+import "core:strings"
 import "core:time"
 import la "core:math/linalg"
 
@@ -687,10 +688,10 @@ main :: proc () {
         
         cull_globals_cpu, cull_globals_gpu := bump_allocate_type(bump, Cull_Globals)
         cull_globals_cpu^ = Cull_Globals {
-            draw_buffer            = draw_buffer,
-            mesh_buffer            = mesh_buffer,
-            draw_visibility_buffer = draw_visibilty_buffer,
-            draw_command_buffer    = draw_command_buffer,
+            draw_buffer            = draw_buffer.p,
+            mesh_buffer            = mesh_buffer.p,
+            draw_visibility_buffer = draw_visibilty_buffer.p,
+            draw_command_buffer    = draw_command_buffer.p,
             draw_command_count     = draw_command_count_gpu.p,
             
             data = {
@@ -716,20 +717,21 @@ main :: proc () {
             
             ////////////////////////////////////////////////
             
-            gpu_barrier(cmd, {}, { .TRANSFER })
+            gpu_barrier(cmd, { .DRAW_INDIRECT }, { .TRANSFER })
             
             {
                 count, offset := gpu_reflect_get_buffer(draw_command_count_gpu.p)
-                vk.CmdFillBuffer(cmd, count.buffer, cast(vk.DeviceSize) offset, gpu_size_of(draw_command_count_gpu), 0)
+                vk.CmdFillBuffer(cmd, count.buffer, offset, gpu_size_of(draw_command_count_gpu), 0)
             }
             
             
             if !dvb_cleared {
                 dvb_cleared = true
-                {
-                    visibility_buffer, offset := gpu_reflect_get_buffer(draw_visibilty_buffer)
-                    vk.CmdFillBuffer(cmd, visibility_buffer.buffer, cast(vk.DeviceSize) offset, cast(vk.DeviceSize) len(draws) * size_of(dvb_view[0]), 1)
-                }
+                
+                visibility_buffer, offset := gpu_reflect_get_buffer(draw_visibilty_buffer.p)
+                vk.CmdFillBuffer(cmd, visibility_buffer.buffer, offset, cast(vk.DeviceSize) len(draws) * size_of(dvb_view[0]), 0)
+                
+                gpu_barrier(cmd, { .TRANSFER }, { .COMPUTE_SHADER })
             }
             
             ////////////////////////////////////////////////
@@ -754,7 +756,7 @@ main :: proc () {
         pipeline_barrier_begin()
             add_image_barrier(&stuff.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL)
             add_image_barrier(&stuff.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
-        pipeline_barrier_end(cmd)
+        pipeline_barrier_end(cmd, { .BY_REGION })
         
         ////////////////////////////////////////////////
         
@@ -762,12 +764,12 @@ main :: proc () {
         draw_globals.screen_from_view = screen_from_view
         draw_globals.view_from_world  = view_from_world
         
-        draw_globals.draw_command_buffer = draw_command_buffer
-        draw_globals.draw_buffer         = draw_buffer
-        draw_globals.mesh_buffer         = mesh_buffer
-        draw_globals.meshlet_buffer      = meshlet_buffer
-        draw_globals.meshlet_data_buffer = meshlet_data_buffer
-        draw_globals.vertex_buffer       = vertex_buffer
+        draw_globals.draw_command_buffer = draw_command_buffer.p
+        draw_globals.draw_buffer         = draw_buffer.p
+        draw_globals.mesh_buffer         = mesh_buffer.p
+        draw_globals.meshlet_buffer      = meshlet_buffer.p
+        draw_globals.meshlet_data_buffer = meshlet_data_buffer.p
+        draw_globals.vertex_buffer       = vertex_buffer.p
         
         draw_globals_cpu, draw_globals_gpu := bump_allocate_type(bump, Draw_Globals)
         draw_globals_cpu^ = draw_globals
@@ -798,7 +800,7 @@ main :: proc () {
                     
                     vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
                     
-                    gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer, draw_command_count_gpu, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command))
+                    gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer.p, draw_command_count_gpu, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command))
                 
                 gpu_profile_zone_end()
                 gpu_labeled_region_end(cmd)
@@ -810,22 +812,22 @@ main :: proc () {
             gpu_end_render_pass(cmd)
         gpu_labeled_region_end(cmd)
         gpu_profile_zone_end()
-        
-        ////////////////////////////////////////////////
-        
-        // :OcclusionCull: the barrier before the depth pyramid was missing the barrier for the pyramid.image itself (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=11592)
-        
-        pipeline_barrier_begin()
-            add_image_barrier_transition_from_last(&stuff.depth_buffer, { .COMPUTE_SHADER }, { .SHADER_READ }, .SHADER_READ_ONLY_OPTIMAL, { .DEPTH })
-            add_image_barrier(&stuff.depth_pyramid, {}, {}, .UNDEFINED,  { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL)
-        pipeline_barrier_end(cmd)
-        
         ////////////////////////////////////////////////
         // depth pyramid generation
         
         gpu_profile_zone_begin("depth pyramid building")
         gpu_labeled_region_begin(cmd, "depth pyramid building", {0.4, 0.8, 0, 1.0})
-        
+            
+            ////////////////////////////////////////////////
+            
+            // :OcclusionCull: the barrier before the depth pyramid was missing the barrier for the pyramid.image itself (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=11592)
+            
+            pipeline_barrier_begin()
+                add_image_barrier_transition_from_last(&stuff.depth_buffer, { .COMPUTE_SHADER }, { .SHADER_READ }, .SHADER_READ_ONLY_OPTIMAL, { .DEPTH })
+                add_image_barrier(&stuff.depth_pyramid, {}, {}, .UNDEFINED,  { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL)
+            pipeline_barrier_end(cmd, { .BY_REGION })
+            
+            
             gpu_set_pipeline(cmd, depth_pipeline)
                 
                 updates: [dynamic; 32] DescriptorUpdateData
@@ -854,14 +856,14 @@ main :: proc () {
                     pipeline_barrier_end(cmd, { .BY_REGION })
                 }
         
+                ////////////////////////////////////////////////
+                
+                pipeline_barrier_begin()
+                    add_image_barrier_transition_from_last(&stuff.depth_buffer, {.EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH })
+                pipeline_barrier_end(cmd, { .BY_REGION })
+                
         gpu_labeled_region_end(cmd)
         gpu_profile_zone_end()
-        
-        ////////////////////////////////////////////////
-        
-        pipeline_barrier_begin()
-            add_image_barrier_transition_from_last(&stuff.depth_buffer, {.EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH })
-        pipeline_barrier_end(cmd)
         
         ////////////////////////////////////////////////
         // late cull - frustum & occlusion cull & fill objects that were *not* visible last frame
@@ -871,44 +873,43 @@ main :: proc () {
             
             ////////////////////////////////////////////////
             
-            gpu_barrier(cmd, { .DRAW_INDIRECT, .TRANSFER }, { .TRANSFER })
+            gpu_barrier(cmd, { .DRAW_INDIRECT }, { .TRANSFER })
             
             {
                 count, offset := gpu_reflect_get_buffer(draw_command_count_gpu.p)
-                vk.CmdFillBuffer(cmd, count.buffer, cast(vk.DeviceSize) offset, gpu_size_of(draw_command_count_gpu), 0)
+                vk.CmdFillBuffer(cmd, count.buffer, offset, gpu_size_of(draw_command_count_gpu), 0)
             }
             
             ////////////////////////////////////////////////
             
             // :OcclusionCull: the memory barrier for the depth pyramid had a parameters, but just for the late pass (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=10157)
-            gpu_barrier(cmd, { .DRAW_INDIRECT, .MESH_SHADER_EXT, .TRANSFER }, { .COMPUTE_SHADER })
+            gpu_barrier(cmd, { .DRAW_INDIRECT, .TRANSFER }, { .COMPUTE_SHADER })
             
             ////////////////////////////////////////////////
             
             gpu_set_pipeline(cmd, late_cull_pipeline)
                 
                 gpu_dispatch(cmd, cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)))
-                
-            gpu_barrier(cmd, { .DRAW_INDIRECT, .TRANSFER }, { .TRANSFER })
             
         gpu_profile_zone_end()
         gpu_labeled_region_end(cmd)
-        
-        ////////////////////////////////////////////////
-        
-        // @todo(viktor): should these be combined into one api call?
-        gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
-        // this apparently needs to happend before we do anything related to rendering
-        pipeline_barrier_begin()
-            add_image_barrier_transition_from_last(&stuff.color_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL)
-            add_image_barrier_transition_from_last(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
-        pipeline_barrier_end(cmd)
         
         ////////////////////////////////////////////////
         // late rendering - render objects that are visible this frame but weren't drawn in the early pass
         
         gpu_profile_zone_begin("late rendering pass")
         gpu_labeled_region_begin(cmd, "late rendering pass", {0.6, 0.1, 07, 1.0})
+        
+            // @todo(viktor): should these be combined into one api call?
+            gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
+            // this apparently needs to happend before we do anything related to rendering
+            pipeline_barrier_begin()
+                add_image_barrier_transition_from_last(&stuff.color_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL)
+                add_image_barrier_transition_from_last(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }) // :Stencil: add .STENCIL to the aspect mask
+            pipeline_barrier_end(cmd)
+            
+            ////////////////////////////////////////////////
+        
             begin_meshlet_rendering(&gpu, cmd, stuff.color_buffer, stuff.depth_buffer, {}, early = false)
                 
                 gpu_set_pipeline(cmd, meshlet_pipeline)
@@ -916,9 +917,10 @@ main :: proc () {
                     
                     vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
                     
-                    gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer, draw_command_count_gpu, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command))
+                    gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer.p, draw_command_count_gpu, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command))
                 
             gpu_end_render_pass(cmd)
+            
         gpu_labeled_region_end(cmd)
         gpu_profile_zone_end()
         
@@ -933,7 +935,7 @@ main :: proc () {
                 } else {
                     add_image_barrier_transition_from_last(&stuff.depth_pyramid, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL)
                 }
-            pipeline_barrier_end(cmd)
+            pipeline_barrier_end(cmd, { .BY_REGION })
                 
             destination := gpu.swapchain_images[gpu.image_index]
             if !debug.display_pyramid {
@@ -958,17 +960,14 @@ main :: proc () {
             
             pipeline_barrier_begin()
                 add_image_barrier_transition_from_last(&gpu.swapchain_images[gpu.image_index], {}, {}, .PRESENT_SRC_KHR)
-            pipeline_barrier_end(cmd)
-        
+            pipeline_barrier_end(cmd, { .BY_REGION })
+            
         gpu_profile_zone_end()
         
         ////////////////////////////////////////////////
         
         gpu_profile_frame_end()
-        
         check(vk.EndCommandBuffer(cmd))
-        
-        ////////////////////////////////////////////////
         
         // @cleanup dont pass the frameindex, this is a place that could cause mistakes
         end_of_frame_submit(&gpu, gpu.general_queue, frame_semaphore, next_frame, frame_index, &cmd)
@@ -978,6 +977,8 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         {
+            // @todo(viktor): how can we record how many triangles we have rendered after culling?
+            
             gpu_profile_collate_times(&gpu, gpu.device, print_profile_and_stats)
             
             gpu_delta        := gpu_profile_get_zone("frame").total_time_with_children
@@ -996,20 +997,24 @@ main :: proc () {
                 return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
             }
             
+            sb := strings.builder_make(context.temp_allocator)
+            fmt.sbprintf(&sb, "cpu: %.3v, gpu: %.3v, culling: %.3v early / %.3v late", view(debug.cpu_time), view(debug.gpu_time), view(debug.early_cull_time), view(debug.late_cull_time))
+            fmt.sbprintf(&sb, ", Features: ")
+            if debug.culling_enabled {
+                fmt.sbprintf(&sb, "Culling ")
+            }
+            if debug.lod_enabled {
+                fmt.sbprintf(&sb, "LOD ")
+            }
+            if debug.occlusion_enabled {
+                fmt.sbprintf(&sb, "Occlusion ")
+            }
             extra: string
             if debug.display_pyramid {
-                extra = fmt.tprintf(", displaying depth mip level %v", debug.display_pyramid_mip_level)
+                extra = fmt.sbprintf(&sb, ", displaying depth mip level %v", debug.display_pyramid_mip_level)
             }
-            title := fmt.ctprintf("cpu time: %.3v, gpu time: %.3v, early/late cull time: %.3v/%.3v, culling %v, level of detail %v%v",
-                view(debug.cpu_time), 
-                view(debug.gpu_time), 
-                view(debug.early_cull_time), 
-                view(debug.late_cull_time), 
-                debug.culling_enabled ? "on" : "off",
-                debug.lod_enabled     ? "on" : "off",
-                extra,
-            )
-            // @todo(viktor): how can we record how many triangles we have rendered after culling?
+            
+            title := strings.to_cstring(&sb)
             sdl.SetWindowTitle(window, title)
             
             if print_profile_and_stats {

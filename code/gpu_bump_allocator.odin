@@ -14,11 +14,11 @@ Bump_Allocator :: struct {
 bump_allocator_make_temporary :: proc (gpu: ^Gpu, size: u32, usage := vk.BufferUsageFlags{ .STORAGE_BUFFER }) -> Bump_Allocator {
     result: Bump_Allocator
     
-    address: vk.DeviceAddress
-    result.cpu, address = gpu_allocate_slice(gpu, [] u8, size, usage = usage)
-    result.gpu = slice_from_parts(u8, transmute(pmm) address, size)
+    gpu_slice: GpuSlice(u8)
+    result.cpu, gpu_slice = gpu_allocate_slice(gpu, [] u8, size, usage = usage)
+    result.gpu = slice_from_parts(u8, transmute(pmm) gpu_slice, size)
     
-    result.backing, _ = gpu_reflect_get_buffer(address)
+    result.backing, _ = gpu_reflect_get_buffer(gpu_slice.p)
     
     return result
 }
@@ -48,10 +48,6 @@ bump_allocate :: proc (bump: ^Bump_Allocator, size: u32, alignment: u32 = 16) ->
     bump.offset += size
     
     return cpu, gpu
-}
-
-GpuAddress :: struct ($T: typeid) {
-    p: vk.DeviceAddress,
 }
 
 gpu_size_of :: proc (x: $G / GpuAddress($T)) -> vk.DeviceSize {
