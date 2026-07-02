@@ -1,10 +1,12 @@
 package build
 
 import "core:os"
+import "core:fmt"
 import "../code" // just for the shader compiling
 
-optimize :: false
-pedantic :: false
+optimize       :: false
+pedantic       :: false
+strict_shaders :: true
 
 main :: proc () {
     init_build(run_from_data = true)
@@ -28,7 +30,11 @@ main :: proc () {
         ok := code.compile_shader_end(cmd, shader)
         if !ok { any_shader_had_errors = true }
     }
-    if any_shader_had_errors { return }
+    
+    if strict_shaders && any_shader_had_errors {
+        fmt.printfln("\nFailed to compile shaders. Stopping build process.")
+        return
+    }
     
     if begin_build(cmd, "code", "engine.exe", .Kill) {
         build_meander()

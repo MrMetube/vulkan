@@ -38,19 +38,17 @@ void main() {
     Draw_p draw = globals.draw_buffer[draw_index];
     Mesh_p mesh = globals.mesh_buffer[draw.v.mesh_index];
     
-    Mesh_LOD lod = mesh.v.lods[command.v.lod_index];
-    uint meshlet_index = meshlet_group_index * TaskWidth + thread_index + lod.meshlet_offset;
+    uint meshlet_index = meshlet_group_index * TaskWidth + thread_index + command.v.meshlet_offset;
     
     if (thread_index == 0) {
-        task_result.draw_index = draw_index;
-        // see :DrawAndLODData:
-        task_result.meshlet_offset = lod.meshlet_offset;
+        task_result.draw_index     = draw_index;
+        task_result.meshlet_offset = command.v.meshlet_offset;
     }
     
     uint count;
     if (BACKFACE_CULLING) {
         bool accept = false;
-        if (meshlet_index < (lod.meshlet_count + lod.meshlet_offset)) {
+        if (meshlet_index < (command.v.meshlet_count + command.v.meshlet_offset)) {
             Meshlet_p meshlet = globals.meshlet_buffer[meshlet_index];
             
             vec3 cone_axis    = vec3(meshlet.v.cone_axis[0], meshlet.v.cone_axis[1], meshlet.v.cone_axis[2]) / 127.0;
@@ -60,9 +58,13 @@ void main() {
             
             cone_axis = rotate(draw.v.orientation, cone_axis);
             
-            vec3 camera_position = mat3(globals.view_from_world) * globals.view_from_world[3].xyz;
+            vec3 view_camera_position = vec3(0);
             
-            accept = !cone_cull(center, radius, cone_axis, cone_cutoff, camera_position);
+            // @todo radius and cutoff might need scaling if the view_from_world matrix is more than translating
+            vec4 view_center    = globals.view_from_world * vec4(center, 1);
+            vec4 view_cone_axis = globals.view_from_world * vec4(cone_axis, 0);
+            
+            accept = !cone_cull(view_center.xyz, radius, view_cone_axis.xyz, cone_cutoff, view_camera_position);
         }
         
         uvec4 ballot = subgroupBallot(accept);
@@ -75,7 +77,7 @@ void main() {
     } else {
         task_result.indices[thread_index] = meshlet_index;
         
-        count = min(TaskWidth, lod.meshlet_count - (meshlet_group_index * TaskWidth + 0));
+        count = min(TaskWidth, command.v.meshlet_count - (meshlet_group_index * TaskWidth + 0));
     }
     
     EmitMeshTasksEXT(count, 1, 1);

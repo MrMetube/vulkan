@@ -45,6 +45,7 @@ Stuff_With_The_Same_Lifetime_As_The_Swapchain :: struct {
     
     depth_sampler: vk.Sampler,
     depth_pyramid: Image,
+    depth_pyramid_size: uv2,
     depth_pyramid_mips: [dynamic; 16] Depth_Pyramid_Mip,
 }
 
@@ -75,8 +76,13 @@ Cull_Data :: struct #all_or_none {
     pyramid_size: v2,
     p00, p11, near_z: f32,
     
-    flags: u32, // frustum_culling 1 << 0, lod_enabled 1 << 1, occlusion_enabled 1 << 2
+    flags: u32,
 }
+
+// @volatile Cull_Data.flags
+DebugFlag_FrustumCulling   :: (1 << 0)
+DebugFlag_LevelOfDetail    :: (1 << 1)
+DebugFlag_OcclusionCulling :: (1 << 2)
 
 // @shader
 Draw_Globals :: struct {
@@ -130,7 +136,8 @@ Mesh_LOD :: struct {
 // @shader
 Draw_Command :: struct {
     draw_id:   u32,
-    lod_index: u32,
+    meshlet_offset: u32,
+    meshlet_count:  u32,
     command:   vk.DrawMeshTasksIndirectCommandEXT,
 }
 
@@ -237,7 +244,7 @@ main :: proc () {
         append(&meshlet_shaders, shader)
     }
     
-    early_cull_shader    := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/cull_early.comp",    shader_allocator)
+    early_cull_shader   := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/cull_early.comp",   shader_allocator)
     late_cull_shader    := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/cull_late.comp",    shader_allocator)
     depth_reduce_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/depth_reduce.comp", shader_allocator)
     
@@ -373,6 +380,8 @@ main :: proc () {
         
         cpu_time:  f64,
         gpu_time:  f64,
+        early_rendering_time: f64,
+        late_rendering_time:  f64,
         early_cull_time: f64,
         late_cull_time:  f64,
     } = {
@@ -494,18 +503,21 @@ main :: proc () {
         if reload_shaders_if_needed(watchers, shader_allocator, &early_cull_shader) || !pipeline_is_valid(early_cull_pipeline) {
             destroy_pipeline(&gpu, early_cull_pipeline)
             early_cull_pipeline = gpu_create_compute_pipeline(&gpu, early_cull_shader)
+            fmt.printfln("Recreated early_cull_pipeline.")
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, &late_cull_shader) || !pipeline_is_valid(late_cull_pipeline) {
             destroy_pipeline(&gpu, late_cull_pipeline)
             late_cull_pipeline = gpu_create_compute_pipeline(&gpu, late_cull_shader, late_cull_descriptor_set_layout)
             late_cull_pipeline.update_template = create_update_template(gpu.device, .COMPUTE, late_cull_pipeline.layout, late_cull_shader)
+            fmt.printfln("Recreated late_cull_pipeline.")
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, &depth_reduce_shader) || !pipeline_is_valid(depth_pipeline) {
             destroy_pipeline(&gpu, depth_pipeline)
             depth_pipeline = gpu_create_compute_pipeline(&gpu, depth_reduce_shader, depth_descriptor_set_layout)
             depth_pipeline.update_template = create_update_template(gpu.device, .COMPUTE, depth_pipeline.layout, depth_reduce_shader)
+            fmt.printfln("Recreated depth_pipeline.")
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, meshlet_shaders[:]) || !pipeline_is_valid(meshlet_pipeline) {
@@ -527,6 +539,7 @@ main :: proc () {
             
             destroy_pipeline(&gpu, meshlet_pipeline)
             meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, task, mesh, frag, raster_description, texture_heap.layout)
+            fmt.printfln("Recreated meshlet_pipeline.")
         }
         
         ////////////////////////////////////////////////
@@ -615,9 +628,9 @@ main :: proc () {
         
         // @shader cull_early, cull_late
         cull_data_flags: u32 
-        if debug.culling_enabled   { cull_data_flags |= 1 << 0 }
-        if debug.lod_enabled       { cull_data_flags |= 1 << 1 }
-        if debug.occlusion_enabled { cull_data_flags |= 1 << 2 }
+        if debug.culling_enabled   { cull_data_flags |= DebugFlag_FrustumCulling   }
+        if debug.lod_enabled       { cull_data_flags |= DebugFlag_LevelOfDetail    }
+        if debug.occlusion_enabled { cull_data_flags |= DebugFlag_OcclusionCulling }
         cull_globals_cpu^ = Cull_Globals {
             draw_buffer            = draw_buffer.p,
             mesh_buffer            = mesh_buffer.p,
@@ -636,7 +649,7 @@ main :: proc () {
                 p11 = screen_from_view[1,1],
                 near_z = near_z,
                 
-                pyramid_size = cast(v2) stuff.depth_pyramid_mips[0].size,
+                pyramid_size = cast(v2) stuff.depth_pyramid_size,
             },
         }
         
@@ -650,6 +663,7 @@ main :: proc () {
             {
                 count, offset := gpu_reflect_get_buffer(draw_command_count_gpu.p)
                 vk.CmdFillBuffer(cmd, count.buffer, offset, gpu_size_of(draw_command_count_gpu), 0)
+                gpu_barrier(cmd, { .TRANSFER }, { .DRAW_INDIRECT })
             }
             
             
@@ -657,7 +671,7 @@ main :: proc () {
                 dvb_cleared = true
                 
                 visibility_buffer, offset := gpu_reflect_get_buffer(draw_visibilty_buffer.p)
-                vk.CmdFillBuffer(cmd, visibility_buffer.buffer, offset, cast(vk.DeviceSize) len(draws) * size_of(dvb_view[0]), 0)
+                vk.CmdFillBuffer(cmd, visibility_buffer.buffer, offset, cast(vk.DeviceSize) len(draws) * size_of(dvb_view[0]), 1)
                 
                 gpu_barrier(cmd, { .TRANSFER }, { .COMPUTE_SHADER })
             }
@@ -665,12 +679,11 @@ main :: proc () {
             ////////////////////////////////////////////////
             
             // :OcclusionCull: the memory barrier for the depth pyramid had a parameters, but just for the late pass (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=10157)
-            gpu_barrier(cmd, { .DRAW_INDIRECT, .MESH_SHADER_EXT, .TRANSFER }, { .COMPUTE_SHADER })
+            gpu_barrier(cmd, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .COMPUTE_SHADER })
             
             ////////////////////////////////////////////////
             
             gpu_set_pipeline(cmd, early_cull_pipeline)
-                
                 gpu_dispatch(cmd, cull_globals_gpu, get_group_count(early_cull_shader, auto_cast len(draws)))
             
         gpu_profile_zone_end()
@@ -685,7 +698,7 @@ main :: proc () {
             create_image_barrier(&stuff.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL),
             // :Stencil: add .STENCIL to the aspect mask
             create_image_barrier(&stuff.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }), 
-            flags = { .BY_REGION }
+            flags = { .BY_REGION },
         )
         
         ////////////////////////////////////////////////
@@ -742,6 +755,7 @@ main :: proc () {
             gpu_end_render_pass(cmd)
         gpu_labeled_region_end(cmd)
         gpu_profile_zone_end()
+        
         ////////////////////////////////////////////////
         // depth pyramid generation
         
@@ -756,7 +770,7 @@ main :: proc () {
             gpu_image_barriers(cmd, 
                 create_image_barrier_from_last_transition(&stuff.depth_buffer, { .COMPUTE_SHADER }, { .SHADER_READ }, .SHADER_READ_ONLY_OPTIMAL, { .DEPTH }),
                 create_image_barrier(&stuff.depth_pyramid, {}, {}, .UNDEFINED,  { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL),
-                flags = { .BY_REGION }
+                flags = { .BY_REGION },
             )
             
             
@@ -838,7 +852,7 @@ main :: proc () {
                 create_image_barrier_from_last_transition(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }), 
                 // :Stencil: add .STENCIL to the aspect mask
                 create_image_barrier_from_last_transition(&stuff.color_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL),
-                flags = { .BY_REGION }
+                flags = { .BY_REGION },
             )
             
             ////////////////////////////////////////////////
@@ -868,7 +882,7 @@ main :: proc () {
             gpu_image_barriers(cmd, 
                 create_image_barrier(&gpu.swapchain_images[gpu.image_index], { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL),
                 create_image_barrier_from_last_transition(source_image, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL),
-                flags = { .BY_REGION }
+                flags = { .BY_REGION },
             )
             
             destination := gpu.swapchain_images[gpu.image_index]
@@ -915,12 +929,16 @@ main :: proc () {
             gpu_profile_collate_times(&gpu, gpu.device, print_profile_and_stats)
             
             gpu_delta        := gpu_profile_get_zone("frame").total_time_with_children
-            early_cull_delta := gpu_profile_get_zone("early culling").total_time
-            late_cull_delta  := gpu_profile_get_zone("late culling").total_time
+            early_rendering_delta := gpu_profile_get_zone("early rendering pass").total_time_with_children
+            late_rendering_delta  := gpu_profile_get_zone("late rendering pass").total_time_with_children
+            early_cull_delta := gpu_profile_get_zone("early culling").total_time_with_children
+            late_cull_delta  := gpu_profile_get_zone("late culling").total_time_with_children
             
             debug.cpu_time  = time_smoothed_blend(delta_time_64, debug.cpu_time, delta_time_64)
             debug.early_cull_time = time_smoothed_blend(delta_time_64, debug.early_cull_time, early_cull_delta)
             debug.late_cull_time  = time_smoothed_blend(delta_time_64, debug.late_cull_time, late_cull_delta)
+            debug.early_rendering_time = time_smoothed_blend(delta_time_64, debug.early_rendering_time, early_rendering_delta)
+            debug.late_rendering_time  = time_smoothed_blend(delta_time_64, debug.late_rendering_time, late_rendering_delta)
             // this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
             if gpu_delta >= 0 {
                 debug.gpu_time = time_smoothed_blend(delta_time_64, debug.gpu_time, gpu_delta)
@@ -931,7 +949,11 @@ main :: proc () {
             }
             
             sb := strings.builder_make(context.temp_allocator)
-            fmt.sbprintf(&sb, "cpu: %.3v, gpu: %.3v, culling: %.3v early / %.3v late", view(debug.cpu_time), view(debug.gpu_time), view(debug.early_cull_time), view(debug.late_cull_time))
+            fmt.sbprintf(&sb, "cpu: %.3v, gpu: %.3v, culling: %.3v early / %.3v late, rendering: %.3v early / %.3v late", 
+                view(debug.cpu_time), view(debug.gpu_time), 
+                view(debug.early_cull_time), view(debug.late_cull_time),
+                view(debug.early_rendering_time), view(debug.late_rendering_time),
+            )
             fmt.sbprintf(&sb, ", Features: ")
             if debug.culling_enabled {
                 fmt.sbprintf(&sb, "Culling ")
@@ -1053,7 +1075,7 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_S
     // Each mip level is a quarter of the size of the previous, as we half both dimensions each time.
     mip_count := 1 + max(integer_log2(pyramid_size.x), integer_log2(pyramid_size.y))
     
-    
+    stuff.depth_pyramid_size = pyramid_size
     stuff.depth_pyramid = gpu_allocate_texture(gpu, default_texture_desc(size = {pyramid_size.x, pyramid_size.y, 1}, format = .R32_SFLOAT, mip_count = mip_count, usage = { .SAMPLED, .STORAGE, .TRANSFER_SRC }))
     // :Stencil: add the .STENCIL mask bit
     stuff.depth_buffer = gpu_allocate_texture(gpu, default_texture_desc(size = {gpu.swapchain_size.x, gpu.swapchain_size.y, 1}, format = stuff.depth_buffer.format, usage = { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED }))

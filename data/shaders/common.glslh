@@ -11,6 +11,11 @@
 
 #define TaskWidth 32
 
+// @volatile
+#define Flag_FrustumCulling   (1 << 0)
+#define Flag_LevelOfDetail    (1 << 1)
+#define Flag_OcclusionCulling (1 << 2)
+
 struct Task_Result {
     uint indices[TaskWidth];
     uint draw_index;

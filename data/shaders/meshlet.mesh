@@ -45,10 +45,6 @@ void main() {
     uint thread_index  = gl_LocalInvocationID.x;
 	uint meshlet_index = task_result.indices[gl_WorkGroupID.x];
     uint draw_index    = task_result.draw_index;
-    // :DrawAndLODData: @cleanup niagara managed to "pass" the offset by using the NV functions, which allow for an offset.
-    // this is so that the Draw structure, does not need to store the meshlet offset for the mesh shader,
-    // which then only requires then draw.vertex_offset, and all other fields can be moved into a separate
-    // buffer alongside the LOD data.
     uint meshlet_offset = task_result.meshlet_offset;
     
     Draw_p draw = globals.draw_buffer[draw_index];

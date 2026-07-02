@@ -16,28 +16,26 @@ void main() {
     
     if (draw_index >= globals.data.draw_count) return;
     
-    bool was_visible_last_frame = globals.draw_visibility_buffer[draw_index].v != 0;
-    if (!was_visible_last_frame) return;
+    if (globals.draw_visibility_buffer[draw_index].v == 0) return;
     
-    // @volatile
-    bool frustum_culling_enabled = (globals.data.flags & (1 << 0)) != 0;
-    bool lod_enabled             = (globals.data.flags & (1 << 1)) != 0;
-    bool occlusion_enabled       = (globals.data.flags & (1 << 2)) != 0;
+    bool frustum_culling_enabled = (globals.data.flags & Flag_FrustumCulling)   != 0;
+    bool lod_enabled             = (globals.data.flags & Flag_LevelOfDetail)    != 0;
+    bool occlusion_enabled       = (globals.data.flags & Flag_OcclusionCulling) != 0;
     
     Draw_p draw               = globals.draw_buffer[draw_index];
     Mesh_p mesh               = globals.mesh_buffer[draw.v.mesh_index];
     uint_p draw_command_count = globals.draw_command_count;
     
-    vec3  center = transform(draw.v.orientation, draw.v.scale, draw.v.p, mesh.v.center);
-    float radius = draw.v.scale * mesh.v.radius; // @todo scale by view_from_world?
+    vec3  world_center = transform(draw.v.orientation, draw.v.scale, draw.v.p, mesh.v.center);
+    float radius       = draw.v.scale * mesh.v.radius; // @todo scale by view_from_world?
     
-    vec4 center_in_view_space = globals.data.view_from_world * vec4(center, 1);
+    vec4 view_center = globals.data.view_from_world * vec4(world_center, 1);
     
     bool visible = true;
     if (frustum_culling_enabled) {
         for (int i = 0; i < 5; i++) {
             vec4 plane = globals.data.frustum_planes[i];
-            visible = visible && (dot(plane, center_in_view_space) > -radius);
+            visible = visible && (dot(plane, view_center) > -radius);
         }
     }
     
@@ -46,22 +44,24 @@ void main() {
         
         uint lod_index = 0;
         if (lod_enabled) {
-            vec3 camera_position = vec3(0);
+            vec3 view_camera_position = vec3(0);
             
-            float lod_distance = max(1, distance(center_in_view_space.xyz, camera_position) - radius);
+            float lod_distance = max(1, distance(view_center.xyz, view_camera_position) - radius);
             float log_lod_distance = log2(lod_distance);
             lod_index = int(log_lod_distance);
             
             lod_index = clamp(lod_index, 0, mesh.v.lod_count-1);
         }
         
-        Draw_Command_p draw_command = globals.draw_command_buffer[draw_command_index];
-        draw_command.v.draw_id   = draw_index;
-        draw_command.v.lod_index = lod_index; // :DrawAndLODData:
-        
         Mesh_LOD lod = mesh.v.lods[lod_index];
-        
         uint meshlet_group_count = (lod.meshlet_count + TaskWidth-1) / TaskWidth;
+        
+        Draw_Command_p draw_command = globals.draw_command_buffer[draw_command_index];
+        
+        draw_command.v.draw_id        = draw_index;
+        draw_command.v.meshlet_count  = lod.meshlet_count;
+        draw_command.v.meshlet_offset = lod.meshlet_offset;
+        
         draw_command.v.command.groupCountX = meshlet_group_count;
         draw_command.v.command.groupCountY = 1;
         draw_command.v.command.groupCountZ = 1;

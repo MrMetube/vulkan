@@ -17,17 +17,15 @@ layout(binding = 0) uniform sampler2D depth_pyramid;
 //     2D Polyhedral Bounds of a Clipped, Perspective-Projected 3D Sphere. Michael Mara, Morgan McGuire. 2013
 //     https://jcgt.org/published/0002/02/05/paper.pdf
 // :ReversedZ: we assume a reversed_z projection matrix and can use that to simplify the matrix multiplications
-bool project_sphere_onto_screen(vec3 center_view_space, float radius, float p00, float p11, float near_z, out vec4 result) {
+bool project_sphere_onto_screen(vec3 view_center, float radius, float p00, float p11, float near_z, out vec4 result) {
     // @todo we remove the handling of clipped boxes, so we need to early out in the shader in these cases and assume that we cannot cull the mesh
-    if (false) {
-        if (center_view_space.z < radius + near_z) {
-            return false;
-        }
+    if (view_center.z < radius + near_z) {
+        return false;
     }
     
     // center in the x/y-z frame
-    vec2 cx = center_view_space.xz;
-    vec2 cy = center_view_space.yz;
+    vec2 cx = -view_center.xz;
+    vec2 cy = -view_center.yz;
     
     float cx_length_squared = dot(cx, cx);
     float cy_length_squared = dot(cy, cy);
@@ -38,10 +36,10 @@ bool project_sphere_onto_screen(vec3 center_view_space, float radius, float p00,
     
     // In the x/y-z reference frame
     // Transform back to camera space
-    float min_x = -p00 * dot(vec2(vx.x,  vx.y), cx) / dot(vec2(-vx.y, vx.x), cx);
-    float max_x = -p00 * dot(vec2(vx.x, -vx.y), cx) / dot(vec2( vx.y, vx.x), cx);
-    float min_y = -p11 * dot(vec2(vy.x, -vy.y), cy) / dot(vec2( vy.y, vy.x), cy);
-    float max_y = -p11 * dot(vec2(vy.x,  vy.y), cy) / dot(vec2(-vy.y, vy.x), cy); 
+    float min_x = p00 * dot(vec2(vx.x,  vx.y), cx) / dot(vec2(-vx.y, vx.x), cx);
+    float max_x = p00 * dot(vec2(vx.x, -vx.y), cx) / dot(vec2( vx.y, vx.x), cx);
+    float min_y = p11 * dot(vec2(vy.x, -vy.y), cy) / dot(vec2( vy.y, vy.x), cy);
+    float max_y = p11 * dot(vec2(vy.x,  vy.y), cy) / dot(vec2(-vy.y, vy.x), cy); 
     
     result = vec4(min_x, min_y, max_x, max_y);
     
@@ -57,65 +55,66 @@ void main() {
     
     if (draw_index >= globals.data.draw_count) return;
     
-    // @volatile
-    bool frustum_culling_enabled = (globals.data.flags & (1 << 0)) != 0;
-    bool lod_enabled             = (globals.data.flags & (1 << 1)) != 0;
-    bool occlusion_enabled       = (globals.data.flags & (1 << 2)) != 0;
+    bool frustum_culling_enabled = (globals.data.flags & Flag_FrustumCulling)   != 0;
+    bool lod_enabled             = (globals.data.flags & Flag_LevelOfDetail)    != 0;
+    bool occlusion_enabled       = (globals.data.flags & Flag_OcclusionCulling) != 0;
     
     Draw_p draw               = globals.draw_buffer[draw_index];
     Mesh_p mesh               = globals.mesh_buffer[draw.v.mesh_index];
     uint_p draw_command_count = globals.draw_command_count;
     
-    vec3  center_world_space = transform(draw.v.orientation, draw.v.scale, draw.v.p, mesh.v.center);
-    float radius = draw.v.scale * mesh.v.radius; // @todo scale by view_from_world?
+    vec3  world_center = transform(draw.v.orientation, draw.v.scale, draw.v.p, mesh.v.center);
+    float radius       = draw.v.scale * mesh.v.radius; // @todo scale by view_from_world?
     
-    vec4 center_view_space = globals.data.view_from_world * vec4(center_world_space, 1);
+    vec4 view_center = globals.data.view_from_world * vec4(world_center, 1);
     
     bool visible = true;
     if (frustum_culling_enabled) {
         for (int i = 0; i < 5; i++) {
-            vec4 plane = globals.data.frustum_planes[i];
-            visible = visible && (dot(plane, center_view_space) > -radius);
+            vec4 view_plane = globals.data.frustum_planes[i];
+            visible = visible && (dot(view_plane, view_center) > -radius);
         }
     }
     
     if (visible && occlusion_enabled) {
         vec4 rect;
-        if (project_sphere_onto_screen(center_view_space.xyz, radius, globals.data.p00, globals.data.p11, globals.data.near_z, rect)) {
+        if (project_sphere_onto_screen(view_center.xyz, radius, globals.data.p00, globals.data.p11, globals.data.near_z, rect)) {
             vec2 size_in_pixels = (rect.zw - rect.xy) * globals.data.pyramid_size;
             
             float level = floor(log2(max(size_in_pixels.x, size_in_pixels.y)));
             vec2  rect_center = (rect.xy + rect.zw) * 0.5;
             
             float depth = textureLod(depth_pyramid, rect_center, level).x;
-            float min_sphere_depth = globals.data.near_z / (center_view_space.z - radius); // :ReversedZ:
+            float min_sphere_depth = globals.data.near_z / (view_center.z - radius); // :ReversedZ:
             
-            visible = visible && min_sphere_depth > depth;
+            visible = visible && (min_sphere_depth > depth);
         }
     }
     
     uint_p was_visible_last_frame = globals.draw_visibility_buffer[draw_index];
-    if (visible && was_visible_last_frame.v == 0) {
+    if (visible && (was_visible_last_frame.v == 0)) {
         uint draw_command_index = atomicAdd(draw_command_count.v, 1);
         
         uint lod_index = 0;
         if (lod_enabled) {
             vec3 camera_position = vec3(0);
             
-            float lod_distance = max(1, distance(center_view_space.xyz, camera_position) - radius);
+            float lod_distance = max(1, distance(view_center.xyz, camera_position) - radius);
             float log_lod_distance = log2(lod_distance);
             lod_index = int(log_lod_distance);
             
             lod_index = clamp(lod_index, 0, mesh.v.lod_count-1);
         }
         
-        Draw_Command_p draw_command = globals.draw_command_buffer[draw_command_index];
-        draw_command.v.draw_id   = draw_index;
-        draw_command.v.lod_index = lod_index; // :DrawAndLODData:
-        
         Mesh_LOD lod = mesh.v.lods[lod_index];
-        
         uint meshlet_group_count = (lod.meshlet_count + TaskWidth-1) / TaskWidth;
+        
+        Draw_Command_p draw_command = globals.draw_command_buffer[draw_command_index];
+        
+        draw_command.v.draw_id        = draw_index;
+        draw_command.v.meshlet_count  = lod.meshlet_count;
+        draw_command.v.meshlet_offset = lod.meshlet_offset;
+        
         draw_command.v.command.groupCountX = meshlet_group_count;
         draw_command.v.command.groupCountY = 1;
         draw_command.v.command.groupCountZ = 1;
