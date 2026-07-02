@@ -30,7 +30,6 @@ main :: proc () {
     }
     if any_shader_had_errors { return }
     
-    
     if begin_build(cmd, "code", "engine.exe", .Kill) {
         build_meander()
         

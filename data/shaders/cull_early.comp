@@ -19,18 +19,25 @@ void main() {
     bool was_visible_last_frame = globals.draw_visibility_buffer[draw_index].v != 0;
     if (!was_visible_last_frame) return;
     
+    // @volatile
+    bool frustum_culling_enabled = (globals.data.flags & (1 << 0)) != 0;
+    bool lod_enabled             = (globals.data.flags & (1 << 1)) != 0;
+    bool occlusion_enabled       = (globals.data.flags & (1 << 2)) != 0;
+    
     Draw_p draw               = globals.draw_buffer[draw_index];
     Mesh_p mesh               = globals.mesh_buffer[draw.v.mesh_index];
     uint_p draw_command_count = globals.draw_command_count;
     
     vec3  center = transform(draw.v.orientation, draw.v.scale, draw.v.p, mesh.v.center);
-    float radius = draw.v.scale * mesh.v.radius;
+    float radius = draw.v.scale * mesh.v.radius; // @todo scale by view_from_world?
+    
+    vec4 center_in_view_space = globals.data.view_from_world * vec4(center, 1);
     
     bool visible = true;
-    if (globals.data.frustum_culling_enabled) {
+    if (frustum_culling_enabled) {
         for (int i = 0; i < 5; i++) {
             vec4 plane = globals.data.frustum_planes[i];
-            visible = visible && (dot(plane, vec4(center, 1)) > -radius);
+            visible = visible && (dot(plane, center_in_view_space) > -radius);
         }
     }
     
@@ -38,10 +45,10 @@ void main() {
         uint draw_command_index = atomicAdd(draw_command_count.v, 1);
         
         uint lod_index = 0;
-        if (globals.data.lod_enabled) {
-            vec3 camera_position = globals.data.camera_p;
+        if (lod_enabled) {
+            vec3 camera_position = vec3(0);
             
-            float lod_distance = max(1, distance(center, camera_position) - radius);
+            float lod_distance = max(1, distance(center_in_view_space.xyz, camera_position) - radius);
             float log_lod_distance = log2(lod_distance);
             lod_index = int(log_lod_distance);
             

@@ -56,28 +56,26 @@ MaxTriangles :: 84
 
 // @shader cull.comp
 Cull_Globals :: struct #all_or_none {
+    using data: Cull_Data,
+    
     draw_buffer:            vk.DeviceAddress "Draw",
     mesh_buffer:            vk.DeviceAddress "Mesh",
     draw_visibility_buffer: vk.DeviceAddress "uint",
     draw_command_buffer:    vk.DeviceAddress "Draw_Command",
     draw_command_count:     vk.DeviceAddress "uint",
-    
-    using data: Cull_Data,
 }
 
 // @shader
 Cull_Data :: struct #all_or_none {
-    frustum_planes: [6] v4,
-    camera_p:   v3,
-    draw_count: u32,
+    view_from_world: m4,
     
-    frustum_culling_enabled: b32,
-    lod_enabled:             b32,
-    occlusion_enabled:       b32,
-    pad:                     b32,
+    frustum_planes: [6] v4,
+    draw_count: u32,
     
     pyramid_size: v2,
     p00, p11, near_z: f32,
+    
+    flags: u32, // frustum_culling 1 << 0, lod_enabled 1 << 1, occlusion_enabled 1 << 2
 }
 
 // @shader
@@ -158,9 +156,8 @@ Vertex :: struct {
 ////////////////////////////////////////////////
 
 main :: proc () {
-    defer sdl.Quit()
-    
     check_sdl(sdl.InitSubSystem({ .VIDEO }))
+    defer sdl.Quit()
     defer sdl.QuitSubSystem({ .VIDEO })
     
     window := sdl.CreateWindow("How to Vulkan", 1280, 720, sdl.WINDOW_VULKAN | sdl.WINDOW_RESIZABLE)
@@ -311,6 +308,9 @@ main :: proc () {
     
     depth_descriptor_set_layout := create_descriptor_set_layout(gpu.device, depth_reduce_shader)
     defer_destroy(vk.DestroyDescriptorSetLayout, depth_descriptor_set_layout)
+    
+    late_cull_descriptor_set_layout := create_descriptor_set_layout(gpu.device, late_cull_shader)
+    defer_destroy(vk.DestroyDescriptorSetLayout, late_cull_descriptor_set_layout)
     
     ////////////////////////////////////////////////
     
@@ -498,7 +498,8 @@ main :: proc () {
         
         if reload_shaders_if_needed(watchers, shader_allocator, &late_cull_shader) || !pipeline_is_valid(late_cull_pipeline) {
             destroy_pipeline(&gpu, late_cull_pipeline)
-            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, late_cull_shader)
+            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, late_cull_shader, late_cull_descriptor_set_layout)
+            late_cull_pipeline.update_template = create_update_template(gpu.device, .COMPUTE, late_cull_pipeline.layout, late_cull_shader)
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, &depth_reduce_shader) || !pipeline_is_valid(depth_pipeline) {
@@ -567,73 +568,7 @@ main :: proc () {
             }
         }
         
-        when false {
-            closest_squared: f32 = +Infinity
-            closest_index := -1
-            for &draw, draw_index in draws {
-                switch draw_index {
-                case 4850/* , 11906 */, 18774: continue
-                }
-                draw.scale = 0
-                switch draw_index {
-                case 2560, 13318, 11906, 4850, 17364, 5895, 8957, 16752, 11121, 4298, 12527, 18774: continue
-                }
-                squared := length_squared(draw.p - cam_pos)
-                if closest_squared > squared {
-                    closest_squared = squared
-                    closest_index = draw_index
-                }
-            }
-            
-            fmt.println(closest_index, draws[closest_index])
-        }
-        
-        // @todo remove this debug code
-        d0 := &draws[4850]
-        d1 := &draws[18774]
-        
         ////////////////////////////////////////////////
-        
-        // @todo make use of this in the cull compute shader
-        // :ReversedZ: we assume a reversed_z projection matrix and can use that to simplify the matrix multiplications
-        // based on this paper, but then simplified to our actual use case: https://jcgt.org/published/0002/02/05/paper.pdf
-        get_axis_aligned_bounding_box_fast :: proc (center_in_view_space: v3, radius: f32, screen_from_view_reversed_z: m4) -> (Rectangle2, bool) {
-            p00    := screen_from_view_reversed_z[0,0]
-            p11    := screen_from_view_reversed_z[1,1]
-            
-            // @todo we remove the handling of clipped boxes, so we need to early out in the shader in these cases and assume that we cannot cull the mesh
-            // near_z := screen_from_view_reversed_z[2,3]
-            // if center_in_view_space.z < radius + near_z {
-            //     return {}, false
-            // }
-                            
-            // center in the x/y-z frame
-            cx := center_in_view_space.xz
-            cy := center_in_view_space.yz
-            
-            cx_length_squared := length_squared(cx)
-            cy_length_squared := length_squared(cy)
-            
-            // (cos, sin) of angle theta between c and x/y tangent vector
-            vx := v2{square_root(cx_length_squared - square(radius)), radius} / square_root(cx_length_squared)
-            vy := v2{square_root(cy_length_squared - square(radius)), radius} / square_root(cy_length_squared)
-            
-            // In the x/y-z reference frame
-            // Transform back to camera space
-            min_x := -p00 * dot(v2{vx.x,  vx.y}, cx) / dot(v2{-vx.y, vx.x}, cx)
-            max_x := -p00 * dot(v2{vx.x, -vx.y}, cx) / dot(v2{ vx.y, vx.x}, cx)
-            min_y := -p11 * dot(v2{vy.x, -vy.y}, cy) / dot(v2{ vy.y, vy.x}, cy)
-            max_y := -p11 * dot(v2{vy.x,  vy.y}, cy) / dot(v2{-vy.y, vy.x}, cy) 
-            
-            result := rect_min_max(min_x, min_y, max_x, max_y)
-            
-            // transform to clip space
-            result.min = result.min * {.5, -.5} + .5
-            result.max = result.max * {.5, -.5} + .5
-            
-            return result, true
-        }
-        
         
         // @important @todo once we are satisfied with the occlusion culling the near plane should be set to a more reasonable value like 0.01. the 0.1 value is just useful for debugging, as the depth values lie in a more visible range.
         near_z: f32 = 0.1
@@ -644,14 +579,13 @@ main :: proc () {
         
         frustum_planes: [6] v4
         if debug.culling_enabled {
-            screen_from_world := screen_from_view * view_from_world
             cam_forward := v3{0, 0, -1}
             
-            frustum_planes[0] = get_row_v4(screen_from_world, 3) + get_row_v4(screen_from_world, 0) // x + w < 0
-            frustum_planes[1] = get_row_v4(screen_from_world, 3) - get_row_v4(screen_from_world, 0) // x - w > 0
-            frustum_planes[2] = get_row_v4(screen_from_world, 3) + get_row_v4(screen_from_world, 1) // y + w < 0
-            frustum_planes[3] = get_row_v4(screen_from_world, 3) - get_row_v4(screen_from_world, 1) // y - w > 0
-            frustum_planes[4] = get_row_v4(screen_from_world, 3) - get_row_v4(screen_from_world, 2) // z - w > 0 -- :ReversedZ:
+            frustum_planes[0] = get_row_v4(screen_from_view, 3) + get_row_v4(screen_from_view, 0) // x + w < 0
+            frustum_planes[1] = get_row_v4(screen_from_view, 3) - get_row_v4(screen_from_view, 0) // x - w > 0
+            frustum_planes[2] = get_row_v4(screen_from_view, 3) + get_row_v4(screen_from_view, 1) // y + w < 0
+            frustum_planes[3] = get_row_v4(screen_from_view, 3) - get_row_v4(screen_from_view, 1) // y - w > 0
+            frustum_planes[4] = get_row_v4(screen_from_view, 3) - get_row_v4(screen_from_view, 2) // z - w > 0 -- :ReversedZ:
             
             unused(draw_distance)
             unused(cam_forward)
@@ -662,11 +596,6 @@ main :: proc () {
                 plane /= length(plane.xyz)
             }
         }
-        
-        // @todo remove this once its done by the gpu
-        box0, box0_valid := get_axis_aligned_bounding_box_fast(multiply(view_from_world, d0.p + geometry.meshes[d0.mesh_index].center * d0.scale), geometry.meshes[d0.mesh_index].radius * d0.scale, screen_from_view)
-        box1, box1_valid := get_axis_aligned_bounding_box_fast(multiply(view_from_world, d1.p + geometry.meshes[d1.mesh_index].center * d1.scale), geometry.meshes[d1.mesh_index].radius * d1.scale, screen_from_view)
-        unused(box0, box0_valid, box1, box1_valid)
         
         ////////////////////////////////////////////////
         
@@ -683,6 +612,12 @@ main :: proc () {
         _, draw_command_count_gpu := bump_allocate_type(bump, u32)
         
         cull_globals_cpu, cull_globals_gpu := bump_allocate_type(bump, Cull_Globals)
+        
+        // @shader cull_early, cull_late
+        cull_data_flags: u32 
+        if debug.culling_enabled   { cull_data_flags |= 1 << 0 }
+        if debug.lod_enabled       { cull_data_flags |= 1 << 1 }
+        if debug.occlusion_enabled { cull_data_flags |= 1 << 2 }
         cull_globals_cpu^ = Cull_Globals {
             draw_buffer            = draw_buffer.p,
             mesh_buffer            = mesh_buffer.p,
@@ -693,12 +628,9 @@ main :: proc () {
             data = {
                 frustum_planes          = frustum_planes,
                 draw_count              = auto_cast len(draws),
-                camera_p                = cam_pos,
+                view_from_world         = view_from_world,
                 
-                lod_enabled             = cast(b32) debug.lod_enabled,
-                frustum_culling_enabled = cast(b32) debug.culling_enabled,
-                occlusion_enabled       = cast(b32) debug.occlusion_enabled,
-                pad = {},
+                flags = cull_data_flags,
                 
                 p00 = screen_from_view[0,0],
                 p11 = screen_from_view[1,1],
@@ -884,6 +816,9 @@ main :: proc () {
             ////////////////////////////////////////////////
             
             gpu_set_pipeline(cmd, late_cull_pipeline)
+                
+                update := DescriptorUpdateData { image = { stuff.depth_sampler, stuff.depth_pyramid.view, .GENERAL } }
+                vk.CmdPushDescriptorSetWithTemplate(cmd, late_cull_pipeline.update_template, late_cull_pipeline.layout, 0, &update)
                 
                 gpu_dispatch(cmd, cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)))
             
@@ -1133,8 +1068,9 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_S
         mip.size = vec_max(mip.size, 1)
     }
     
-    stuff.depth_buffer.view = gpu_create_texture_view(gpu, stuff.depth_buffer, 0, 1, { .DEPTH })
-    stuff.color_buffer.view = gpu_create_texture_view(gpu, stuff.color_buffer, 0, 1, { .COLOR })
+    stuff.depth_pyramid.view = gpu_create_texture_view(gpu, stuff.depth_pyramid, 0, mip_count, { .COLOR })
+    stuff.depth_buffer.view  = gpu_create_texture_view(gpu, stuff.depth_buffer, 0, 1, { .DEPTH })
+    stuff.color_buffer.view  = gpu_create_texture_view(gpu, stuff.color_buffer, 0, 1, { .COLOR })
 }
 
 delete_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain, final := false) {
