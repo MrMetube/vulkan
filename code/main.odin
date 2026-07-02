@@ -437,6 +437,8 @@ main :: proc () {
                 
                 case sdl.K_PLUS:  debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level+1, 0, cast(i32) len(stuff.depth_pyramid_mips)-1)
                 case sdl.K_MINUS: debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level-1, 0, cast(i32) len(stuff.depth_pyramid_mips)-1)
+                
+                case sdl.K_ESCAPE: quit = true
                 }
             case .KEY_UP:
                 if event.key.key == sdl.K_SPACE {
@@ -672,6 +674,7 @@ main :: proc () {
                 vk.CmdFillBuffer(cmd, count.buffer, offset, gpu_size_of(early_draw_command_count_gpu), 0)
             }
             
+            gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
             
             if !dvb_cleared {
                 dvb_cleared = true
@@ -684,10 +687,7 @@ main :: proc () {
             
             ////////////////////////////////////////////////
             
-            // :OcclusionCull: the memory barrier for the depth pyramid had a parameters, but just for the late pass (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=10157)
-            gpu_barrier(cmd, { .ALL_TRANSFER, .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .COMPUTE_SHADER })
-            
-            ////////////////////////////////////////////////
+            gpu_image_barrier(cmd, &stuff.depth_pyramid, {}, {}, .UNDEFINED, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
             
             gpu_set_pipeline(cmd, early_cull_pipeline)
                 gpu_dispatch(cmd, early_cull_globals_gpu, get_group_count(early_cull_shader, auto_cast len(draws)))
@@ -770,15 +770,11 @@ main :: proc () {
             
             ////////////////////////////////////////////////
             
-            // :OcclusionCull: the barrier before the depth pyramid was missing the barrier for the pyramid.image itself (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=11592)
-            
-            
             gpu_image_barriers(cmd, 
-                create_image_barrier_from_last_transition(&stuff.depth_buffer, { .COMPUTE_SHADER }, { .SHADER_READ }, .SHADER_READ_ONLY_OPTIMAL),
-                create_image_barrier(&stuff.depth_pyramid, {}, {}, .UNDEFINED,  { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL),
+                create_image_barrier_from_last_transition(&stuff.depth_buffer,  { .COMPUTE_SHADER }, { .SHADER_READ  }, .SHADER_READ_ONLY_OPTIMAL),
+                create_image_barrier_from_last_transition(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL),
                 flags = { .BY_REGION },
             )
-            
             
             gpu_set_pipeline(cmd, depth_pipeline)
                 
@@ -821,17 +817,18 @@ main :: proc () {
             
             ////////////////////////////////////////////////
             
+            gpu_barrier(cmd, { .DRAW_INDIRECT }, { .ALL_TRANSFER })
+            
             {
                 count, offset := gpu_reflect_get_buffer(late_draw_command_count_gpu.p)
                 vk.CmdFillBuffer(cmd, count.buffer, offset, gpu_size_of(late_draw_command_count_gpu), 0)
             }
             
-            ////////////////////////////////////////////////
-            
-            // :OcclusionCull: the memory barrier for the depth pyramid had a parameters, but just for the late pass (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=10157)
-            gpu_barrier(cmd, { .COMPUTE_SHADER, .DRAW_INDIRECT, .ALL_TRANSFER }, { .COMPUTE_SHADER })
+            gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
             
             ////////////////////////////////////////////////
+            
+            gpu_image_barrier(cmd, &stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
             
             gpu_set_pipeline(cmd, late_cull_pipeline)
                 
@@ -839,7 +836,7 @@ main :: proc () {
                 vk.CmdPushDescriptorSetWithTemplate(cmd, late_cull_pipeline.update_template, late_cull_pipeline.layout, 0, &update)
                 
                 gpu_dispatch(cmd, late_cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)))
-            
+                
         gpu_profile_zone_end()
         gpu_labeled_region_end(cmd)
         
@@ -1027,7 +1024,7 @@ main :: proc () {
     
     destroy_descriptor_heap(&gpu, texture_heap)
     
-    delete_stuff(&gpu, &stuff, final = true)
+    destroy_stuff(&gpu, &stuff, final = true)
     
     gpu_deinit(&gpu)
 }
@@ -1068,7 +1065,7 @@ begin_meshlet_rendering :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, color_buffer,
 ////////////////////////////////////////////////
 
 recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain) {
-    delete_stuff(gpu, stuff)
+    destroy_stuff(gpu, stuff)
     
     if stuff.depth_sampler == 0 {
         stuff.depth_sampler = create_sampler(gpu, .LINEAR, .LINEAR)
@@ -1099,8 +1096,9 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_S
     stuff.color_buffer.view  = gpu_create_texture_view(gpu, stuff.color_buffer, 0, 1)
 }
 
-delete_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain, final := false) {
+destroy_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain, final := false) {
     gpu_free_image(gpu, stuff.depth_pyramid)
+    gpu_destroy_texture_view(gpu, stuff.depth_pyramid.view)
     
     gpu_free_image(gpu, stuff.depth_buffer)
     gpu_free_image(gpu, stuff.color_buffer)
