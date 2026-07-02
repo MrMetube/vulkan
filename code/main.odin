@@ -98,10 +98,11 @@ Draw_Globals :: struct {
     vertex_buffer:       vk.DeviceAddress "Vertex",
 }
 
-// @shader
+
+// @shader @todo switching the order causes the size to not be read correctly in the shader and leads to bugs in the depth pyramid construction
 Depth_Globals :: struct {
-    size: v2,
     texture_index: u32,
+    size: v2,
 }
 
 // @shader
@@ -280,7 +281,7 @@ main :: proc () {
             description.usage   = { .TRANSFER_DST, .SAMPLED }
             
             texture      = gpu_allocate_texture(&gpu, description)
-            texture.view = gpu_create_texture_view(&gpu, texture, 0, description.mip_count, { .COLOR })
+            texture.view = gpu_create_texture_view(&gpu, texture, 0, description.mip_count)
             
             // @waste we should have loaded all data into here if possible
             cpu_data, gpu_data := bump_allocate(&upload_bump, cast(u32) len(loaded_texture.data), alignment = 32)
@@ -702,7 +703,7 @@ main :: proc () {
         gpu_image_barriers(cmd, 
             create_image_barrier(&stuff.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL),
             // :Stencil: add .STENCIL to the aspect mask
-            create_image_barrier(&stuff.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }), 
+            create_image_barrier(&stuff.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL), 
             flags = { .BY_REGION },
         )
         
@@ -773,7 +774,7 @@ main :: proc () {
             
             
             gpu_image_barriers(cmd, 
-                create_image_barrier_from_last_transition(&stuff.depth_buffer, { .COMPUTE_SHADER }, { .SHADER_READ }, .SHADER_READ_ONLY_OPTIMAL, { .DEPTH }),
+                create_image_barrier_from_last_transition(&stuff.depth_buffer, { .COMPUTE_SHADER }, { .SHADER_READ }, .SHADER_READ_ONLY_OPTIMAL),
                 create_image_barrier(&stuff.depth_pyramid, {}, {}, .UNDEFINED,  { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL),
                 flags = { .BY_REGION },
             )
@@ -807,7 +808,7 @@ main :: proc () {
         
                 ////////////////////////////////////////////////
                 
-                gpu_image_barrier_from_last_transition(cmd, &stuff.depth_buffer, {.EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }, flags = { .BY_REGION })
+                gpu_image_barrier_from_last_transition(cmd, &stuff.depth_buffer, {.EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, flags = { .BY_REGION })
                 
         gpu_labeled_region_end(cmd)
         gpu_profile_zone_end()
@@ -852,7 +853,7 @@ main :: proc () {
             gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
             // this apparently needs to happend before we do anything related to rendering
             gpu_image_barriers(cmd, 
-                create_image_barrier_from_last_transition(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, { .DEPTH }), 
+                create_image_barrier_from_last_transition(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL), 
                 // :Stencil: add .STENCIL to the aspect mask
                 create_image_barrier_from_last_transition(&stuff.color_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL),
                 flags = { .BY_REGION },
@@ -1070,7 +1071,7 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_S
     delete_stuff(gpu, stuff)
     
     if stuff.depth_sampler == 0 {
-        stuff.depth_sampler = create_sampler(gpu, .NEAREST, .NEAREST)
+        stuff.depth_sampler = create_sampler(gpu, .LINEAR, .LINEAR)
     }
     
     // Ensures that all reductions are at most 2x2 which makes sure they are conservative.
@@ -1086,16 +1087,16 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_S
     
     for i in 0..<mip_count {
         mip := append_into(&stuff.depth_pyramid_mips)
-        mip.view = gpu_create_texture_view(gpu, stuff.depth_pyramid, i, 1, { .COLOR })
+        mip.view = gpu_create_texture_view(gpu, stuff.depth_pyramid, i, 1)
         mip.size = pyramid_size
         mip.size.x >>= i
         mip.size.y >>= i
         mip.size = vec_max(mip.size, 1)
     }
     
-    stuff.depth_pyramid.view = gpu_create_texture_view(gpu, stuff.depth_pyramid, 0, mip_count, { .COLOR })
-    stuff.depth_buffer.view  = gpu_create_texture_view(gpu, stuff.depth_buffer, 0, 1, { .DEPTH })
-    stuff.color_buffer.view  = gpu_create_texture_view(gpu, stuff.color_buffer, 0, 1, { .COLOR })
+    stuff.depth_pyramid.view = gpu_create_texture_view(gpu, stuff.depth_pyramid, 0, mip_count)
+    stuff.depth_buffer.view  = gpu_create_texture_view(gpu, stuff.depth_buffer, 0, 1)
+    stuff.color_buffer.view  = gpu_create_texture_view(gpu, stuff.color_buffer, 0, 1)
 }
 
 delete_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain, final := false) {

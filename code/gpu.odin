@@ -119,8 +119,8 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
                 
                 enabled := [?] vk.ValidationFeatureEnableEXT {
                     .BEST_PRACTICES,
-                    // DEBUG_PRINTF // @todo enable this, if needed
                     .SYNCHRONIZATION_VALIDATION,
+                    // DEBUG_PRINTF // @todo enable this, if needed
                 }
                 
                 instance_create_info.pNext = &vk.DebugUtilsMessengerCreateInfoEXT {
@@ -668,7 +668,17 @@ gpu_allocate_texture :: proc (gpu: ^Gpu, desc: Texture_Desc) -> Image {
     return result
 }
 
-gpu_create_texture_view :: proc (gpu: ^Gpu, image: Image, mip_base: u32, mip_count: u32, aspect_mask: vk.ImageAspectFlags) -> vk.ImageView {
+get_image_aspect_mask :: proc (format: vk.Format) -> vk.ImageAspectFlags {
+    result := vk.ImageAspectFlags { .COLOR }
+    #partial switch format {
+    case .D32_SFLOAT, .D32_SFLOAT_S8_UINT, .D16_UNORM, .D16_UNORM_S8_UINT, .D24_UNORM_S8_UINT: result = { .DEPTH }
+    }
+    return result
+}
+
+gpu_create_texture_view :: proc (gpu: ^Gpu, image: Image, mip_base: u32, mip_count: u32) -> vk.ImageView {
+    aspect_mask := get_image_aspect_mask(image.format)
+    
     view_create_info := vk.ImageViewCreateInfo {
         sType = .IMAGE_VIEW_CREATE_INFO,
         image    = image.image,
