@@ -286,7 +286,7 @@ main :: proc () {
             cpu_data, gpu_data := bump_allocate(&upload_bump, cast(u32) len(loaded_texture.data), alignment = 32)
             copy(cpu_data, loaded_texture.data)
             
-            gpu_image_barrier(cmd, &texture, {}, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
+            gpu_image_barrier(cmd, &texture, {}, {}, .UNDEFINED, { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
             
             gpu_copy_to_texture(&gpu, cmd, texture, gpu_data, description.size)
             
@@ -295,7 +295,7 @@ main :: proc () {
             write_texture_to_heap(&gpu, &texture_heap, index, texture.view, texture.last_transition.layout)
         }
             
-        gpu_barrier(cmd, { .TRANSFER }, { .ALL_COMMANDS }, { .descriptors })
+        gpu_barrier(cmd, { .ALL_TRANSFER }, { .ALL_COMMANDS }, { .descriptors })
         
         gpu_submit(gpu.transfer_queue, upload_semaphore, 1, cmd)
         gpu_wait_semaphore(&gpu, upload_semaphore, 1)
@@ -527,6 +527,7 @@ main :: proc () {
                 { format = stuff.color_buffer.format, write_mask = { .R, .G, .B, .A } },
             }
             raster_description.blendstate = &Blend_Desc{ **DefaultBlendDesc }
+            raster_description.blendstate.dst_color_factor = .ONE
             // :Stencil: 
             
             // @cleanup
@@ -622,21 +623,23 @@ main :: proc () {
         // early cull - frustum cull & fill objects that *were* visible last frame
         
         
-        _, draw_command_count_gpu := bump_allocate_type(bump, u32)
+        _, early_draw_command_count_gpu := bump_allocate_type(bump, u32)
+        _, late_draw_command_count_gpu  := bump_allocate_type(bump, u32)
         
-        cull_globals_cpu, cull_globals_gpu := bump_allocate_type(bump, Cull_Globals)
+        early_cull_globals_cpu, early_cull_globals_gpu := bump_allocate_type(bump, Cull_Globals)
+        late_cull_globals_cpu,  late_cull_globals_gpu  := bump_allocate_type(bump, Cull_Globals)
         
         // @shader cull_early, cull_late
         cull_data_flags: u32 
         if debug.culling_enabled   { cull_data_flags |= DebugFlag_FrustumCulling   }
         if debug.lod_enabled       { cull_data_flags |= DebugFlag_LevelOfDetail    }
         if debug.occlusion_enabled { cull_data_flags |= DebugFlag_OcclusionCulling }
-        cull_globals_cpu^ = Cull_Globals {
+        early_cull_globals_cpu^ = Cull_Globals {
             draw_buffer            = draw_buffer.p,
             mesh_buffer            = mesh_buffer.p,
             draw_visibility_buffer = draw_visibilty_buffer.p,
             draw_command_buffer    = draw_command_buffer.p,
-            draw_command_count     = draw_command_count_gpu.p,
+            draw_command_count     = early_draw_command_count_gpu.p,
             
             data = {
                 frustum_planes          = frustum_planes,
@@ -653,17 +656,19 @@ main :: proc () {
             },
         }
         
+        late_cull_globals_cpu^ = early_cull_globals_cpu^
+        late_cull_globals_cpu.draw_command_count = late_draw_command_count_gpu.p
+        
         gpu_labeled_region_begin(cmd, "early culling", {0.0, 0.6, 0.8, 1.0})
             gpu_profile_zone_begin("early culling")
             
             ////////////////////////////////////////////////
             
-            gpu_barrier(cmd, { .DRAW_INDIRECT }, { .TRANSFER })
+            gpu_barrier(cmd, { .DRAW_INDIRECT }, { .ALL_TRANSFER })
             
             {
-                count, offset := gpu_reflect_get_buffer(draw_command_count_gpu.p)
-                vk.CmdFillBuffer(cmd, count.buffer, offset, gpu_size_of(draw_command_count_gpu), 0)
-                gpu_barrier(cmd, { .TRANSFER }, { .DRAW_INDIRECT })
+                count, offset := gpu_reflect_get_buffer(early_draw_command_count_gpu.p)
+                vk.CmdFillBuffer(cmd, count.buffer, offset, gpu_size_of(early_draw_command_count_gpu), 0)
             }
             
             
@@ -673,18 +678,18 @@ main :: proc () {
                 visibility_buffer, offset := gpu_reflect_get_buffer(draw_visibilty_buffer.p)
                 vk.CmdFillBuffer(cmd, visibility_buffer.buffer, offset, cast(vk.DeviceSize) len(draws) * size_of(dvb_view[0]), 1)
                 
-                gpu_barrier(cmd, { .TRANSFER }, { .COMPUTE_SHADER })
+                gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
             }
             
             ////////////////////////////////////////////////
             
             // :OcclusionCull: the memory barrier for the depth pyramid had a parameters, but just for the late pass (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=10157)
-            gpu_barrier(cmd, { .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .COMPUTE_SHADER })
+            gpu_barrier(cmd, { .ALL_TRANSFER, .DRAW_INDIRECT, .MESH_SHADER_EXT }, { .COMPUTE_SHADER })
             
             ////////////////////////////////////////////////
             
             gpu_set_pipeline(cmd, early_cull_pipeline)
-                gpu_dispatch(cmd, cull_globals_gpu, get_group_count(early_cull_shader, auto_cast len(draws)))
+                gpu_dispatch(cmd, early_cull_globals_gpu, get_group_count(early_cull_shader, auto_cast len(draws)))
             
         gpu_profile_zone_end()
         gpu_labeled_region_end(cmd)
@@ -743,7 +748,7 @@ main :: proc () {
                     
                     vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
                     
-                    gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer.p, draw_command_count_gpu, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command))
+                    gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer.p, early_draw_command_count_gpu, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command))
                 
                 gpu_profile_zone_end()
                 gpu_labeled_region_end(cmd)
@@ -815,17 +820,15 @@ main :: proc () {
             
             ////////////////////////////////////////////////
             
-            gpu_barrier(cmd, { .DRAW_INDIRECT }, { .TRANSFER })
-            
             {
-                count, offset := gpu_reflect_get_buffer(draw_command_count_gpu.p)
-                vk.CmdFillBuffer(cmd, count.buffer, offset, gpu_size_of(draw_command_count_gpu), 0)
+                count, offset := gpu_reflect_get_buffer(late_draw_command_count_gpu.p)
+                vk.CmdFillBuffer(cmd, count.buffer, offset, gpu_size_of(late_draw_command_count_gpu), 0)
             }
             
             ////////////////////////////////////////////////
             
             // :OcclusionCull: the memory barrier for the depth pyramid had a parameters, but just for the late pass (see https://youtu.be/Ka30T6BMdhI?list=PLOU0IFZHP8dDap0WO7_IwOzgITq3ZUZsy&t=10157)
-            gpu_barrier(cmd, { .DRAW_INDIRECT, .TRANSFER }, { .COMPUTE_SHADER })
+            gpu_barrier(cmd, { .COMPUTE_SHADER, .DRAW_INDIRECT, .ALL_TRANSFER }, { .COMPUTE_SHADER })
             
             ////////////////////////////////////////////////
             
@@ -834,7 +837,7 @@ main :: proc () {
                 update := DescriptorUpdateData { image = { stuff.depth_sampler, stuff.depth_pyramid.view, .GENERAL } }
                 vk.CmdPushDescriptorSetWithTemplate(cmd, late_cull_pipeline.update_template, late_cull_pipeline.layout, 0, &update)
                 
-                gpu_dispatch(cmd, cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)))
+                gpu_dispatch(cmd, late_cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)))
             
         gpu_profile_zone_end()
         gpu_labeled_region_end(cmd)
@@ -864,7 +867,7 @@ main :: proc () {
                     
                     vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
                     
-                    gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer.p, draw_command_count_gpu, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command))
+                    gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer.p, late_draw_command_count_gpu, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command))
                 
             gpu_end_render_pass(cmd)
             
@@ -880,8 +883,8 @@ main :: proc () {
                 source_image = &stuff.depth_pyramid
             }
             gpu_image_barriers(cmd, 
-                create_image_barrier(&gpu.swapchain_images[gpu.image_index], { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL),
-                create_image_barrier_from_last_transition(source_image, { .TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL),
+                create_image_barrier(&gpu.swapchain_images[gpu.image_index], { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL),
+                create_image_barrier_from_last_transition(source_image, { .ALL_TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL),
                 flags = { .BY_REGION },
             )
             
