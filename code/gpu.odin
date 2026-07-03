@@ -723,7 +723,7 @@ get_image_aspect_mask :: proc (format: vk.Format) -> vk.ImageAspectFlags {
     return result
 }
 
-gpu_create_texture_view :: proc (gpu: ^Gpu, image: Image, mip_base: u32, mip_count: u32) -> vk.ImageView {
+gpu_create_image_view :: proc (gpu: ^Gpu, image: Image, mip_base: u32, mip_count: u32) -> vk.ImageView {
     aspect_mask := get_image_aspect_mask(image.format)
     
     view_create_info := vk.ImageViewCreateInfo {
@@ -737,46 +737,6 @@ gpu_create_texture_view :: proc (gpu: ^Gpu, image: Image, mip_base: u32, mip_cou
     result: vk.ImageView
     check(vk.CreateImageView(gpu.device, &view_create_info, nil, &result))
     
-    return result
-}
-
-// @cleanup
-xx_sampler :: proc (filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, address_mode: vk.SamplerAddressMode, anisotropy: b32 = false) -> vk.SamplerCreateInfo {
-    result := vk.SamplerCreateInfo {
-        sType = .SAMPLER_CREATE_INFO,
-        
-        magFilter  = filter,
-        minFilter  = filter,
-        mipmapMode = mipmap_mode,
-        
-        addressModeU = address_mode,
-        addressModeV = address_mode,
-        addressModeW = address_mode,
-        
-        anisotropyEnable = anisotropy,
-        maxAnisotropy    = anisotropy ? 8 : 1,
-        
-        minLod = 0,
-        maxLod = 16,
-    }
-    return result
-}
-
-// @todo deprecate this
-create_sampler :: proc (gpu: ^Gpu, filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, anisotropy: b32 = false) -> vk.Sampler {
-    sampler_create_info := xx_sampler(filter, mipmap_mode, .CLAMP_TO_EDGE, anisotropy)
-    
-    result: vk.Sampler
-    check(vk.CreateSampler(gpu.device, &sampler_create_info, nil, &result))
-    
-    return result
-}
-
-gpu_texture_descriptor :: proc (view: vk.ImageView, layout: vk.ImageLayout, sampler: vk.Sampler) -> vk.DescriptorImageInfo {
-    result: vk.DescriptorImageInfo
-    result.imageLayout = layout
-    result.imageView   = view
-    result.sampler     = sampler
     return result
 }
 
@@ -1336,7 +1296,6 @@ gpu_end_render_pass :: proc (cmd: vk.CommandBuffer) {
 
 push_descriptor_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, frame_descriptor: ^Frame_Descriptor, updates: [] DescriptorUpdateData) -> u32 {
     resource_types, resource_mask := the_bound_pipeline.resource_types, the_bound_pipeline.resource_mask
-    resource_count := cast(u32) card(resource_mask)
     
     descriptor_count := card(resource_mask)
     
@@ -1484,9 +1443,9 @@ create_descriptor_heap :: proc (gpu: ^Gpu) -> Descriptor_Heap {
     
     // :SamplerHack: fill samplers[0] with texture sampler and samplers[1] with depth sampler
     sampler_descriptor_size := resource_size // :SamplerHack:
-    get_descriptor_sampler(gpu, .LINEAR, .LINEAR,  .REPEAT,        .WEIGHTED_AVERAGE, auto_cast &result.samplers_cpu[0 * sampler_descriptor_size], cast(u32) sampler_size);
-    get_descriptor_sampler(gpu, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .WEIGHTED_AVERAGE, auto_cast &result.samplers_cpu[1 * sampler_descriptor_size], cast(u32) sampler_size);
-    get_descriptor_sampler(gpu, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .MIN,              auto_cast &result.samplers_cpu[2 * sampler_descriptor_size], cast(u32) sampler_size);
+    get_descriptor_sampler(gpu, .LINEAR, .LINEAR,  .REPEAT,        .WEIGHTED_AVERAGE, auto_cast &result.samplers_cpu[0 * sampler_descriptor_size], cast(u32) sampler_size)
+    get_descriptor_sampler(gpu, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .WEIGHTED_AVERAGE, auto_cast &result.samplers_cpu[1 * sampler_descriptor_size], cast(u32) sampler_size)
+    get_descriptor_sampler(gpu, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .MIN,              auto_cast &result.samplers_cpu[2 * sampler_descriptor_size], cast(u32) sampler_size)
     
     return result
 }
@@ -1542,7 +1501,7 @@ get_descriptor_image :: proc (gpu: ^Gpu, image: vk.Image, format: vk.Format, lay
     info := vk.ResourceDescriptorInfoEXT {
         sType = .RESOURCE_DESCRIPTOR_INFO_EXT,
         type = type,
-        data = { pImage = &image_info }
+        data = { pImage = &image_info },
     }
     
     range := vk.HostAddressRangeEXT { address = raw_data(descriptor), size = cast(int) descriptor_size }
@@ -1562,8 +1521,24 @@ get_descriptor_buffer :: proc (gpu: ^Gpu, address: vk.DeviceAddress, size: vk.De
     check(vk.WriteResourceDescriptorsEXT(gpu.device, 1, &info, &range))
 }
 
-get_descriptor_sampler :: proc (gpu: ^Gpu, filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, address_mode: vk.SamplerAddressMode, reduction_mode: vk.SamplerReductionMode, descriptor: ^Descriptor, descriptor_size: u32) {
-    info := xx_sampler(filter, mipmap_mode, address_mode)
+get_descriptor_sampler :: proc (gpu: ^Gpu, filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, address_mode: vk.SamplerAddressMode, reduction_mode: vk.SamplerReductionMode, descriptor: ^Descriptor, descriptor_size: u32, anisotropy: b32 = false) {
+    info := vk.SamplerCreateInfo {
+        sType = .SAMPLER_CREATE_INFO,
+        
+        magFilter  = filter,
+        minFilter  = filter,
+        mipmapMode = mipmap_mode,
+        
+        addressModeU = address_mode,
+        addressModeV = address_mode,
+        addressModeW = address_mode,
+        
+        anisotropyEnable = anisotropy,
+        maxAnisotropy    = anisotropy ? 8 : 1,
+        
+        minLod = 0,
+        maxLod = 16,
+    }
     
     reduction_info := vk.SamplerReductionModeCreateInfo {
         sType = .SAMPLER_REDUCTION_MODE_CREATE_INFO,

@@ -36,7 +36,6 @@ Stuff_With_The_Same_Lifetime_As_The_Swapchain :: struct {
     color_buffer: Image,
     depth_buffer: Image,
     
-    depth_sampler: vk.Sampler,
     depth_pyramid: Image,
     depth_pyramid_mip_sizes: [dynamic; 16] uv2,
 }
@@ -259,9 +258,6 @@ main :: proc () {
         cmd := gpu_begin_command_recording(&gpu, gpu.transfer_command_pool, gpu.transfer_queue)
         upload_semaphore := gpu_create_timeline_semaphore(&gpu, 0)
         defer gpu_destroy_semaphore(&gpu, upload_semaphore)
-        
-        default_sampler := create_sampler(&gpu, .LINEAR, .LINEAR, anisotropy = true)
-        defer_destroy(vk.DestroySampler, default_sampler)
         
         for &texture, index in textures {
             filename := fmt.tprintf("tutorial/suzanne%v.ktx", index)
@@ -1047,7 +1043,7 @@ main :: proc () {
     
     destroy_descriptor_heap(&gpu, descriptor_heap)
     
-    destroy_stuff(&gpu, &stuff, final = true)
+    destroy_stuff(&gpu, &stuff)
     
     gpu_deinit(&gpu)
 }
@@ -1090,10 +1086,6 @@ begin_meshlet_rendering :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, color_buffer,
 recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain) {
     destroy_stuff(gpu, stuff)
     
-    if stuff.depth_sampler == 0 {
-        stuff.depth_sampler = create_sampler(gpu, .LINEAR, .LINEAR)
-    }
-    
     // Ensures that all reductions are at most 2x2 which makes sure they are conservative.
     pyramid_size := uv2{previous_power_of_two(gpu.swapchain_size.x), previous_power_of_two(gpu.swapchain_size.y)} 
     // Each mip level is a quarter of the size of the previous, as we half both dimensions each time.
@@ -1111,11 +1103,11 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_S
         append(&stuff.depth_pyramid_mip_sizes, mip_size)
     }
     
-    stuff.depth_buffer.view  = gpu_create_texture_view(gpu, stuff.depth_buffer, 0, 1)
-    stuff.color_buffer.view  = gpu_create_texture_view(gpu, stuff.color_buffer, 0, 1)
+    stuff.depth_buffer.view  = gpu_create_image_view(gpu, stuff.depth_buffer, 0, 1)
+    stuff.color_buffer.view  = gpu_create_image_view(gpu, stuff.color_buffer, 0, 1)
 }
 
-destroy_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain, final := false) {
+destroy_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain) {
     gpu_free_image(gpu, stuff.depth_pyramid)
     
     gpu_free_image(gpu, stuff.depth_buffer)
@@ -1125,10 +1117,6 @@ destroy_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Sw
     
     clear(&stuff.depth_pyramid_mip_sizes)
     
-    if final {
-        // @todo(viktor): make gpu_destroy_sampler
-        vk.DestroySampler(gpu.device, stuff.depth_sampler, nil)
-    }
 }
 
 ////////////////////////////////////////////////

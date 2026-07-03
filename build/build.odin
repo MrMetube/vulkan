@@ -6,7 +6,7 @@ import "../code" // just for the shader compiling
 
 optimize       :: false
 pedantic       :: false
-strict_shaders :: !true
+strict_shaders :: true
 
 main :: proc () {
     init_build(run_from_data = true)

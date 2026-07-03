@@ -1,4 +1,4 @@
-#+vet explicit-allocators
+#+vet explicit-allocators !unused-procedures
 package main
 
 import "base:runtime"
