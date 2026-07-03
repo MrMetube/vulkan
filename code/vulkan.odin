@@ -34,7 +34,7 @@ Shader_Resource_Mask :: bit_set[cast(u32) 0..<32; u32]
 Image :: struct {
     format: vk.Format,
     image:  vk.Image,
-    view:   vk.ImageView,
+    view:   vk.ImageView, // only required by gpu_begin_render_pass
     memory: vk.DeviceMemory,
     
     last_stage:  vk.PipelineStageFlags2,

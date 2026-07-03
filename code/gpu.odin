@@ -789,73 +789,6 @@ gpu_destroy_texture_view :: proc (gpu: ^Gpu, view: vk.ImageView) {
 }
 
 
-// gpu_create_texture
-
-// gpu_set_active_texture_heap_ptr
-
-/* 
-
-    // Common header...
-    struct alignas(16) Data
-    {
-        uint32 srcTextureBase;
-        uint32 dstTexture;
-        float32x2 invDimensions;
-    };
-
-    // GPU kernel...
-    const Texture textureHeap[];
-
-    [groupsize = (8, 8, 1)]
-    void main(uint32x3 threadId : SV_ThreadID, const Data* data)
-    {
-        Texture textureColor = textureHeap[data->srcTextureBase + 0];
-        Texture textureNormal = textureHeap[data->srcTextureBase + 1];
-        Texture texturePBR = textureHeap[data->srcTextureBase + 2];
-
-        Sampler sampler = {.minFilter = LINEAR, .magFilter = LINEAR}; // Embedded sampler (Metal-style)
-
-        float32x2 uv = float32x2(threadId.xy) * data->invDimensions;
-
-        float32x4 color = sample(textureColor, sampler, uv);
-        float32x4 normal = sample(textureNormal, sampler, uv);
-        float32x4 pbr = sample(texturePBR, sampler, uv);
-
-        float32x4 lit = calculateLighting(color, normal, pbr);
-
-        TextureRW dstTexture = TextureRW(textureHeap[data->dstTexture]);
-        dstTexture[threadId.xy] = lit;
-    }
-        
-    [groupsize = (8, 8, 1)]
-    void main(uint32x3 threadId : SV_ThreadID, const Data* data)
-    {
-        // Non-uniform "buffer data" is not an issue with pointer semantics! 
-        Material* material = data->materialMap[threadId.xy];
-
-        // Non-uniform texture heap index
-        uint32 textureBase = NonUniformResourceIndex(material.textureBase);
-
-        Texture textureColor = textureHeap[textureBase + 0];
-        Texture textureNormal = textureHeap[textureBase + 1];
-        Texture texturePBR = textureHeap[textureBase + 2];
-
-        Sampler sampler = {.minFilter = LINEAR, .magFilter = LINEAR};
-
-        float32x2 uv = float32x2(threadId.xy) * data->invDimensions;
-
-        float32x4 color = sample(textureColor, sampler, uv);
-        float32x4 normal = sample(textureNormal, sampler, uv);
-        float32x4 pbr = sample(texturePBR, sampler, uv);
-        
-        color *= material.color;
-        pbr *= material.pbr;
-
-        // Rest of the shader
-    }
-*/
-
-
 
 ////////////////////////////////////////////////
 // Pipelines 
@@ -1343,12 +1276,14 @@ gpu_begin_render_pass :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, desc: Render_Pa
     color_attachments: [dynamic; 64] vk.RenderingAttachmentInfo
     for target in desc.color_targets {
         it := append_into(&color_attachments)
-        it.sType = .RENDERING_ATTACHMENT_INFO
-        
-        it.imageLayout = .ATTACHMENT_OPTIMAL
-        it.imageView   = target.texture.view
-        it.loadOp  = target.load_op
-        it.storeOp = target.store_op
+        it^ = {
+            sType = .RENDERING_ATTACHMENT_INFO,
+            
+            imageLayout = .ATTACHMENT_OPTIMAL,
+            imageView   = target.texture.view,
+            loadOp  = target.load_op,
+            storeOp = target.store_op,
+        }
         it.clearValue.color.float32 = target.clear_color
     }
     

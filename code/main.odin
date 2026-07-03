@@ -274,8 +274,7 @@ main :: proc () {
             description.format  = auto_cast loaded_texture.format
             description.usage   = { .TRANSFER_DST, .SAMPLED }
             
-            texture      = gpu_allocate_texture(&gpu, description)
-            texture.view = gpu_create_texture_view(&gpu, texture, 0, description.mip_count)
+            texture = gpu_allocate_texture(&gpu, description)
             
             // @waste we should have loaded all data into here if possible
             cpu_data, gpu_data := bump_allocate(&upload_bump, cast(u32) len(loaded_texture.data), alignment = 32)
@@ -1044,7 +1043,6 @@ main :: proc () {
     destroy_pipeline(&gpu, depth_pipeline)
     
     for texture in textures {
-        gpu_destroy_texture_view(&gpu, texture.view)
         gpu_free_image(&gpu, texture)
     }
     
