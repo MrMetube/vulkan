@@ -193,16 +193,16 @@ create_image_barrier_from_last_transition :: proc (image: ^Image, dst_stage: vk.
 gpu_image_barrier_from_last_transition :: proc (cmd: vk.CommandBuffer, image: ^Image, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, flags := vk.DependencyFlags {}) {
     barrier := create_image_barrier_from_last_transition(image, dst_stage, dst_access, new_layout)
     
-    gpu_image_barriers(cmd, barrier, flags = flags)
+    gpu_image_barriers(cmd, flags, barrier)
 }
 
 gpu_image_barrier :: proc (cmd: vk.CommandBuffer, image: ^Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, flags := vk.DependencyFlags {}) {
     barrier := create_image_barrier(image, src_stage, src_access, old_layout, dst_stage, dst_access, new_layout)
     
-    gpu_image_barriers(cmd, barrier, flags = flags)
+    gpu_image_barriers(cmd, flags, barrier)
 }
 
-gpu_image_barriers :: proc (cmd: vk.CommandBuffer, barriers: ..vk.ImageMemoryBarrier2, flags := vk.DependencyFlags {}) {
+gpu_image_barriers :: proc (cmd: vk.CommandBuffer, flags: vk.DependencyFlags, barriers: ..vk.ImageMemoryBarrier2) {
     vk.CmdPipelineBarrier2(cmd, &vk.DependencyInfo {
         sType = .DEPENDENCY_INFO,
         dependencyFlags          = flags, 

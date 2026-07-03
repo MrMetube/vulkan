@@ -76,14 +76,14 @@ void main() {
         vec3 n = vec3(vertex.v.n[0], vertex.v.n[1], vertex.v.n[2]) / 127.0 - 1.0;
         
         Mesh_Result_Smooth result;
-        view_p = globals.view_from_world * view_p;
+        view_p = globals.data.view_from_world * view_p;
         
-        vec4 position = globals.screen_from_view * view_p;
-        result.normal = mat3(globals.view_from_world) * n;
+        vec4 position = globals.data.screen_from_view * view_p;
+        result.normal = mat3(globals.data.view_from_world) * n;
         result.uv     = vertex.v.uv;
         
         for (int li = 0; li < 4; li++) {
-            result.light_vec[li] = globals.light_pos[li].xyz - view_p.xyz;
+            result.light_vec[li] = globals.data.light_pos[li].xyz - view_p.xyz;
         }
         result.view_vec = -view_p.xyz;
         

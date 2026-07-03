@@ -525,7 +525,8 @@ GpuAddress :: struct ($T: typeid) {
     p: vk.DeviceAddress,
 }
 GpuSlice :: struct ($T: typeid) {
-    p: vk.DeviceAddress,
+    p:         vk.DeviceAddress,
+    byte_size: int,
 }
 
 // @todo(viktor): can we find a way not to store this metadata per allocation?
@@ -598,9 +599,10 @@ gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Me
 }
 
 gpu_allocate_slice :: proc (gpu: ^Gpu, $T: typeid/ [] $E, #any_int count: umm, memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> ([] E, GpuSlice(E)) {
-    cpu_pointer, gpu_pointer := gpu_allocate_size(gpu, size_of(E) * count, align_of(E), memory, usage)
+    size := size_of(E) * count
+    cpu_pointer, gpu_pointer := gpu_allocate_size(gpu, size, align_of(E), memory, usage)
     result := slice_from_parts(E, cpu_pointer, count)
-    return result, { gpu_pointer }
+    return result, { p = gpu_pointer, byte_size = cast(int) size }
 }
 
 gpu_allocate_type :: proc (gpu: ^Gpu, $T: typeid, memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (^T,GpuAddress(T)) {

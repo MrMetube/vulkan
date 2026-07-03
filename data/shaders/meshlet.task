@@ -61,8 +61,8 @@ void main() {
             vec3 view_camera_position = vec3(0);
             
             // @todo radius and cutoff might need scaling if the view_from_world matrix is more than translating
-            vec4 view_center    = globals.view_from_world * vec4(center, 1);
-            vec4 view_cone_axis = globals.view_from_world * vec4(cone_axis, 0);
+            vec4 view_center    = globals.data.view_from_world * vec4(center, 1);
+            vec4 view_cone_axis = globals.data.view_from_world * vec4(cone_axis, 0);
             
             accept = !cone_cull(view_center.xyz, radius, view_cone_axis.xyz, cone_cutoff, view_camera_position);
         }

@@ -85,10 +85,8 @@ DebugFlag_LevelOfDetail    :: (1 << 1)
 DebugFlag_OcclusionCulling :: (1 << 2)
 
 // @shader
-Draw_Globals :: struct {
-    view_from_world:  m4,
-    screen_from_view: m4,
-    light_pos:        [4] v4,
+Draw_Globals :: struct #all_or_none {
+    using data: Draw_Data,
     
     draw_command_buffer: vk.DeviceAddress "Draw_Command",
     draw_buffer:         vk.DeviceAddress "Draw",
@@ -96,6 +94,13 @@ Draw_Globals :: struct {
     meshlet_buffer:      vk.DeviceAddress "Meshlet",
     meshlet_data_buffer: vk.DeviceAddress "uint",
     vertex_buffer:       vk.DeviceAddress "Vertex",
+}
+
+// @shader
+Draw_Data :: struct {
+    view_from_world:  m4,
+    screen_from_view: m4,
+    light_pos:        [4] v4,
 }
 
 
@@ -193,16 +198,15 @@ main :: proc () {
     vb_view,   vertex_buffer         := gpu_allocate(&gpu,      [] Vertex,       256 * Megabyte / size_of(Vertex),       memory = memory)
     mlb_view,  meshlet_buffer        := gpu_allocate(&gpu,      [] Meshlet,      256 * Megabyte / size_of(Meshlet),      memory = memory)
     mdb_view,  meshlet_data_buffer   := gpu_allocate(&gpu,      [] u32,          256 * Megabyte / size_of(u32),          memory = memory)
-    db_view,   draw_buffer           := gpu_allocate(&gpu,      [] Draw,         256 * Megabyte / size_of(Draw),         memory = memory)
     mb_view,   mesh_buffer           := gpu_allocate(&gpu,      [] Mesh,         256 * Megabyte / size_of(Mesh),         memory = memory)
+    
+    db_view,   draw_buffer           := gpu_allocate(&gpu,      [] Draw,         256 * Megabyte / size_of(Draw),         memory = memory)
     dvb_view,  draw_visibilty_buffer := gpu_allocate(&gpu,      [] u32,          256 * Megabyte / size_of(u32),          memory = memory, usage = { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
-    dcb_view,  draw_command_buffer   := gpu_allocate(&gpu,      [] Draw_Command, 256 * Megabyte / size_of(Draw_Command), memory = memory, usage = { .STORAGE_BUFFER, .INDIRECT_BUFFER })
     
     dvb_cleared := false
     
     // @todo(viktor): this signifies that we dont need these to be cpu-visible memory
     unused(dvb_view)
-    unused(dcb_view)
     
     geometry: Geometry
     {
@@ -359,10 +363,10 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    draw_globals: Draw_Globals
+    draw_data: Draw_Data
     
-    for &pos, index in draw_globals.light_pos {
-        t := clamp_01_to_range(cast(f32) 0, cast(f32) len(draw_globals.light_pos), cast(f32) index)
+    for &pos, index in draw_data.light_pos {
+        t := clamp_01_to_range(cast(f32) 0, cast(f32) len(draw_data.light_pos), cast(f32) index)
         pos.xyz = v3{0, -10, 10}
         pos.xz += arm(t * Tau)
     }
@@ -393,7 +397,7 @@ main :: proc () {
     // @correctness ensure that this is enough and that we did not overflow inside of a frame and override someone elses data for a shader
     frame_bump_allocators: [MaxFramesInFlight] Bump_Allocator
     for &bump in frame_bump_allocators {
-        bump = bump_allocator_make_temporary(&gpu, 128 * Megabyte, usage = { .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER })
+        bump = bump_allocator_make_temporary(&gpu, 256 * Megabyte, usage = { .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER })
     }
     
     for !quit {
@@ -550,7 +554,7 @@ main :: proc () {
         
         entropy := seed_random_series(545114)
         when true {
-            draws := db_view[:20_000]
+            draws := db_view[:50_000]
             global_rotation := la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX)
             for &draw in draws {
                 p := random_bilateral(&entropy, v3) * {10, 10, 10} + {0, 0, -10}
@@ -592,22 +596,16 @@ main :: proc () {
         screen_from_view := projection_reversed_z_infinite_far_plane(70 * RadPerDeg, cast(f32) gpu.swapchain_size.x / cast(f32) gpu.swapchain_size.y, near_z)
         view_from_world  := translate(1, -cam_pos)
         
-        draw_distance: f32 = 100
+        draw_distance: f32 = 10
         
         frustum_planes: [6] v4
         if debug.culling_enabled {
-            cam_forward := v3{0, 0, -1}
-            
             frustum_planes[0] = get_row_v4(screen_from_view, 3) + get_row_v4(screen_from_view, 0) // x + w < 0
             frustum_planes[1] = get_row_v4(screen_from_view, 3) - get_row_v4(screen_from_view, 0) // x - w > 0
             frustum_planes[2] = get_row_v4(screen_from_view, 3) + get_row_v4(screen_from_view, 1) // y + w < 0
             frustum_planes[3] = get_row_v4(screen_from_view, 3) - get_row_v4(screen_from_view, 1) // y - w > 0
             frustum_planes[4] = get_row_v4(screen_from_view, 3) - get_row_v4(screen_from_view, 2) // z - w > 0 -- :ReversedZ:
-            
-            unused(draw_distance)
-            unused(cam_forward)
-            // @todo(viktor): also reenable in the compute shader
-            // frustum_planes[5] = v4{**cam_forward, draw_distance + dot(cam_forward, cam_pos)}          // :ReversedZ: infinite far plane
+            frustum_planes[5] = v4{0, 0, -1, draw_distance}                                       // :ReversedZ: infinite far plane
             
             for &plane in frustum_planes {
                 plane /= length(plane.xyz)
@@ -623,144 +621,140 @@ main :: proc () {
         gpu_profile_frame_begin(gpu.device, cmd)
         
         ////////////////////////////////////////////////
-        // early cull - frustum cull & fill objects that *were* visible last frame
-        
-        
-        _, early_draw_command_count_gpu := bump_allocate_type(bump, u32)
-        _, late_draw_command_count_gpu  := bump_allocate_type(bump, u32)
-        
-        early_cull_globals_cpu, early_cull_globals_gpu := bump_allocate_type(bump, Cull_Globals)
-        late_cull_globals_cpu,  late_cull_globals_gpu  := bump_allocate_type(bump, Cull_Globals)
-        
-        // @shader cull_early, cull_late
-        cull_data_flags: u32 
-        if debug.culling_enabled   { cull_data_flags |= DebugFlag_FrustumCulling   }
-        if debug.lod_enabled       { cull_data_flags |= DebugFlag_LevelOfDetail    }
-        if debug.occlusion_enabled { cull_data_flags |= DebugFlag_OcclusionCulling }
-        early_cull_globals_cpu^ = Cull_Globals {
-            draw_buffer            = draw_buffer.p,
-            mesh_buffer            = mesh_buffer.p,
-            draw_visibility_buffer = draw_visibilty_buffer.p,
-            draw_command_buffer    = draw_command_buffer.p,
-            draw_command_count     = early_draw_command_count_gpu.p,
-            
-            data = {
-                frustum_planes          = frustum_planes,
-                draw_count              = auto_cast len(draws),
-                view_from_world         = view_from_world,
-                
-                flags = cull_data_flags,
-                
-                p00 = screen_from_view[0,0],
-                p11 = screen_from_view[1,1],
-                near_z = near_z,
-                
-                pyramid_size = cast(v2) stuff.depth_pyramid_size,
-            },
-        }
-        
-        late_cull_globals_cpu^ = early_cull_globals_cpu^
-        late_cull_globals_cpu.draw_command_count = late_draw_command_count_gpu.p
-        
-        gpu_labeled_region_begin(cmd, "early culling", {0.0, 0.6, 0.8, 1.0})
-            gpu_profile_zone_begin("early culling")
-            
-            ////////////////////////////////////////////////
-            
-            gpu_barrier(cmd, { .DRAW_INDIRECT }, { .ALL_TRANSFER })
-            
-            {
-                count, offset := gpu_reflect_get_buffer(early_draw_command_count_gpu.p)
-                vk.CmdFillBuffer(cmd, count.buffer, offset, gpu_size_of(early_draw_command_count_gpu), 0)
-            }
-            
-            gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
-            
-            if !dvb_cleared {
-                dvb_cleared = true
-                
-                visibility_buffer, offset := gpu_reflect_get_buffer(draw_visibilty_buffer.p)
-                vk.CmdFillBuffer(cmd, visibility_buffer.buffer, offset, cast(vk.DeviceSize) len(draws) * size_of(dvb_view[0]), 1)
-                
-                gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
-            }
-            
-            ////////////////////////////////////////////////
-            
-            gpu_image_barrier(cmd, &stuff.depth_pyramid, {}, {}, .UNDEFINED, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
-            
-            gpu_set_pipeline(cmd, early_cull_pipeline)
-                gpu_dispatch(cmd, early_cull_globals_gpu, get_group_count(early_cull_shader, auto_cast len(draws)))
-            
-        gpu_profile_zone_end()
-        gpu_labeled_region_end(cmd)
-        
-        ////////////////////////////////////////////////
-        
-        // @todo(viktor): should these be combined into one api call?
-        gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
-        // this apparently needs to happend before we do anything related to rendering
-        gpu_image_barriers(cmd, 
-            create_image_barrier(&stuff.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL),
-            // :Stencil: add .STENCIL to the aspect mask
-            create_image_barrier(&stuff.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL), 
-            flags = { .BY_REGION },
-        )
-        
-        ////////////////////////////////////////////////
-        
-        // @shaders meshlet pipeline
-        draw_globals.screen_from_view = screen_from_view
-        draw_globals.view_from_world  = view_from_world
-        
-        draw_globals.draw_command_buffer = draw_command_buffer.p
-        draw_globals.draw_buffer         = draw_buffer.p
-        draw_globals.mesh_buffer         = mesh_buffer.p
-        draw_globals.meshlet_buffer      = meshlet_buffer.p
-        draw_globals.meshlet_data_buffer = meshlet_data_buffer.p
-        draw_globals.vertex_buffer       = vertex_buffer.p
-        
-        draw_globals_cpu, draw_globals_gpu := bump_allocate_type(bump, Draw_Globals)
-        draw_globals_cpu^ = draw_globals
-        
-        ////////////////////////////////////////////////
-        
         // Setting these outside of rendering-sections means they persist across all sections.
         gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
         gpu_set_scissor(cmd,  size = gpu.swapchain_size)
         
         ////////////////////////////////////////////////
-        // early render - render objects that were visible last frame
         
-        gpu_profile_zone_begin("early rendering pass")
-        gpu_labeled_region_begin(cmd, "early rendering pass", {0.6, 0.1, 07, 1.0})
-            begin_meshlet_rendering(&gpu, cmd, stuff.color_buffer, stuff.depth_buffer, {0.07, 0.07, 0.07, 1}, early = true)
-                    
-                if print_profile_and_stats {
-                    vk.ResetQueryPool(gpu.device, stats_pool, 0, stats_count)
-                    vk.CmdBeginQuery(cmd, stats_pool, 0, {})
+        cull_data_flags: u32 
+        if debug.culling_enabled   { cull_data_flags |= DebugFlag_FrustumCulling   }
+        if debug.lod_enabled       { cull_data_flags |= DebugFlag_LevelOfDetail    }
+        if debug.occlusion_enabled { cull_data_flags |= DebugFlag_OcclusionCulling }
+        cull_data := Cull_Data {
+            frustum_planes          = frustum_planes,
+            draw_count              = auto_cast len(draws),
+            view_from_world         = view_from_world,
+            
+            flags = cull_data_flags,
+            
+            p00 = screen_from_view[0,0],
+            p11 = screen_from_view[1,1],
+            near_z = near_z,
+            
+            pyramid_size = cast(v2) stuff.depth_pyramid_size,
+        }
+        
+        draw_data.screen_from_view = screen_from_view
+        draw_data.view_from_world  = view_from_world
+        
+        ////////////////////////////////////////////////
+        // early cull - frustum cull & fill objects that *were* visible last frame
+        
+        {
+            _, draw_command_count_gpu := bump_allocate_type(bump, u32)
+            _, draw_command_gpu := bump_allocate_slice(bump, [] Draw_Command, auto_cast len(draws))
+            
+            cull_globals_cpu, cull_globals_gpu := bump_allocate_type(bump, Cull_Globals)
+            cull_globals_cpu^ = Cull_Globals {
+                draw_buffer            = draw_buffer.p,
+                mesh_buffer            = mesh_buffer.p,
+                draw_visibility_buffer = draw_visibilty_buffer.p,
+                draw_command_buffer    = draw_command_gpu.p,
+                draw_command_count     = draw_command_count_gpu.p,
+                
+                data = cull_data,
+            }
+            
+            draw_globals_cpu, draw_globals_gpu := bump_allocate_type(bump, Draw_Globals)
+            draw_globals_cpu^ = Draw_Globals {
+                data = draw_data,
+                
+                draw_command_buffer = draw_command_gpu.p,
+                draw_buffer         = draw_buffer.p,
+                mesh_buffer         = mesh_buffer.p,
+                meshlet_buffer      = meshlet_buffer.p,
+                meshlet_data_buffer = meshlet_data_buffer.p,
+                vertex_buffer       = vertex_buffer.p,
+            }
+            
+            gpu_labeled_region_begin(cmd, "early culling", {0.0, 0.6, 0.8, 1.0})
+                gpu_profile_zone_begin("early culling")
+                
+                ////////////////////////////////////////////////
+                
+                gpu_barrier(cmd, { .DRAW_INDIRECT }, { .ALL_TRANSFER })
+                
+                {
+                    count, offset := gpu_reflect_get_buffer(draw_command_count_gpu.p)
+                    vk.CmdFillBuffer(cmd, count.buffer, offset, gpu_size_of(draw_command_count_gpu), 0)
                 }
                 
-                gpu_labeled_region_begin(cmd, "meshlets", {0.0, 0.6, 0.8, 1.0})
-                gpu_profile_zone_begin("meshlets")
+                gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
                 
-                gpu_set_pipeline(cmd, meshlet_pipeline)
-                    gpu_set_active_texture_head(cmd, &texture_heap, 0)
+                if !dvb_cleared {
+                    dvb_cleared = true
                     
-                    vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
+                    visibility_buffer, offset := gpu_reflect_get_buffer(draw_visibilty_buffer.p)
+                    vk.CmdFillBuffer(cmd, visibility_buffer.buffer, offset, cast(vk.DeviceSize) len(draws) * size_of(dvb_view[0]), 1)
                     
-                    gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer.p, early_draw_command_count_gpu, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command))
-                
-                gpu_profile_zone_end()
-                gpu_labeled_region_end(cmd)
-                
-                if print_profile_and_stats {
-                    vk.CmdEndQuery(cmd, stats_pool, 0)
+                    gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
                 }
                 
-            gpu_end_render_pass(cmd)
-        gpu_labeled_region_end(cmd)
-        gpu_profile_zone_end()
+                ////////////////////////////////////////////////
+                
+                gpu_image_barrier(cmd, &stuff.depth_pyramid, {}, {}, .UNDEFINED, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
+                
+                gpu_set_pipeline(cmd, early_cull_pipeline)
+                    gpu_dispatch(cmd, cull_globals_gpu, get_group_count(early_cull_shader, auto_cast len(draws)))
+                
+            gpu_profile_zone_end()
+            gpu_labeled_region_end(cmd)
+            
+            ////////////////////////////////////////////////
+            
+            // @todo(viktor): should these be combined into one api call?
+            // this apparently needs to happend before we do anything related to rendering
+            gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
+            gpu_image_barriers(cmd,  { .BY_REGION },
+                create_image_barrier(&stuff.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL),
+                // :Stencil: add .STENCIL to the aspect mask
+                create_image_barrier(&stuff.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL), 
+            )
+            
+            ////////////////////////////////////////////////
+            // early render - render objects that were visible last frame
+            
+            gpu_profile_zone_begin("early rendering pass")
+            gpu_labeled_region_begin(cmd, "early rendering pass", {0.6, 0.1, 07, 1.0})
+                begin_meshlet_rendering(&gpu, cmd, stuff.color_buffer, stuff.depth_buffer, {0.07, 0.07, 0.07, 1}, early = true)
+                        
+                    if print_profile_and_stats {
+                        vk.ResetQueryPool(gpu.device, stats_pool, 0, stats_count)
+                        vk.CmdBeginQuery(cmd, stats_pool, 0, {})
+                    }
+                    
+                    gpu_labeled_region_begin(cmd, "meshlets", {0.0, 0.6, 0.8, 1.0})
+                    gpu_profile_zone_begin("meshlets")
+                    
+                    gpu_set_pipeline(cmd, meshlet_pipeline)
+                        gpu_set_active_texture_head(cmd, &texture_heap, 0)
+                        
+                        vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
+                        
+                        gpu_draw_meshlets_indirect_count(cmd, draw_command_gpu.p, draw_command_count_gpu, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command))
+                    
+                    gpu_profile_zone_end()
+                    gpu_labeled_region_end(cmd)
+                    
+                    if print_profile_and_stats {
+                        vk.CmdEndQuery(cmd, stats_pool, 0)
+                    }
+                    
+                gpu_end_render_pass(cmd)
+            gpu_labeled_region_end(cmd)
+            gpu_profile_zone_end()
+        }
         
         ////////////////////////////////////////////////
         // depth pyramid generation
@@ -770,10 +764,9 @@ main :: proc () {
             
             ////////////////////////////////////////////////
             
-            gpu_image_barriers(cmd, 
+            gpu_image_barriers(cmd, { .BY_REGION },
                 create_image_barrier_from_last_transition(&stuff.depth_buffer,  { .COMPUTE_SHADER }, { .SHADER_READ  }, .SHADER_READ_ONLY_OPTIMAL),
                 create_image_barrier_from_last_transition(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL),
-                flags = { .BY_REGION },
             )
             
             gpu_set_pipeline(cmd, depth_pipeline)
@@ -812,65 +805,107 @@ main :: proc () {
         ////////////////////////////////////////////////
         // late cull - frustum & occlusion cull & fill objects that were *not* visible last frame
         
-        gpu_labeled_region_begin(cmd, "late culling", {0.0, 0.6, 0.8, 1.0})
-            gpu_profile_zone_begin("late culling")
+        {
+            // @todo these dont need to be cpu visible if that would improve performance 
+            // @todo Now that each cull+render pass has its own data instead of sharing it, the memory usage has doubled in the worst case.
+            // But atleast this avoids needing to predeclare these two buffers and ensuring barriers and clears are correctly setup before reuse.
+            // We cannot clear the bump allocator in between passes to reuse the memory after the first pass is done, as that is asynchronous.
+            // 
+            // We now dont need to synchronize between the first and the second cull dispatch, as they can fill different buffers.
+            // 
+            // In general it seems the bump allocator is great for push data/uniforms per shader/pipeline. But the command and count buffers
+            // do actually share a lifetime and are specifically used in *all* indirect draw calls. Maybe instead of moving them into the bump
+            // they should have been unified with indirect draw calls, so that any further call can just also make use of them. That would 
+            // require any pair of indirect draw calls to be serialized and not parallel, but as long as both draw into the same color/depth 
+            // buffers that should already be the case.
+            // On the other hand with this arrangement we have two disjoint buffer pairs, and can therefore overlap the second filling of the 
+            // command data with the creation or drawing of the first, as long as there are no other dependencies between them.
             
-            ////////////////////////////////////////////////
+            _, draw_command_count_gpu := bump_allocate_type(bump, u32)
+            _, draw_command_gpu       := bump_allocate_slice(bump, [] Draw_Command, auto_cast len(draws))
             
-            gpu_barrier(cmd, { .DRAW_INDIRECT }, { .ALL_TRANSFER })
-            
-            {
-                count, offset := gpu_reflect_get_buffer(late_draw_command_count_gpu.p)
-                vk.CmdFillBuffer(cmd, count.buffer, offset, gpu_size_of(late_draw_command_count_gpu), 0)
+            cull_globals_cpu, cull_globals_gpu := bump_allocate_type(bump, Cull_Globals)
+            cull_globals_cpu^ = Cull_Globals {
+                draw_buffer            = draw_buffer.p,
+                mesh_buffer            = mesh_buffer.p,
+                draw_visibility_buffer = draw_visibilty_buffer.p,
+                draw_command_buffer    = draw_command_gpu.p,
+                draw_command_count     = draw_command_count_gpu.p,
+                
+                data = cull_data,
             }
             
-            gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
+            draw_globals_cpu, draw_globals_gpu := bump_allocate_type(bump, Draw_Globals)
+            draw_globals_cpu^ = Draw_Globals {
+                data = draw_data,
+                
+                draw_command_buffer = draw_command_gpu.p,
+                draw_buffer         = draw_buffer.p,
+                mesh_buffer         = mesh_buffer.p,
+                meshlet_buffer      = meshlet_buffer.p,
+                meshlet_data_buffer = meshlet_data_buffer.p,
+                vertex_buffer       = vertex_buffer.p,
+            }
+            
+            gpu_labeled_region_begin(cmd, "late culling", {0.0, 0.6, 0.8, 1.0})
+                gpu_profile_zone_begin("late culling")
+                
+                ////////////////////////////////////////////////
+                
+                gpu_barrier(cmd, { .DRAW_INDIRECT }, { .ALL_TRANSFER })
+                
+                {
+                    count, offset := gpu_reflect_get_buffer(draw_command_count_gpu.p)
+                    vk.CmdFillBuffer(cmd, count.buffer, offset, gpu_size_of(draw_command_count_gpu), 0)
+                }
+                
+                gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
+                
+                ////////////////////////////////////////////////
+                
+                gpu_image_barrier_from_last_transition(cmd, &stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
+                
+                gpu_set_pipeline(cmd, late_cull_pipeline)
+                    
+                    update := DescriptorUpdateData { image = { stuff.depth_sampler, stuff.depth_pyramid.view, .GENERAL } }
+                    vk.CmdPushDescriptorSetWithTemplate(cmd, late_cull_pipeline.update_template, late_cull_pipeline.layout, 0, &update)
+                    
+                    gpu_dispatch(cmd, cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)))
+                    
+            gpu_profile_zone_end()
+            gpu_labeled_region_end(cmd)
             
             ////////////////////////////////////////////////
+            // late rendering - render objects that are visible this frame but weren't drawn in the early pass
             
-            gpu_image_barrier(cmd, &stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
+            gpu_profile_zone_begin("late rendering pass")
+            gpu_labeled_region_begin(cmd, "late rendering pass", {0.6, 0.1, 07, 1.0})
             
-            gpu_set_pipeline(cmd, late_cull_pipeline)
+                // @todo(viktor): should these be combined into one api call?
+                // this apparently needs to happend before we do anything related to rendering
+                gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
+                gpu_image_barriers(cmd, { .BY_REGION },
+                    create_image_barrier_from_last_transition(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL), 
+                    // :Stencil: add .STENCIL to the aspect mask
+                    create_image_barrier_from_last_transition(&stuff.color_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL),
+                )
                 
-                update := DescriptorUpdateData { image = { stuff.depth_sampler, stuff.depth_pyramid.view, .GENERAL } }
-                vk.CmdPushDescriptorSetWithTemplate(cmd, late_cull_pipeline.update_template, late_cull_pipeline.layout, 0, &update)
-                
-                gpu_dispatch(cmd, late_cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)))
-                
-        gpu_profile_zone_end()
-        gpu_labeled_region_end(cmd)
-        
-        ////////////////////////////////////////////////
-        // late rendering - render objects that are visible this frame but weren't drawn in the early pass
-        
-        gpu_profile_zone_begin("late rendering pass")
-        gpu_labeled_region_begin(cmd, "late rendering pass", {0.6, 0.1, 07, 1.0})
-        
-            // @todo(viktor): should these be combined into one api call?
-            gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
-            // this apparently needs to happend before we do anything related to rendering
-            gpu_image_barriers(cmd, 
-                create_image_barrier_from_last_transition(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL), 
-                // :Stencil: add .STENCIL to the aspect mask
-                create_image_barrier_from_last_transition(&stuff.color_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL),
-                flags = { .BY_REGION },
-            )
+                ////////////////////////////////////////////////
             
-            ////////////////////////////////////////////////
-        
-            begin_meshlet_rendering(&gpu, cmd, stuff.color_buffer, stuff.depth_buffer, {}, early = false)
-                
-                gpu_set_pipeline(cmd, meshlet_pipeline)
-                    gpu_set_active_texture_head(cmd, &texture_heap, 0)
+                begin_meshlet_rendering(&gpu, cmd, stuff.color_buffer, stuff.depth_buffer, {}, early = false)
                     
-                    vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
+                    gpu_set_pipeline(cmd, meshlet_pipeline)
+                        gpu_set_active_texture_head(cmd, &texture_heap, 0)
+                        
+                        vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
+                        
+                        gpu_draw_meshlets_indirect_count(cmd, draw_command_gpu.p, draw_command_count_gpu, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command))
                     
-                    gpu_draw_meshlets_indirect_count(cmd, draw_command_buffer.p, late_draw_command_count_gpu, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command))
+                gpu_end_render_pass(cmd)
                 
-            gpu_end_render_pass(cmd)
-            
-        gpu_labeled_region_end(cmd)
-        gpu_profile_zone_end()
+            gpu_labeled_region_end(cmd)
+            gpu_profile_zone_end()
+        }
         
         ////////////////////////////////////////////////
         
@@ -880,10 +915,9 @@ main :: proc () {
             if debug.display_pyramid {
                 source_image = &stuff.depth_pyramid
             }
-            gpu_image_barriers(cmd, 
+            gpu_image_barriers(cmd,  { .BY_REGION },
                 create_image_barrier(&gpu.swapchain_images[gpu.image_index], { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL),
                 create_image_barrier_from_last_transition(source_image, { .ALL_TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL),
-                flags = { .BY_REGION },
             )
             
             destination := gpu.swapchain_images[gpu.image_index]
@@ -1006,7 +1040,6 @@ main :: proc () {
     gpu_free(&gpu, mesh_buffer)
     gpu_free(&gpu, draw_buffer)
     gpu_free(&gpu, draw_visibilty_buffer)
-    gpu_free(&gpu, draw_command_buffer)
     
     for &bump in frame_bump_allocators {
         bump_allocator_delete(&gpu, &bump)

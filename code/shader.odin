@@ -27,6 +27,7 @@ generate_shader_api :: proc (output_file: string) {
     
     // @shaders all types used by the cpu and the gpu
     append_simple_struct(&builder, vk.DrawMeshTasksIndirectCommandEXT)
+    append_simple_struct(&builder, Draw_Data)
     append_simple_struct(&builder, Cull_Data)
     append_simple_struct(&builder, Draw_Command)
     append_simple_struct(&builder, Draw)
