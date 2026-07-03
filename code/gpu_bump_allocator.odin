@@ -4,7 +4,7 @@ package main
 import vk "../lib/vulkan"
 
 Bump_Allocator :: struct {
-    backing: GpuAllocation,
+    allocation: GpuAllocation,
     
     cpu: [] u8,
     gpu: vk.DeviceAddress,
@@ -19,7 +19,7 @@ bump_allocator_make_temporary :: proc (gpu: ^Gpu, size: u32, usage := vk.BufferU
     result.cpu, gpu_slice = gpu_allocate_slice(gpu, [] u8, size, usage = usage)
     result.gpu = gpu_slice.p
     
-    result.backing = gpu_reflect_get_allocation(gpu_slice.p)
+    result.allocation = gpu_reflect_get_allocation(gpu_slice.p)
     
     return result
 }
@@ -44,7 +44,7 @@ bump_allocate :: proc (bump: ^Bump_Allocator, size: u32, alignment: u32 = 16) ->
     cpu = bump.cpu[bump.offset:][:size]
     gpu = bump.gpu + cast(vk.DeviceAddress) bump.offset
     
-    gpu_reflect_set_allocation(gpu, bump.backing, bump.offset)
+    gpu_reflect_set_allocation(gpu, bump.allocation, bump.offset)
     
     bump.offset += size
     

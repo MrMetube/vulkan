@@ -575,10 +575,8 @@ gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Me
     
     requirements: vk.MemoryRequirements
     vk.GetBufferMemoryRequirements(gpu.device, alloc.buffer, &requirements)
-    if requirements.alignment < cast(vk.DeviceSize) alignment {
-        requirements.alignment = cast(vk.DeviceSize) alignment
-    }
     
+    requirements.alignment = max(requirements.alignment, cast(vk.DeviceSize) alignment)
     alloc.memory = select_memory_type_and_allocate(gpu, requirements, flags, add_device_address_flag = true)
     
     check(vk.BindBufferMemory(gpu.device, alloc.buffer, alloc.memory, 0))
@@ -589,12 +587,10 @@ gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Me
         sType = .BUFFER_DEVICE_ADDRESS_INFO,
         buffer = alloc.buffer,
     }
-    
     alloc.address = vk.GetBufferDeviceAddress(gpu.device, &adress_create_info)
     assert(alloc.address != 0)
     
-    info := vk.BufferDeviceAddressInfo { sType  = .BUFFER_DEVICE_ADDRESS_INFO, buffer = alloc.buffer }
-    gpu_result = vk.GetBufferDeviceAddress(gpu.device, &info)
+    gpu_result = alloc.address
     
     gpu_reflect_set_allocation(gpu_result, alloc)
     
