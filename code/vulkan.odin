@@ -5,11 +5,14 @@ import vk "../lib/vulkan"
 
 Pipeline :: struct {
     pipeline: vk.Pipeline,
-    layout:   vk.PipelineLayout,
+    layout:   vk.PipelineLayout, // @cleanup
     update_template: vk.DescriptorUpdateTemplate,
     
     bind_point:    vk.PipelineBindPoint,
     shader_stages: vk.ShaderStageFlags,
+    
+    resource_types: [32] vk.DescriptorType,
+    resource_mask:  Shader_Resource_Mask,
 }
 
 Shader :: struct {
@@ -251,6 +254,45 @@ create_descriptor_set_layout :: proc (device: vk.Device, shaders: ..Shader) -> v
     result: vk.DescriptorSetLayout
     
     check(vk.CreateDescriptorSetLayout(device, &create_info, nil, &result))
+    
+    return result
+}
+
+generate_heap_mappings :: proc (resource_mask: Shader_Resource_Mask, resource_types: [32] vk.DescriptorType, push_constant_size: u32, descriptor_size, sampler_size: u32, mappings: ^[32] vk.DescriptorSetAndBindingMappingEXT) -> vk.ShaderDescriptorSetAndBindingMappingInfoEXT { // fill heap mapping
+    mapping_offset: u32
+    for i in cast(u32) 0..<32 {
+        if i in resource_mask {
+            mapping := &mappings[mapping_offset]
+            mapping_offset += 1
+            
+            stride := resource_types[i] == .SAMPLER ? sampler_size : descriptor_size
+            
+            mapping^ = {
+                sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
+                
+                firstBinding = i,
+                bindingCount = 1,
+                
+                resourceMask = vk.SpirvResourceTypeFlagsEXT_ALL,
+                
+                source = .HEAP_WITH_PUSH_INDEX,
+                sourceData = {
+                    pushIndex = {
+                        heapOffset = 0,
+                        pushOffset = push_constant_size,
+                        heapIndexStride = stride,
+                        heapArrayStride = stride,
+                    },
+                },
+            }
+        }
+    }
+    
+    result := vk.ShaderDescriptorSetAndBindingMappingInfoEXT {
+        sType = .SHADER_DESCRIPTOR_SET_AND_BINDING_MAPPING_INFO_EXT,
+        mappingCount = mapping_offset,
+        pMappings    = &mappings[0]
+    }
     
     return result
 }

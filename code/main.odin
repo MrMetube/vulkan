@@ -20,7 +20,12 @@ VSync :: true when !Optimized else false
 
 ////////////////////////////////////////////////
 
-DescriptorUpdateData :: vk.DescriptorImageInfo
+// @cleanup
+DescriptorUpdateData :: struct #raw_union {
+    old: vk.DescriptorImageInfo,
+    image: struct { sampler: vk.Sampler, image: Image, view_override: Maybe(vk.ImageView), mip_base, mip_count: u32 },
+    sampler: vk.SamplerCreateInfo,
+}
 
 Geometry :: struct {
     // @todo(viktor): all this data is not needed on the cpu, we could just directly upload it to the gpu buffers
@@ -198,7 +203,7 @@ main :: proc () {
     mb_view,   mesh_buffer           := gpu_allocate(&gpu,      [] Mesh,         256 * Megabyte / size_of(Mesh),         memory = memory)
     
     db_view,   draw_buffer           := gpu_allocate(&gpu,      [] Draw,         256 * Megabyte / size_of(Draw),         memory = memory)
-    dvb_view,  draw_visibilty_buffer := gpu_allocate(&gpu,      [] u32,          256 * Megabyte / size_of(u32),          memory = memory, usage = { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
+    dvb_view,  draw_visibilty_buffer := gpu_allocate(&gpu,      [] u32,          256 * Megabyte / size_of(u32),          memory = memory, usage = vk.BufferUsageFlags { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
     
     dvb_cleared := false
     
@@ -255,10 +260,8 @@ main :: proc () {
     texture_count :: 3
     textures: [1024] Image
     
-    // @todo(viktor): migrate the depth_pyramid image into the texture_heap
-    // @todo it seems we need two heaps? one for sampling .CombinedImageSampler, and one for writing to .StorageImage
-    // @study how many textures can we index into like this? maxDescriptorSetSampledImages, maxPerStageDescriptorSampledImages
-    texture_heap := create_descriptor_heap(&gpu, 65536)
+    // @todo(viktor): migrate the depth_pyramid image into the descriptor_heap  // @todo it seems we need two heaps? one for sampling .CombinedImageSampler, and one for writing to .StorageImage
+    descriptor_heap := create_descriptor_heap(&gpu)
     
     {
         upload_bump := bump_allocator_make_temporary(&gpu, 256 * Megabyte, usage = { .TRANSFER_SRC })
@@ -294,7 +297,7 @@ main :: proc () {
             
             gpu_image_barrier_from_last_transition(cmd, &texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL) 
             
-            write_texture_to_heap(&gpu, &texture_heap, index, texture.view, texture.last_layout)
+            write_texture_to_heap(&gpu, &descriptor_heap, index, texture.view, texture.last_layout)
         }
             
         gpu_barrier(cmd, { .ALL_TRANSFER }, { .ALL_COMMANDS }, { .descriptors })
@@ -306,7 +309,7 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     global_sampler := create_sampler(&gpu, .LINEAR, .LINEAR, anisotropy = true)
-    write_global_sampler_to_heap(&gpu, &texture_heap, global_sampler)
+    write_sampler_to_heap(&gpu, &descriptor_heap, 0, global_sampler)
     defer_destroy(vk.DestroySampler, global_sampler)
     
     ////////////////////////////////////////////////
@@ -500,27 +503,39 @@ main :: proc () {
         bump := &frame_bump_allocators[frame_index]
         bump_free_all(bump)
         
+        // @cleanup
+        frame_descriptor: Frame_Descriptor
+        frame_descriptor.resource_offset = DescriptorStaticLimit            + cast(u32) frame_index * DescriptorPerFrameLimit
+        frame_descriptor.resource_end    = frame_descriptor.resource_offset +                     1 * DescriptorPerFrameLimit
+        frame_descriptor.sampler_offset  = 0
+        frame_descriptor.sampler_end     = DescriptorSamplerLimit
+        frame_descriptor.gpu = &gpu
+        frame_descriptor.heap = &descriptor_heap
+        
         ////////////////////////////////////////////////
         
         watchers_check_for_modification(watchers)
         
         if reload_shaders_if_needed(watchers, shader_allocator, &early_cull_shader) || !pipeline_is_valid(early_cull_pipeline) {
             destroy_pipeline(&gpu, early_cull_pipeline)
-            early_cull_pipeline = gpu_create_compute_pipeline(&gpu, early_cull_shader)
+            early_cull_pipeline = gpu_create_compute_pipeline(&gpu, early_cull_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size)
             fmt.printfln("Recreated early_cull_pipeline.")
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, &late_cull_shader) || !pipeline_is_valid(late_cull_pipeline) {
             destroy_pipeline(&gpu, late_cull_pipeline)
-            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, late_cull_shader, late_cull_descriptor_set_layout)
+            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, late_cull_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, late_cull_descriptor_set_layout)
             late_cull_pipeline.update_template = create_update_template(gpu.device, .COMPUTE, late_cull_pipeline.layout, late_cull_shader)
             fmt.printfln("Recreated late_cull_pipeline.")
         }
         
+        depth_pyramid_with_heap := true
         if reload_shaders_if_needed(watchers, shader_allocator, &depth_reduce_shader) || !pipeline_is_valid(depth_pipeline) {
             destroy_pipeline(&gpu, depth_pipeline)
-            depth_pipeline = gpu_create_compute_pipeline(&gpu, depth_reduce_shader, depth_descriptor_set_layout)
-            depth_pipeline.update_template = create_update_template(gpu.device, .COMPUTE, depth_pipeline.layout, depth_reduce_shader)
+            depth_pipeline = gpu_create_compute_pipeline(&gpu, depth_reduce_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, depth_descriptor_set_layout, heap = depth_pyramid_with_heap)
+            if !depth_pyramid_with_heap {
+                depth_pipeline.update_template = create_update_template(gpu.device, .COMPUTE, depth_pipeline.layout, depth_reduce_shader)
+            }
             fmt.printfln("Recreated depth_pipeline.")
         }
         
@@ -543,7 +558,7 @@ main :: proc () {
             }
             
             destroy_pipeline(&gpu, meshlet_pipeline)
-            meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, task, mesh, frag, raster_description, texture_heap.layout)
+            meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, task, mesh, frag, raster_description, descriptor_heap.resource_size, descriptor_heap.sampler_size)
             fmt.printfln("Recreated meshlet_pipeline.")
         }
         
@@ -703,7 +718,7 @@ main :: proc () {
                 gpu_image_barrier(cmd, &stuff.depth_pyramid, {}, {}, .UNDEFINED, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
                 
                 gpu_set_pipeline(cmd, early_cull_pipeline)
-                    gpu_dispatch(cmd, cull_globals_gpu, get_group_count(early_cull_shader, auto_cast len(draws)))
+                    gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(early_cull_shader, auto_cast len(draws)))
                 
             gpu_profile_zone_end()
             gpu_labeled_region_end(cmd)
@@ -733,9 +748,7 @@ main :: proc () {
                     gpu_profile_zone_begin("meshlets")
                     
                     gpu_set_pipeline(cmd, meshlet_pipeline)
-                        gpu_set_active_texture_head(cmd, &texture_heap, 0)
-                        
-                        gpu_draw_meshlets_indirect_count(cmd, 
+                        gpu_draw_meshlets_indirect_count(cmd, &frame_descriptor,
                             draw_command_gpu.p, draw_command_count_gpu, 
                             auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command),
                             draw_globals_gpu,
@@ -756,8 +769,9 @@ main :: proc () {
         ////////////////////////////////////////////////
         // depth pyramid generation
         
-        gpu_profile_zone_begin("depth pyramid building")
-        gpu_labeled_region_begin(cmd, "depth pyramid building", {0.4, 0.8, 0, 1.0})
+        {
+            gpu_profile_zone_begin("depth pyramid building")
+            gpu_labeled_region_begin(cmd, "depth pyramid building", {0.4, 0.8, 0, 1.0})
             
             ////////////////////////////////////////////////
             
@@ -773,32 +787,48 @@ main :: proc () {
                 for &mip, mip_level in stuff.depth_pyramid_mips {
                     // @shaders depth_reduce.comp
                     
+                    
                     clear(&updates)
-                    append(&updates, DescriptorUpdateData { 
-                        {},
-                        mip_level == 0 ? stuff.depth_buffer.view        : prev_mip.view,
-                        mip_level == 0 ? stuff.depth_buffer.last_layout : .GENERAL,
-                    })
-                    append(&updates, DescriptorUpdateData { stuff.depth_sampler, {},       {} })
-                    append(&updates, DescriptorUpdateData { stuff.depth_sampler, mip.view, .GENERAL })
-                    vk.CmdPushDescriptorSetWithTemplate(cmd, depth_pipeline.update_template, depth_pipeline.layout, 0, raw_data(&updates))
+                    if depth_pyramid_with_heap {
+                        gpu_set_active_heap(cmd, &descriptor_heap)
+                        
+                        append(&updates, DescriptorUpdateData { image = {
+                            {},
+                            mip_level == 0 ? stuff.depth_buffer                        : stuff.depth_pyramid,
+                            mip_level == 0 ? stuff.depth_buffer.view                   : prev_mip.view,
+                            mip_level == 0 ? 0 : cast(u32) mip_level-1, 
+                            1,
+                        }})
+                        append(&updates, DescriptorUpdateData { sampler = xx_sampler(.LINEAR, .LINEAR) })
+                        append(&updates, DescriptorUpdateData { image = {  {}, stuff.depth_pyramid, mip.view, cast(u32) mip_level, 1 }})
+                        gpu_push_descriptors(cmd, &frame_descriptor, updates[:], { depth_reduce_shader })
+                    } else{
+                        append(&updates, DescriptorUpdateData { old = {
+                            {},
+                            mip_level == 0 ? stuff.depth_buffer.view        : prev_mip.view,
+                            mip_level == 0 ? stuff.depth_buffer.last_layout : .GENERAL,
+                        }})
+                        append(&updates, DescriptorUpdateData { old = {stuff.depth_sampler, {},       {} } })
+                        append(&updates, DescriptorUpdateData { old = {stuff.depth_sampler, mip.view, .GENERAL } })
+                        vk.CmdPushDescriptorSetWithTemplate(cmd, depth_pipeline.update_template, depth_pipeline.layout, 0, raw_data(&updates))
+                    }
                     
                     prev_mip = &mip
                     
                     depth_globals_cpu, depth_globals_gpu := bump_allocate_type(bump, Depth_Globals)
                     depth_globals_cpu^ = Depth_Globals { size = cast(v2) mip.size }
                     
-                    gpu_dispatch(cmd, depth_globals_gpu, get_group_count(depth_reduce_shader, **mip.size))
+                    gpu_dispatch(cmd, &frame_descriptor, depth_globals_gpu, get_group_count(depth_reduce_shader, **mip.size), heap = depth_pyramid_with_heap)
                     
                     gpu_image_barrier_from_last_transition(cmd, &stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL, flags = { .BY_REGION })
                 }
-        
                 ////////////////////////////////////////////////
                 
                 gpu_image_barrier_from_last_transition(cmd, &stuff.depth_buffer, {.EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, flags = { .BY_REGION })
                 
-        gpu_labeled_region_end(cmd)
-        gpu_profile_zone_end()
+            gpu_labeled_region_end(cmd)
+            gpu_profile_zone_end()
+        }
         
         ////////////////////////////////////////////////
         // late cull - frustum & occlusion cull & fill objects that were *not* visible last frame
@@ -866,12 +896,12 @@ main :: proc () {
                 gpu_set_pipeline(cmd, late_cull_pipeline)
                     
                     updates := [?] DescriptorUpdateData {
-                        { 0,                   stuff.depth_pyramid.view, .GENERAL },
-                        { stuff.depth_sampler, 0,                        {}       },
+                        { old = { 0,                   stuff.depth_pyramid.view, .GENERAL } },
+                        { old = { stuff.depth_sampler, 0,                        {}       } },
                     }
                     vk.CmdPushDescriptorSetWithTemplate(cmd, late_cull_pipeline.update_template, late_cull_pipeline.layout, 0, &updates[0])
                     
-                    gpu_dispatch(cmd, cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)))
+                    gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)))
                     
             gpu_profile_zone_end()
             gpu_labeled_region_end(cmd)
@@ -894,9 +924,7 @@ main :: proc () {
                 begin_meshlet_rendering(&gpu, cmd, stuff.color_buffer, stuff.depth_buffer, {}, early = false)
                     
                     gpu_set_pipeline(cmd, meshlet_pipeline)
-                        gpu_set_active_texture_head(cmd, &texture_heap, 0)
-                        
-                        gpu_draw_meshlets_indirect_count(cmd, 
+                        gpu_draw_meshlets_indirect_count(cmd, &frame_descriptor,
                             draw_command_gpu.p, draw_command_count_gpu, 
                             auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command),
                             draw_globals_gpu,
@@ -1056,7 +1084,7 @@ main :: proc () {
         gpu_free_image(&gpu, texture)
     }
     
-    destroy_descriptor_heap(&gpu, texture_heap)
+    destroy_descriptor_heap(&gpu, descriptor_heap)
     
     destroy_stuff(&gpu, &stuff, final = true)
     

@@ -238,7 +238,7 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
     
     result.bytes = shader_bytes
     
-    {
+    { // parse shader
         result.parsed = {}
         
         shader_code := slice_from_parts(u32, raw_data(shader_bytes), len(shader_bytes) / 4)

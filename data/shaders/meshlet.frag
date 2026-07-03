@@ -10,7 +10,7 @@ layout(location = 0) flat   in Mesh_Result_Flat   mesh_result_flat;
 layout(location = 1) smooth in Mesh_Result_Smooth mesh_result_smooth;
 
 layout(binding = 0) uniform sampler global_sampler;
-layout(binding = 1) uniform texture2D texture_heap[];
+// @todo layout(binding = 1) uniform texture2D texture_heap[];
 
 layout(location = 0) out vec4 pixel_result;
 
@@ -40,4 +40,7 @@ void main(void) {
     
     // pixel_result = vec4(color, 1.0);
     pixel_result = vec4(0.2, 0.1, 0.1, 1.0);
+    // vec3 color = mesh_result_smooth.debug_color;
+    
+    // pixel_result = vec4(color, 1.0);
 }

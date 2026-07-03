@@ -29,6 +29,7 @@ Gpu :: struct {
     physical_device:   vk.PhysicalDevice,
     surface:           vk.SurfaceKHR,
     device_properties: vk.PhysicalDeviceProperties2, 
+    heap_properties:   vk.PhysicalDeviceDescriptorHeapPropertiesEXT, 
     memory_properties: vk.PhysicalDeviceMemoryProperties,
     
     device: vk.Device,
@@ -126,13 +127,13 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
                 instance_create_info.pNext = &vk.DebugUtilsMessengerCreateInfoEXT {
                     sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
                     messageSeverity = { .VERBOSE, .WARNING, .ERROR },
-                    messageType     = { .VALIDATION, .PERFORMANCE },
+                    messageType     = { .VALIDATION },
                     pfnUserCallback = vulkan_debug_utils_callback,
                     
                     pNext = &vk.ValidationFeaturesEXT {
                         sType = .VALIDATION_FEATURES_EXT,
                         enabledValidationFeatureCount = len(enabled),
-                        pEnabledValidationFeatures = &enabled[0],
+                        pEnabledValidationFeatures    = &enabled[0],
                     },
                 }
             }
@@ -205,7 +206,13 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             result.physical_device = discrete != nil ? discrete : fallback
         }
         
-        result.device_properties = vk.PhysicalDeviceProperties2 { sType = .PHYSICAL_DEVICE_PROPERTIES_2 }
+        result.heap_properties = vk.PhysicalDeviceDescriptorHeapPropertiesEXT {
+            sType = .PHYSICAL_DEVICE_DESCRIPTOR_HEAP_PROPERTIES_EXT,
+        }
+        result.device_properties = vk.PhysicalDeviceProperties2 { 
+            sType = .PHYSICAL_DEVICE_PROPERTIES_2,
+            pNext = &result.heap_properties,
+        }
         vk.GetPhysicalDeviceProperties2(result.physical_device, &result.device_properties)
         
         fmt.printfln("Selected device: %v", cast(cstring) &result.device_properties.properties.deviceName[0])
@@ -223,18 +230,18 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             vk.KHR_SWAPCHAIN_EXTENSION_NAME,
             vk.EXT_MESH_SHADER_EXTENSION_NAME,
             vk.KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME,
-            vk.EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME,
+            vk.EXT_DESCRIPTOR_HEAP_EXTENSION_NAME,
         }
         
-        f_dbuffer := vk.PhysicalDeviceDescriptorBufferFeaturesEXT{
-            sType            = .PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT,
-            descriptorBuffer = true,
+        f_heap := vk.PhysicalDeviceDescriptorHeapFeaturesEXT {
+            sType = .PHYSICAL_DEVICE_DESCRIPTOR_HEAP_FEATURES_EXT,
+            descriptorHeap = true,
         }
         
         // @correctness These features are still extensions, and we should query their availability.
         f_mesh := vk.PhysicalDeviceMeshShaderFeaturesEXT {
             sType = .PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
-            pNext = &f_dbuffer,
+            pNext = &f_heap,
             
             meshShader = true, // 57.18% (vulkan.gpuinfo.org for "1.4 and up" on 18.06.2026)
             taskShader = true,
@@ -559,7 +566,7 @@ gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Me
     
     flags := vk.MemoryPropertyFlags {}
     switch memory {
-    case .Default:  flags = { .HOST_VISIBLE, .HOST_COHERENT }
+    case .Default:  flags = { .HOST_VISIBLE, .HOST_COHERENT/* , .DEVICE_LOCAL @todo decide if this is needed here */ }
     case .GPU:      flags = { .HOST_VISIBLE, .DEVICE_LOCAL }
     case .Readback: flags = { .HOST_VISIBLE, .HOST_COHERENT, .HOST_CACHED }
     }
@@ -597,15 +604,15 @@ gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Me
     return cpu_result, gpu_result
 }
 
-gpu_allocate_slice :: proc (gpu: ^Gpu, $T: typeid/ [] $E, #any_int count: umm, memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> ([] E, GpuSlice(E)) {
+gpu_allocate_slice :: proc (gpu: ^Gpu, $T: typeid/ [] $E, #any_int count: umm, alignment: umm = align_of(E), memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> ([] E, GpuSlice(E)) {
     size := size_of(E) * count
-    cpu_pointer, gpu_pointer := gpu_allocate_size(gpu, size, align_of(E), memory, usage)
+    cpu_pointer, gpu_pointer := gpu_allocate_size(gpu, size, alignment, memory, usage)
     result := slice_from_parts(E, cpu_pointer, count)
-    return result, { p = gpu_pointer, byte_size = cast(int) size }
+    return result, { gpu_pointer, cast(int) size }
 }
 
-gpu_allocate_type :: proc (gpu: ^Gpu, $T: typeid, memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (^T,GpuAddress(T)) {
-    cpu_pointer, gpu_pointer := gpu_allocate_size(gpu, size_of(T), align_of(T), memory, usage)
+gpu_allocate_type :: proc (gpu: ^Gpu, $T: typeid, alignment: umm = align_of(T), memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (^T,GpuAddress(T)) {
+    cpu_pointer, gpu_pointer := gpu_allocate_size(gpu, size_of(T), alignment, memory, usage)
     result := cast(^T) cpu_pointer
     return result, { gpu_pointer }
 }
@@ -732,8 +739,9 @@ gpu_create_texture_view :: proc (gpu: ^Gpu, image: Image, mip_base: u32, mip_cou
     return result
 }
 
-create_sampler :: proc (gpu: ^Gpu, filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, max_lod: f32 = 16, anisotropy: b32 = false) -> vk.Sampler {
-    sampler_create_info := vk.SamplerCreateInfo {
+// @cleanup
+xx_sampler :: proc (filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, max_lod: f32 = 16, anisotropy: b32 = false) -> vk.SamplerCreateInfo {
+    result := vk.SamplerCreateInfo {
         sType = .SAMPLER_CREATE_INFO,
         
         magFilter  = filter,
@@ -748,6 +756,11 @@ create_sampler :: proc (gpu: ^Gpu, filter: vk.Filter, mipmap_mode: vk.SamplerMip
         maxAnisotropy    = anisotropy ? 8 : 0,
         maxLod           = max_lod,
     }
+    return result
+}
+
+create_sampler :: proc (gpu: ^Gpu, filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, max_lod: f32 = 16, anisotropy: b32 = false) -> vk.Sampler {
+    sampler_create_info := xx_sampler(filter, mipmap_mode, max_lod, anisotropy)
     
     result: vk.Sampler
     check(vk.CreateSampler(gpu.device, &sampler_create_info, nil, &result))
@@ -845,18 +858,31 @@ gpu_destroy_texture_view :: proc (gpu: ^Gpu, view: vk.ImageView) {
 // Pipelines 
 
 // @cleanup
-gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, set_layout: ..vk.DescriptorSetLayout) -> Pipeline {
+gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, descriptor_size, sampler_size: u32, set_layout: ..vk.DescriptorSetLayout, heap := false) -> Pipeline {
     // @todo(viktor): allow for optional shader constant, i.e. vulkan specialization constants
     assert(compute.stage == .COMPUTE)
+    compute := compute
     
     result: Pipeline
     result.bind_point    = .COMPUTE
     result.shader_stages = { .COMPUTE }
     
-    result.layout = create_pipeline_layout(gpu, result.shader_stages, ..set_layout)
+    mappings := [32] vk.DescriptorSetAndBindingMappingEXT {}
+    heap_mapping: vk.ShaderDescriptorSetAndBindingMappingInfoEXT
+    if heap {
+        heap_mapping = generate_heap_mappings(compute.parsed.resource_mask, compute.parsed.resource_types, size_of(vk.DeviceAddress), descriptor_size, sampler_size, &mappings)
+    } else {
+        result.layout = create_pipeline_layout(gpu, result.shader_stages, ..set_layout)
+    }
     
     create_info := vk.ComputePipelineCreateInfo {
         sType = .COMPUTE_PIPELINE_CREATE_INFO,
+        
+        pNext = heap ? &vk.PipelineCreateFlags2CreateInfo {
+            sType = .PIPELINE_CREATE_FLAGS_2_CREATE_INFO,
+            flags = { .DESCRIPTOR_HEAP_EXT },
+        } : nil,
+        
         layout = result.layout,
         stage  = { 
             sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
@@ -866,6 +892,8 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, set_layout: ..v
                 sType    = .SHADER_MODULE_CREATE_INFO,
                 codeSize = len(compute.bytes),
                 pCode    = cast(^u32) &compute.bytes[0],
+                
+                pNext = heap ? &heap_mapping : nil,
             },
         },
     }
@@ -875,36 +903,35 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, set_layout: ..v
     return result
 }
 
-gpu_create_graphics_pipeline :: proc (gpu: ^Gpu, vertex, fragment: Shader, info: Raster_Desc) -> Pipeline {
+gpu_create_graphics_pipeline :: proc (gpu: ^Gpu, vertex, fragment: Shader, info: Raster_Desc, descriptor_size, sampler_size: u32) -> Pipeline {
     assert(vertex.stage   == .VERTEX)
     assert(fragment.stage == .FRAGMENT)
     
     result: Pipeline
-    gpu_create_graphics_pipeline_common(gpu, &result, info, vertex, fragment)
+    gpu_create_graphics_pipeline_common(gpu, &result, info, descriptor_size, sampler_size, vertex, fragment)
     
     return result
 }
 
 gpu_create_graphics_meshlet_pipeline :: proc { gpu_create_graphics_meshlet_pipeline_tmp, gpu_create_graphics_meshlet_pipeline_mp }
 
-// @todo(viktor): get rid of the set_layout which should only be the textures actually, just make it the texture_heap a parameter
-gpu_create_graphics_meshlet_pipeline_tmp :: proc (gpu: ^Gpu, task, mesh, frag: Shader, info: Raster_Desc, set_layout: vk.DescriptorSetLayout) -> Pipeline {
+gpu_create_graphics_meshlet_pipeline_tmp :: proc (gpu: ^Gpu, task, mesh, frag: Shader, info: Raster_Desc, descriptor_size, sampler_size: u32) -> Pipeline {
     assert(task.stage == .TASK_EXT)
     assert(mesh.stage == .MESH_EXT)
     assert(frag.stage == .FRAGMENT)
     
     result: Pipeline
-    gpu_create_graphics_pipeline_common(gpu, &result, info, task, mesh, frag, set_layout = set_layout)
+    gpu_create_graphics_pipeline_common(gpu, &result, info, descriptor_size, sampler_size, task, mesh, frag)
     
     return result
 }
 
-gpu_create_graphics_meshlet_pipeline_mp :: proc (gpu: ^Gpu, mesh, frag: Shader, info: Raster_Desc) -> Pipeline {
+gpu_create_graphics_meshlet_pipeline_mp :: proc (gpu: ^Gpu, mesh, frag: Shader, info: Raster_Desc, descriptor_size, sampler_size: u32) -> Pipeline {
     assert(mesh.stage == .MESH_EXT)
     assert(frag.stage == .FRAGMENT)
     
     result: Pipeline
-    gpu_create_graphics_pipeline_common(gpu, &result, info, mesh, frag)
+    gpu_create_graphics_pipeline_common(gpu, &result, info, descriptor_size, sampler_size, mesh, frag)
     
     return result
 }
@@ -929,16 +956,31 @@ create_pipeline_layout :: proc (gpu: ^Gpu, stage_flags: vk.ShaderStageFlags, set
     return result
 }
 
-gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info: Raster_Desc, shaders: ..Shader, set_layout: vk.DescriptorSetLayout = 0) {
+gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info: Raster_Desc, descriptor_size, sampler_size: u32, shaders: ..Shader, heap := false) {
+    for &shader in shaders {
+        result.shader_stages += { shader.stage }
+    }
+    
+    // if we dont use bindings and just want to pass pointers to buffers, can we also avoid bindings images finally?
+    result.resource_types, result.resource_mask = gather_descriptor_resources(..shaders)
+    
+    mappings := [32] vk.DescriptorSetAndBindingMappingEXT {}
+    heap_mapping: vk.ShaderDescriptorSetAndBindingMappingInfoEXT
+    if heap {
+        heap_mapping = generate_heap_mappings(result.resource_mask, result.resource_types, size_of(vk.DeviceAddress), descriptor_size, sampler_size, &mappings)
+    } else {
+        result.layout = create_pipeline_layout(gpu, result.shader_stages)
+    }
+    
     shader_stages: [dynamic; 4] vk.PipelineShaderStageCreateInfo
     module_infos:  [dynamic; 4] vk.ShaderModuleCreateInfo
-    for shader in shaders {
-        result.shader_stages += { shader.stage }
-        
+    for &shader in shaders {
         append(&module_infos, vk.ShaderModuleCreateInfo {
             sType = .SHADER_MODULE_CREATE_INFO, 
             codeSize = len(shader.bytes), 
             pCode    = cast(^u32) raw_data(shader.bytes),
+            
+            pNext = heap ? &heap_mapping : nil,
         })
         
         append(&shader_stages, vk.PipelineShaderStageCreateInfo{ 
@@ -949,8 +991,6 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
         })
     }
     
-    result.layout = create_pipeline_layout(gpu, result.shader_stages, set_layout)
-        
     dynamic_states := [] vk.DynamicState { .VIEWPORT, .SCISSOR, .LINE_WIDTH }
     
     color_formats: [dynamic; 32] Format
@@ -1002,10 +1042,14 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
     create_info := vk.GraphicsPipelineCreateInfo {
         sType = .GRAPHICS_PIPELINE_CREATE_INFO,
         
-        flags = { .DESCRIPTOR_BUFFER_EXT },
-        
         pNext = &vk.PipelineRenderingCreateInfo {
             sType = .PIPELINE_RENDERING_CREATE_INFO,
+            
+            // pNext = &vk.PipelineCreateFlags2CreateInfo {
+            //     sType = .PIPELINE_CREATE_FLAGS_2_CREATE_INFO,
+            //     flags = { .DESCRIPTOR_HEAP_EXT },
+            // },
+            
             colorAttachmentCount    = auto_cast len(color_formats),
             pColorAttachmentFormats = raw_data(&color_formats),
             depthAttachmentFormat   = info.depth_format,
@@ -1015,7 +1059,7 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
         stageCount = auto_cast len(shader_stages),
         pStages    = &shader_stages[0],
         
-        layout = result.layout,
+        layout = result.layout, // @todo remove this
         
         pInputAssemblyState = &vk.PipelineInputAssemblyStateCreateInfo {
             sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
@@ -1389,22 +1433,79 @@ gpu_end_render_pass :: proc (cmd: vk.CommandBuffer) {
 // void gpuDrawMeshlets(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, uvec3 dim);
 // void gpuDrawMeshletsIndirect(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, void *dimGpu);
 
-gpu_dispatch :: proc (cmd: vk.CommandBuffer, push_constant: GpuAddress($T), group_size: uv3) {
-    gpu_push_constants(cmd, push_constant)
+// @api we may want to allow the pipeline to have a push constant per stage. For that we need the shaders to each declare the push data to be N pointers to their respective data. Then the pipeline layout and this command both need to declare the correct size of 3 pointers and their offsets in the push data.
+gpu_push_constants :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, push_constant: GpuAddress($T), heap := false) {
+    push_constant := push_constant
+    if heap {
+         info := vk.PushDataInfoEXT {
+            sType = .PUSH_DATA_INFO_EXT,
+            data  = { address = &push_constant.p, size = size_of(push_constant.p) },
+         }
+         vk.CmdPushDataEXT(cmd, &info)
+    } else {
+        vk.CmdPushConstants(cmd, the_bound_pipeline.layout, the_bound_pipeline.shader_stages, 0, size_of(push_constant.p), &push_constant.p)
+    }
+}
+// @cleanup
+gpu_push_descriptors :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, updates: [] DescriptorUpdateData, shaders: [] Shader) {
+    // @waste
+    resource_types, resource_mask := gather_descriptor_resources(..shaders)
+    resource_count := cast(u32) card(resource_mask)
+    
+    resource_index: u32
+    sampler_index:  u32
+    
+    for index in cast(u32) 0..<32 {
+        if index in resource_mask {
+            type := resource_types[index]
+            
+            if type == .STORAGE_IMAGE || type == .SAMPLED_IMAGE {
+                u := updates[index].image
+                descriptor_bytes: Descriptor
+                descriptor_size := frame_descriptor.heap.resource_size
+                get_descriptor_image(frame_descriptor.gpu, u.image.image, u.image.format, u.image.last_layout, u.mip_base, u.mip_count, type, &descriptor_bytes, descriptor_size)
+                
+                copy(frame_descriptor.heap.resources_cpu[frame_descriptor.resource_offset + index * descriptor_size:], descriptor_bytes[:descriptor_size])
+                
+                resource_index += 1
+            } else if type == .SAMPLER {
+                info := updates[index].sampler
+                descriptor_bytes: Descriptor
+                
+                sampler_size := frame_descriptor.heap.sampler_size
+                
+                {
+                    descriptor := &descriptor_bytes
+                    range := vk.HostAddressRangeEXT { address = raw_data(descriptor), size = cast(int) sampler_size }
+                    vk.WriteSamplerDescriptorsEXT(frame_descriptor.gpu.device, 1, &info, &range)
+                }
+                
+                copy(frame_descriptor.heap.samplers_cpu[frame_descriptor.sampler_offset + sampler_index * sampler_size:], descriptor_bytes[:sampler_size])
+                sampler_index += 1
+            } else {
+                unreachable()
+            }
+        }
+    }
+    
+    info := vk.PushDataInfoEXT {
+        sType = .PUSH_DATA_INFO_EXT,
+        data = { address = &frame_descriptor.resource_offset, size = size_of(frame_descriptor.resource_offset) },
+        offset = size_of(vk.DeviceAddress),
+    }
+    vk.CmdPushDataEXT(cmd, &info)
+}
+
+gpu_dispatch :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, push_constant: GpuAddress($T), group_size: uv3, heap := false) {
+    gpu_push_constants(cmd, frame_descriptor, push_constant, heap)
     vk.CmdDispatch(cmd, **group_size)
 }
 
-gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, commands: vk.DeviceAddress, count: GpuAddress(u32), max_count: u32, stride: u32, command_offset: umm, push_constant: GpuAddress($T)) {
+gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, commands: vk.DeviceAddress, count: GpuAddress(u32), max_count: u32, stride: u32, command_offset: umm, push_constant: GpuAddress($T)) {
     // @speed 
     commands, commands_base_offset := gpu_reflect_get_buffer(commands)
     count,    count_offset         := gpu_reflect_get_buffer(count.p)
     
-    gpu_push_constants(cmd, push_constant)
+    gpu_push_constants(cmd, frame_descriptor, push_constant)
     vk.CmdDrawMeshTasksIndirectCountEXT(cmd, commands, commands_base_offset + cast(vk.DeviceSize) command_offset, count, count_offset, max_count, stride)
-}
-
-// @api we may want to allow the pipeline to have a push constant per stage. For that we need the shaders to each declare the push data to be N pointers to their respective data. Then the pipeline layout and this command both need to declare the correct size of 3 pointers and their offsets in the push data.
-gpu_push_constants :: proc (cmd: vk.CommandBuffer, push_constant: GpuAddress($T)) {
-    push_constant := push_constant
-    vk.CmdPushConstants(cmd, the_bound_pipeline.layout, the_bound_pipeline.shader_stages, 0, size_of(push_constant.p), &push_constant.p)
 }

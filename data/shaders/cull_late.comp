@@ -15,10 +15,13 @@ layout(push_constant) uniform Push_Data {
 layout(binding = 0) uniform texture2D depth_pyramid;
 layout(binding = 1) uniform sampler   depth_sampler;
 
+
+////////////////////////////////////////////////
 // Based on this paper: 
 //     2D Polyhedral Bounds of a Clipped, Perspective-Projected 3D Sphere. Michael Mara, Morgan McGuire. 2013
 //     https://jcgt.org/published/0002/02/05/paper.pdf
 // :ReversedZ: we assume a reversed_z projection matrix and can use that to simplify the matrix multiplications
+
 bool project_sphere_onto_screen(vec3 view_center, float radius, float p00, float p11, float near_z, out vec4 result) {
     // @todo we remove the handling of clipped boxes, so we need to early out in the shader in these cases and assume that we cannot cull the mesh
     if (view_center.z < radius + near_z) {
