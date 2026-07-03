@@ -870,10 +870,13 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, descriptor_size
     result.bind_point    = .COMPUTE
     result.shader_stages = { .COMPUTE }
     
+    result.resource_mask  = compute.parsed.resource_mask
+    result.resource_types = compute.parsed.resource_types
+    
     mappings := [32] vk.DescriptorSetAndBindingMappingEXT {}
     heap_mapping: vk.ShaderDescriptorSetAndBindingMappingInfoEXT
     if heap {
-        heap_mapping = generate_heap_mappings(compute.parsed.resource_mask, compute.parsed.resource_types, sampler_hack_names, size_of(vk.DeviceAddress), descriptor_size, sampler_size, &mappings)
+        heap_mapping = generate_heap_mappings(result.resource_mask, result.resource_types, sampler_hack_names, size_of(vk.DeviceAddress), descriptor_size, sampler_size, &mappings)
     } else {
         result.layout = create_pipeline_layout(gpu, result.shader_stages, ..set_layout)
     }
@@ -1436,15 +1439,14 @@ gpu_end_render_pass :: proc (cmd: vk.CommandBuffer) {
 // void gpuDrawMeshlets(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, uvec3 dim);
 // void gpuDrawMeshletsIndirect(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, void *dimGpu);
 
-push_descriptor_heap :: proc (frame_descriptor: ^Frame_Descriptor, updates: [] DescriptorUpdateData, shaders: [] Shader) -> u32 {
-    // @waste
-    resource_types, resource_mask := gather_descriptor_resources(..shaders)
+push_descriptor_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, frame_descriptor: ^Frame_Descriptor, updates: [] DescriptorUpdateData) -> u32 {
+    resource_types, resource_mask := the_bound_pipeline.resource_types, the_bound_pipeline.resource_mask
     resource_count := cast(u32) card(resource_mask)
     
     descriptor_count := card(resource_mask)
     
     assert(frame_descriptor.descriptor_offset + auto_cast descriptor_count <= frame_descriptor.descriptor_end)
-    descriptor_size := frame_descriptor.heap.resource_size
+    descriptor_size := heap.resource_size
     
     result := frame_descriptor.descriptor_offset
     for index in cast(u32) 0..<32 {
@@ -1460,7 +1462,7 @@ push_descriptor_heap :: proc (frame_descriptor: ^Frame_Descriptor, updates: [] D
             case .SAMPLED_IMAGE, .STORAGE_IMAGE:
                 image := info.image
                 
-                get_descriptor_image(frame_descriptor.gpu, image.image, image.format, image.last_layout, info.mip_base, info.mip_count, type, &descriptor, descriptor_size)
+                get_descriptor_image(gpu, image.image, image.format, image.last_layout, info.mip_base, info.mip_count, type, &descriptor, descriptor_size)
             
             case .UNIFORM_BUFFER, .STORAGE_BUFFER:
                 unimplemented()
@@ -1481,7 +1483,7 @@ push_descriptor_heap :: proc (frame_descriptor: ^Frame_Descriptor, updates: [] D
                 unreachable()
             }
             
-            copy(frame_descriptor.heap.resources_cpu[frame_descriptor.descriptor_offset * descriptor_size:], descriptor[:descriptor_size])
+            copy(heap.resources_cpu[frame_descriptor.descriptor_offset * descriptor_size:], descriptor[:descriptor_size])
             frame_descriptor.descriptor_offset += 1
         }
     }
@@ -1504,8 +1506,8 @@ gpu_push_constants :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Desc
 }
 
 // @cleanup
-gpu_push_descriptors :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, updates: [] DescriptorUpdateData, shaders: [] Shader) {
-    descriptor_offset := push_descriptor_heap(frame_descriptor, updates, shaders)
+gpu_push_descriptors :: proc (cmd: vk.CommandBuffer, gpu: ^Gpu, heap: ^Descriptor_Heap, frame_descriptor: ^Frame_Descriptor, updates: [] DescriptorUpdateData) {
+    descriptor_offset := push_descriptor_heap(gpu, heap, frame_descriptor, updates)
     
     info := vk.PushDataInfoEXT {
         sType = .PUSH_DATA_INFO_EXT,

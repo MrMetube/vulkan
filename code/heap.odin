@@ -26,12 +26,9 @@ Descriptor_Heap :: struct {
 Frame_Descriptor :: struct {
     descriptor_offset: u32,
     descriptor_end:    u32,
-    sampler_offset: u32,
-    sampler_end:    u32,
-    
-    gpu: ^Gpu,
-    heap: ^Descriptor_Heap,
 }
+
+Descriptor :: distinct [128] u8
 
 create_descriptor_heap :: proc (gpu: ^Gpu) -> Descriptor_Heap {
     resource_count      := cast(vk.DeviceSize) DescriptorStaticLimit + MaxFramesInFlight * DescriptorPerFrameLimit
@@ -99,8 +96,6 @@ gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: ^Descriptor_Heap) {
     vk.CmdBindSamplerHeapEXT(cmd,  &sampler_info)
     vk.CmdBindResourceHeapEXT(cmd, &resource_info)
 }
-
-Descriptor :: distinct [128] u8
 
 get_descriptor :: proc { get_descriptor_image, get_descriptor_memory, get_descriptor_sampler }
 // @todo switch to .GENERAL layout for all images

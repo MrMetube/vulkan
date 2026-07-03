@@ -490,10 +490,6 @@ main :: proc () {
         frame_descriptor: Frame_Descriptor
         frame_descriptor.descriptor_offset = DescriptorStaticLimit            + cast(u32) frame_index * DescriptorPerFrameLimit
         frame_descriptor.descriptor_end    = frame_descriptor.descriptor_offset +                     1 * DescriptorPerFrameLimit
-        frame_descriptor.sampler_offset  = 0
-        frame_descriptor.sampler_end     = DescriptorSamplerLimit
-        frame_descriptor.gpu = &gpu
-        frame_descriptor.heap = &descriptor_heap
         
         ////////////////////////////////////////////////
         
@@ -774,7 +770,7 @@ main :: proc () {
                     })
                     append(&updates, DescriptorUpdateData {})
                     append(&updates, DescriptorUpdateData { stuff.depth_pyramid, cast(u32) mip_level, 1 })
-                    gpu_push_descriptors(cmd, &frame_descriptor, updates[:], { depth_reduce_shader })
+                    gpu_push_descriptors(cmd, &gpu, &descriptor_heap, &frame_descriptor, updates[:])
                     
                     depth_globals_cpu, depth_globals_gpu := bump_allocate_type(bump, Depth_Globals)
                     depth_globals_cpu^ = Depth_Globals { size = cast(v2) mip_size }
@@ -861,7 +857,7 @@ main :: proc () {
                         { stuff.depth_pyramid, 0, vk.REMAINING_MIP_LEVELS },
                         { },
                     }
-                    push_descriptor_heap(&frame_descriptor, updates[:], { late_cull_shader })
+                    push_descriptor_heap(&gpu, &descriptor_heap, &frame_descriptor, updates[:])
                     
                     gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)))
                     
