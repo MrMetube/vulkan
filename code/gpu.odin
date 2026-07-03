@@ -672,6 +672,43 @@ gpu_allocate_texture :: proc (gpu: ^Gpu, desc: Texture_Desc) -> Image {
     return result
 }
 
+select_memory_type_and_allocate :: proc (gpu: ^Gpu, requirements: vk.MemoryRequirements, flags: vk.MemoryPropertyFlags, add_device_address_flag := false) -> vk.DeviceMemory {
+    properties := gpu.memory_properties
+    
+    selected_memory_type_index: u32
+    select: {
+        set := transmute(bit_set[0..=31; u32]) requirements.memoryTypeBits
+        
+        for type, i in properties.memoryTypes[:properties.memoryTypeCount] {
+            if i in set && flags <= type.propertyFlags {
+                selected_memory_type_index = cast(u32) i
+                break select
+            }
+        }
+        
+        assert(false, "No compatible memory type found")
+    }
+    
+    allocate_info := vk.MemoryAllocateInfo {
+        sType = .MEMORY_ALLOCATE_INFO,
+        allocationSize  = requirements.size,
+        memoryTypeIndex = selected_memory_type_index,
+    }
+    
+    info_for_device_address := vk.MemoryAllocateFlagsInfo {
+        sType = .MEMORY_ALLOCATE_FLAGS_INFO,
+        flags = { .DEVICE_ADDRESS },
+    }
+    if add_device_address_flag {
+        allocate_info.pNext = &info_for_device_address
+    }
+    
+    memory: vk.DeviceMemory
+    check(vk.AllocateMemory(gpu.device, &allocate_info, nil, &memory))
+    
+    return memory
+}
+
 get_image_aspect_mask :: proc (format: vk.Format) -> vk.ImageAspectFlags {
     // :Stencil: add .STENCIL to the aspect mask
     result := vk.ImageAspectFlags { .COLOR }
@@ -1358,61 +1395,22 @@ gpu_end_render_pass :: proc (cmd: vk.CommandBuffer) {
 // void gpuDrawMeshlets(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, uvec3 dim);
 // void gpuDrawMeshletsIndirect(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, void *dimGpu);
 
-gpu_dispatch :: proc (command_buffer: vk.CommandBuffer, push_constant: GpuAddress($T), group_size: uv3) {
-    assert(the_bound_pipeline.pipeline != 0, "no pipeline was bound")
-    
-    push_constant := push_constant
-    vk.CmdPushConstants(command_buffer, the_bound_pipeline.layout, the_bound_pipeline.shader_stages, 0, size_of(push_constant.p), &push_constant.p)
-    
-    vk.CmdDispatch(command_buffer, **group_size)
+gpu_dispatch :: proc (cmd: vk.CommandBuffer, push_constant: GpuAddress($T), group_size: uv3) {
+    gpu_push_constants(cmd, push_constant)
+    vk.CmdDispatch(cmd, **group_size)
 }
 
-gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, commands: vk.DeviceAddress, count: GpuAddress(u32), max_count: u32, stride: u32, command_offset: umm) {
+gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, commands: vk.DeviceAddress, count: GpuAddress(u32), max_count: u32, stride: u32, command_offset: umm, push_constant: GpuAddress($T)) {
     // @speed 
     commands, commands_base_offset := gpu_reflect_get_buffer(commands)
     count,    count_offset         := gpu_reflect_get_buffer(count.p)
+    
+    gpu_push_constants(cmd, push_constant)
     vk.CmdDrawMeshTasksIndirectCountEXT(cmd, commands, commands_base_offset + cast(vk.DeviceSize) command_offset, count, count_offset, max_count, stride)
 }
 
-
-
-
-////////////////////////////////////////////////
-// @cleanup @placement
-
-select_memory_type_and_allocate :: proc (gpu: ^Gpu, requirements: vk.MemoryRequirements, flags: vk.MemoryPropertyFlags, add_device_address_flag := false) -> vk.DeviceMemory {
-    properties := gpu.memory_properties
-    
-    selected_memory_type_index: u32
-    select: {
-        set := transmute(bit_set[0..=31; u32]) requirements.memoryTypeBits
-        
-        for type, i in properties.memoryTypes[:properties.memoryTypeCount] {
-            if i in set && flags <= type.propertyFlags {
-                selected_memory_type_index = cast(u32) i
-                break select
-            }
-        }
-        
-        assert(false, "No compatible memory type found")
-    }
-    
-    allocate_info := vk.MemoryAllocateInfo {
-        sType = .MEMORY_ALLOCATE_INFO,
-        allocationSize  = requirements.size,
-        memoryTypeIndex = selected_memory_type_index,
-    }
-    
-    info_for_device_address := vk.MemoryAllocateFlagsInfo {
-        sType = .MEMORY_ALLOCATE_FLAGS_INFO,
-        flags = { .DEVICE_ADDRESS },
-    }
-    if add_device_address_flag {
-        allocate_info.pNext = &info_for_device_address
-    }
-    
-    memory: vk.DeviceMemory
-    check(vk.AllocateMemory(gpu.device, &allocate_info, nil, &memory))
-    
-    return memory
+// @api we may want to allow the pipeline to have a push constant per stage. For that we need the shaders to each declare the push data to be N pointers to their respective data. Then the pipeline layout and this command both need to declare the correct size of 3 pointers and their offsets in the push data.
+gpu_push_constants :: proc (cmd: vk.CommandBuffer, push_constant: GpuAddress($T)) {
+    push_constant := push_constant
+    vk.CmdPushConstants(cmd, the_bound_pipeline.layout, the_bound_pipeline.shader_stages, 0, size_of(push_constant.p), &push_constant.p)
 }

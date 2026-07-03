@@ -738,9 +738,11 @@ main :: proc () {
                     gpu_set_pipeline(cmd, meshlet_pipeline)
                         gpu_set_active_texture_head(cmd, &texture_heap, 0)
                         
-                        vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
-                        
-                        gpu_draw_meshlets_indirect_count(cmd, draw_command_gpu.p, draw_command_count_gpu, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command))
+                        gpu_draw_meshlets_indirect_count(cmd, 
+                            draw_command_gpu.p, draw_command_count_gpu, 
+                            auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command),
+                            draw_globals_gpu,
+                        )
                     
                     gpu_profile_zone_end()
                     gpu_labeled_region_end(cmd)
@@ -893,9 +895,11 @@ main :: proc () {
                     gpu_set_pipeline(cmd, meshlet_pipeline)
                         gpu_set_active_texture_head(cmd, &texture_heap, 0)
                         
-                        vk.CmdPushConstants(cmd, meshlet_pipeline.layout, meshlet_pipeline.shader_stages, 0, size_of(vk.DeviceAddress), &draw_globals_gpu)
-                        
-                        gpu_draw_meshlets_indirect_count(cmd, draw_command_gpu.p, draw_command_count_gpu, auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command))
+                        gpu_draw_meshlets_indirect_count(cmd, 
+                            draw_command_gpu.p, draw_command_count_gpu, 
+                            auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command),
+                            draw_globals_gpu,
+                        )
                     
                 gpu_end_render_pass(cmd)
                 
