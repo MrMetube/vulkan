@@ -664,6 +664,7 @@ gpu_allocate_texture :: proc (gpu: ^Gpu, desc: Texture_Desc) -> Image {
     
     result: Image
     result.format = desc.format
+    result.size = desc.size
     check(vk.CreateImage(gpu.device, &create_info, nil, &result.image))
     
     requirements: vk.MemoryRequirements
@@ -1171,14 +1172,13 @@ gpu_copy :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: any, source: pm
     unimplemented()
 }
 
-// @api size is redundant here and for gpu_copy_to_texture, maybe the Image struct should just store it for anyone to use
-gpu_copy_to_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: Image, source: vk.DeviceAddress, size: uv3) {
+gpu_copy_to_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: Image, source: vk.DeviceAddress) {
     alloc := gpu_reflect_get_allocation(source)
     
     region := vk.BufferImageCopy {
         bufferOffset = alloc.offset,
         imageSubresource = { aspectMask = { .COLOR }, mipLevel = 0, layerCount = 1 },
-        imageExtent      = { **size },
+        imageExtent      = { **destination.size },
     }
     
     vk.CmdCopyBufferToImage(cmd, alloc.buffer, destination.image, destination.last_layout, 1, &region)

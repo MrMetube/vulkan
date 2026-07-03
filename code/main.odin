@@ -38,7 +38,6 @@ Stuff_With_The_Same_Lifetime_As_The_Swapchain :: struct {
     
     depth_sampler: vk.Sampler,
     depth_pyramid: Image,
-    depth_pyramid_size: uv2,
     depth_pyramid_mip_sizes: [dynamic; 16] uv2,
 }
 
@@ -282,7 +281,7 @@ main :: proc () {
             
             gpu_image_barrier(cmd, &texture, {}, {}, .UNDEFINED, { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
             
-            gpu_copy_to_texture(&gpu, cmd, texture, gpu_data, description.size)
+            gpu_copy_to_texture(&gpu, cmd, texture, gpu_data)
             
             gpu_image_barrier_from_last_transition(cmd, &texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL) 
         }
@@ -620,7 +619,7 @@ main :: proc () {
             p11 = screen_from_view[1,1],
             near_z = near_z,
             
-            pyramid_size = cast(v2) stuff.depth_pyramid_size,
+            pyramid_size = cast(v2) stuff.depth_pyramid.size.xy,
         }
         
         draw_data.screen_from_view = screen_from_view
@@ -917,19 +916,19 @@ main :: proc () {
                 vk.CmdCopyImage(cmd, stuff.color_buffer.image, stuff.color_buffer.last_layout, destination.image, destination.last_layout, 1, &vk.ImageCopy {
                     srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
-                    extent         = { gpu.swapchain_size.x, gpu.swapchain_size.y, 1 },
+                    extent         = { **destination.size },
                 })
             } else {
                 source := stuff.depth_pyramid
                 
                 mip_size  := cast(iv2) stuff.depth_pyramid_mip_sizes[debug.display_pyramid_mip_level]
-                dest_size := cast(iv2) gpu.swapchain_size
+                dest_size := cast(iv3) destination.size
                 
                 vk.CmdBlitImage(cmd, source.image, source.last_layout, destination.image, destination.last_layout, 1, &vk.ImageBlit {
                     srcSubresource = { aspectMask = { .COLOR }, layerCount = 1, mipLevel = cast(u32) debug.display_pyramid_mip_level },
                     dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
-                    srcOffsets = { {0, 0, 0}, {mip_size.x, mip_size.y,   1}},
-                    dstOffsets = { {0, 0, 0}, {dest_size.x, dest_size.y, 1}},
+                    srcOffsets = { {0, 0, 0}, { mip_size.x, mip_size.y, 1 }},
+                    dstOffsets = { {0, 0, 0}, { **dest_size }},
                 }, .NEAREST)
             }
             
@@ -1100,7 +1099,6 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_S
     // Each mip level is a quarter of the size of the previous, as we half both dimensions each time.
     mip_count := 1 + max(integer_log2(pyramid_size.x), integer_log2(pyramid_size.y))
     
-    stuff.depth_pyramid_size = pyramid_size
     stuff.depth_pyramid = gpu_allocate_texture(gpu, default_texture_desc(size = {pyramid_size.x, pyramid_size.y, 1}, format = .R32_SFLOAT, mip_count = mip_count, usage = { .SAMPLED, .STORAGE, .TRANSFER_SRC }))
     stuff.depth_buffer = gpu_allocate_texture(gpu, default_texture_desc(size = {gpu.swapchain_size.x, gpu.swapchain_size.y, 1}, format = stuff.depth_buffer.format, usage = { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED }))
     stuff.color_buffer = gpu_allocate_texture(gpu, default_texture_desc(size = {gpu.swapchain_size.x, gpu.swapchain_size.y, 1}, format = gpu.swapchain_format,      usage = { .COLOR_ATTACHMENT, .TRANSFER_SRC }))

@@ -32,10 +32,11 @@ Shader :: struct {
 Shader_Resource_Mask :: bit_set[cast(u32) 0..<32; u32]
 
 Image :: struct {
-    format: vk.Format,
     image:  vk.Image,
+    format: vk.Format,
     view:   vk.ImageView, // only required by gpu_begin_render_pass
     memory: vk.DeviceMemory,
+    size:   uv3,
     
     last_stage:  vk.PipelineStageFlags2,
     last_access: vk.AccessFlags2,
@@ -134,6 +135,7 @@ gpu_recreate_swapchain_if_needed :: proc (gpu: ^Gpu) -> (can_render: bool) {
     check(vk.GetSwapchainImagesKHR(gpu.device, gpu.swapchain, &image_count, &images[0]))
     for image, index in images {
         gpu.swapchain_images[index].image = image
+        gpu.swapchain_images[index].size  = { gpu.swapchain_size.x, gpu.swapchain_size.y, 1 }
     }
     
     gpu.swapchain_state = .Was_Resized
