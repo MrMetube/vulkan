@@ -5,11 +5,8 @@ import vk "../lib/vulkan"
 
 Pipeline :: struct {
     pipeline: vk.Pipeline,
-    layout:   vk.PipelineLayout, // @cleanup
-    update_template: vk.DescriptorUpdateTemplate,
     
     bind_point:    vk.PipelineBindPoint,
-    shader_stages: vk.ShaderStageFlags,
     
     resource_types: [32] vk.DescriptorType,
     resource_mask:  Shader_Resource_Mask,
@@ -222,42 +219,6 @@ gather_descriptor_resources :: proc (shaders: ..Shader) -> ([32] vk.DescriptorTy
     return resource_types, resource_mask
 }
 
-// @todo if we reach true bindless these functions and most of the Shader.parsed can gladly be deleted
-create_descriptor_set_layout :: proc (device: vk.Device, shaders: ..Shader) -> vk.DescriptorSetLayout {
-    bindings: [dynamic; 32] vk.DescriptorSetLayoutBinding
-    resource_types, resource_mask := gather_descriptor_resources(..shaders)
-    
-    for i in resource_mask {
-        binding := append_into(&bindings)
-        
-        binding^ = {
-            binding         = i,
-            
-            descriptorType  = resource_types[i],
-            descriptorCount = 1,
-        }
-        
-        for shader in shaders {
-            if i in shader.parsed.resource_mask {
-                binding.stageFlags += { shader.stage }
-            }
-        }
-    }
-    
-    create_info := vk.DescriptorSetLayoutCreateInfo {
-        sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        flags        = { .PUSH_DESCRIPTOR },
-        bindingCount = auto_cast len(bindings),
-        pBindings    = raw_data(bindings[:]),
-    }
-    
-    result: vk.DescriptorSetLayout
-    
-    check(vk.CreateDescriptorSetLayout(device, &create_info, nil, &result))
-    
-    return result
-}
-
 generate_heap_mappings :: proc (resource_mask: Shader_Resource_Mask, resource_types: [32] vk.DescriptorType, resource_names: [] string, push_constant_size: u32, descriptor_size, sampler_size: u32, mappings: ^[32] vk.DescriptorSetAndBindingMappingEXT) -> vk.ShaderDescriptorSetAndBindingMappingInfoEXT {
     mapping_offset: u32
     descriptor_offset: u32
@@ -342,42 +303,6 @@ generate_heap_mappings :: proc (resource_mask: Shader_Resource_Mask, resource_ty
         sType = .SHADER_DESCRIPTOR_SET_AND_BINDING_MAPPING_INFO_EXT,
         mappingCount = mapping_offset,
         pMappings    = &mappings[0],
-    }
-    
-    return result
-}
-
-create_update_template :: proc (device: vk.Device, bind_point: vk. PipelineBindPoint, layout: vk.PipelineLayout, shaders: ..Shader) -> vk.DescriptorUpdateTemplate {
-    entries: [dynamic; 32] vk.DescriptorUpdateTemplateEntry
-    resource_types, resource_mask := gather_descriptor_resources(..shaders)
-    
-    for i in cast(u32) 0..<32 {
-        if i in resource_mask {
-            entry := append_into(&entries)
-            
-            entry^ = {
-                dstBinding      = i,
-                descriptorType  = resource_types[i],
-                descriptorCount = 1,
-                offset          = cast(int) i * size_of(DescriptorUpdateData),
-                stride          = size_of(DescriptorUpdateData),
-            }
-        }
-    }
-    
-    result: vk.DescriptorUpdateTemplate
-    
-    if len(entries) > 0 {
-        create_info := vk.DescriptorUpdateTemplateCreateInfo {
-            sType = .DESCRIPTOR_UPDATE_TEMPLATE_CREATE_INFO,
-            pipelineBindPoint = bind_point,
-            pipelineLayout    = layout,
-            templateType      = .PUSH_DESCRIPTORS,
-            descriptorUpdateEntryCount = cast(u32) len(entries),
-            pDescriptorUpdateEntries   = &entries[0],
-        }
-        
-        check(vk.CreateDescriptorUpdateTemplate(device, &create_info, nil, &result))
     }
     
     return result

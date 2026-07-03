@@ -97,7 +97,7 @@ gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: ^Descriptor_Heap) {
     vk.CmdBindResourceHeapEXT(cmd, &resource_info)
 }
 
-get_descriptor :: proc { get_descriptor_image, get_descriptor_memory, get_descriptor_sampler }
+get_descriptor :: proc { get_descriptor_image, get_descriptor_buffer, get_descriptor_sampler }
 // @todo switch to .GENERAL layout for all images
 get_descriptor_image :: proc (gpu: ^Gpu, image: vk.Image, format: vk.Format, layout: vk.ImageLayout, mip_base: u32, mip_count: u32, type: vk.DescriptorType, descriptor: ^Descriptor, descriptor_size: u32) {
     aspect_mask := get_image_aspect_mask(format)
@@ -124,7 +124,7 @@ get_descriptor_image :: proc (gpu: ^Gpu, image: vk.Image, format: vk.Format, lay
     check(vk.WriteResourceDescriptorsEXT(gpu.device, 1, &info, &range))
 }
 
-get_descriptor_memory :: proc (gpu: ^Gpu, address: vk.DeviceAddress, size: vk.DeviceSize, type: vk.DescriptorType, descriptor: ^Descriptor, descriptor_size: u32) {
+get_descriptor_buffer :: proc (gpu: ^Gpu, address: vk.DeviceAddress, size: vk.DeviceSize, type: vk.DescriptorType, descriptor: ^Descriptor, descriptor_size: u32) {
     buffer_info := vk.DeviceAddressRangeEXT { address = address, size = size }
     
     info := vk.ResourceDescriptorInfoEXT {

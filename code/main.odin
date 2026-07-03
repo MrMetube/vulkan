@@ -166,7 +166,7 @@ main :: proc () {
     defer sdl.Quit()
     defer sdl.QuitSubSystem({ .VIDEO })
     
-    window := sdl.CreateWindow("How to Vulkan", 1280, 720, sdl.WINDOW_VULKAN | sdl.WINDOW_RESIZABLE)
+    window := sdl.CreateWindow("Vulkan Renderer", 1280, 720, sdl.WINDOW_VULKAN | sdl.WINDOW_RESIZABLE)
     check_sdl(window != nil)
     defer sdl.DestroyWindow(window)
     
@@ -188,13 +188,13 @@ main :: proc () {
     
     // @todo(viktor): draws change per frame and could also be placed in the per frame bump allocator, as we just need a gpu address
     // All the geometry data can just live in the gpu
-    vb_view,   vertex_buffer         := gpu_allocate(&gpu,      [] Vertex,       256 * Megabyte / size_of(Vertex),       memory = memory)
-    mlb_view,  meshlet_buffer        := gpu_allocate(&gpu,      [] Meshlet,      256 * Megabyte / size_of(Meshlet),      memory = memory)
-    mdb_view,  meshlet_data_buffer   := gpu_allocate(&gpu,      [] u32,          256 * Megabyte / size_of(u32),          memory = memory)
-    mb_view,   mesh_buffer           := gpu_allocate(&gpu,      [] Mesh,         256 * Megabyte / size_of(Mesh),         memory = memory)
+    vb_view,  vertex_buffer         := gpu_allocate(&gpu,      [] Vertex,       256 * Megabyte / size_of(Vertex),       memory = memory)
+    mlb_view, meshlet_buffer        := gpu_allocate(&gpu,      [] Meshlet,      256 * Megabyte / size_of(Meshlet),      memory = memory)
+    mdb_view, meshlet_data_buffer   := gpu_allocate(&gpu,      [] u32,          256 * Megabyte / size_of(u32),          memory = memory)
+    mb_view,  mesh_buffer           := gpu_allocate(&gpu,      [] Mesh,         256 * Megabyte / size_of(Mesh),         memory = memory)
     
-    db_view,   draw_buffer           := gpu_allocate(&gpu,      [] Draw,         256 * Megabyte / size_of(Draw),         memory = memory)
-    dvb_view,  draw_visibilty_buffer := gpu_allocate(&gpu,      [] u32,          256 * Megabyte / size_of(u32),          memory = memory, usage = vk.BufferUsageFlags { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
+    db_view,  draw_buffer           := gpu_allocate(&gpu,      [] Draw,         256 * Megabyte / size_of(Draw),         memory = memory)
+    dvb_view, draw_visibilty_buffer := gpu_allocate(&gpu,      [] u32,          256 * Megabyte / size_of(u32),          memory = memory, usage = vk.BufferUsageFlags { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
     
     dvb_cleared := false
     
@@ -249,9 +249,8 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     texture_count :: 3
-    textures: [1024] Image
+    textures: [texture_count] Image
     
-    // @todo(viktor): migrate the depth_pyramid image into the descriptor_heap  // @todo it seems we need two heaps? one for sampling .CombinedImageSampler, and one for writing to .StorageImage
     descriptor_heap := create_descriptor_heap(&gpu)
     
     {
@@ -265,7 +264,7 @@ main :: proc () {
         default_sampler := create_sampler(&gpu, .LINEAR, .LINEAR, anisotropy = true)
         defer_destroy(vk.DestroySampler, default_sampler)
         
-        for &texture, index in textures[:texture_count] {
+        for &texture, index in textures {
             filename := fmt.tprintf("tutorial/suzanne%v.ktx", index)
             
             loaded_texture := load_ktx_texture(filename, context.temp_allocator)
@@ -288,7 +287,7 @@ main :: proc () {
             
             gpu_image_barrier_from_last_transition(cmd, &texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL) 
         }
-            
+        
         gpu_barrier(cmd, { .ALL_TRANSFER }, { .ALL_COMMANDS }, { .descriptors })
         
         gpu_submit(gpu.transfer_queue, upload_semaphore, 1, cmd)
@@ -298,14 +297,6 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     gpu_profile_make_query_pool(gpu.device)
-    
-    ////////////////////////////////////////////////
-    
-    depth_descriptor_set_layout := create_descriptor_set_layout(gpu.device, depth_reduce_shader)
-    defer_destroy(vk.DestroyDescriptorSetLayout, depth_descriptor_set_layout)
-    
-    late_cull_descriptor_set_layout := create_descriptor_set_layout(gpu.device, late_cull_shader)
-    defer_destroy(vk.DestroyDescriptorSetLayout, late_cull_descriptor_set_layout)
     
     ////////////////////////////////////////////////
     
@@ -486,9 +477,8 @@ main :: proc () {
         bump := &frame_bump_allocators[frame_index]
         bump_free_all(bump)
         
-        // @cleanup
         frame_descriptor: Frame_Descriptor
-        frame_descriptor.descriptor_offset = DescriptorStaticLimit            + cast(u32) frame_index * DescriptorPerFrameLimit
+        frame_descriptor.descriptor_offset = DescriptorStaticLimit              + cast(u32) frame_index * DescriptorPerFrameLimit
         frame_descriptor.descriptor_end    = frame_descriptor.descriptor_offset +                     1 * DescriptorPerFrameLimit
         
         ////////////////////////////////////////////////
@@ -503,14 +493,13 @@ main :: proc () {
         
         if reload_shaders_if_needed(watchers, shader_allocator, &late_cull_shader) || !pipeline_is_valid(late_cull_pipeline) {
             destroy_pipeline(&gpu, late_cull_pipeline)
-            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, late_cull_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, heap = true, sampler_hack_names = {"", "depth_sampler"})
-            // late_cull_pipeline.update_template = create_update_template(gpu.device, .COMPUTE, late_cull_pipeline.layout, late_cull_shader)
+            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, late_cull_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, sampler_hack_names = {"", "depth_sampler"})
             fmt.printfln("Recreated late_cull_pipeline.")
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, &depth_reduce_shader) || !pipeline_is_valid(depth_pipeline) {
             destroy_pipeline(&gpu, depth_pipeline)
-            depth_pipeline = gpu_create_compute_pipeline(&gpu, depth_reduce_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, depth_descriptor_set_layout, heap = true, sampler_hack_names = {"", "depth_sampler", ""})
+            depth_pipeline = gpu_create_compute_pipeline(&gpu, depth_reduce_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, sampler_hack_names = {"", "depth_sampler", ""})
             fmt.printfln("Recreated depth_pipeline.")
         }
         
@@ -521,7 +510,7 @@ main :: proc () {
                 { format = stuff.color_buffer.format, write_mask = { .R, .G, .B, .A } },
             }
             raster_description.blendstate = &Blend_Desc{ **DefaultBlendDesc }
-            raster_description.blendstate.dst_color_factor = .ONE
+            // raster_description.blendstate.dst_color_factor = .ONE
             // :Stencil: 
             
             // @cleanup
@@ -533,7 +522,7 @@ main :: proc () {
             }
             
             destroy_pipeline(&gpu, meshlet_pipeline)
-            meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, task, mesh, frag, raster_description, descriptor_heap.resource_size, descriptor_heap.sampler_size)
+            meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, task, mesh, frag, raster_description, descriptor_heap.resource_size, descriptor_heap.sampler_size, sampler_hack_names = {"texture_sampler", "", "", ""})
             fmt.printfln("Recreated meshlet_pipeline.")
         }
         
@@ -559,15 +548,16 @@ main :: proc () {
                 draw.vertex_offset = mesh.vertex_offset
             }
         } else {
-            @(static) draws: [1] Draw
-            for &draw in draws {
-                p := v3{0, 0, -3}
+            draws := db_view[:200_000]
+            global_rotation := la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX)
+            for &draw, draw_index in draws {
+                p := v3{0, 0, -3} + {0, 0, -10 / cast(f32) (draw_index+1)} * cast(f32) (draw_index)
                 
                 draw.p           = p
-                draw.scale       = 1
-                draw.orientation = 0
+                draw.scale       = 1 / cast(f32) (draw_index+1)
+                draw.orientation = global_rotation
                 
-                draw.texture_index = 2
+                draw.texture_index = auto_cast (draw_index+1) % texture_count
                 
                 mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
                 
@@ -608,9 +598,11 @@ main :: proc () {
         gpu_profile_frame_begin(gpu.device, cmd)
         
         ////////////////////////////////////////////////
-        // Setting these outside of rendering-passes means they persist across all passes.
+        // Setting these dynamic states outside of rendering-passes means they persist across all passes.
         gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
         gpu_set_scissor(cmd,  size = gpu.swapchain_size)
+        
+        gpu_set_active_heap(cmd, &descriptor_heap)
         
         ////////////////////////////////////////////////
         
@@ -692,7 +684,6 @@ main :: proc () {
                 
                 gpu_image_barrier(cmd, &stuff.depth_pyramid, {}, {}, .UNDEFINED, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
                 
-                gpu_set_active_heap(cmd, &descriptor_heap)
                 gpu_set_pipeline(cmd, early_cull_pipeline)
                     gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(early_cull_shader, auto_cast len(draws)))
                 
@@ -724,6 +715,14 @@ main :: proc () {
                     gpu_profile_zone_begin("meshlets")
                     
                     gpu_set_pipeline(cmd, meshlet_pipeline)
+                        updates := [] DescriptorUpdateData {
+                            {},
+                            { textures[0], 0, vk.REMAINING_MIP_LEVELS },
+                            { textures[1], 0, vk.REMAINING_MIP_LEVELS },
+                            { textures[2], 0, vk.REMAINING_MIP_LEVELS },
+                        }
+                        
+                        gpu_push_descriptors(cmd, &gpu, &descriptor_heap, &frame_descriptor, updates)
                         gpu_draw_meshlets_indirect_count(cmd, &frame_descriptor,
                             draw_command_gpu.p, draw_command_count_gpu, 
                             auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command),
@@ -756,7 +755,6 @@ main :: proc () {
                 create_image_barrier_from_last(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL),
             )
             
-            gpu_set_active_heap(cmd, &descriptor_heap)
             gpu_set_pipeline(cmd, depth_pipeline)
                 
                 updates: [dynamic; 32] DescriptorUpdateData
@@ -768,7 +766,7 @@ main :: proc () {
                         mip_level == 0 ? 0 : cast(u32) mip_level-1, 
                         1,
                     })
-                    append(&updates, DescriptorUpdateData {})
+                    append(&updates, DescriptorUpdateData {}) // depth_sampler
                     append(&updates, DescriptorUpdateData { stuff.depth_pyramid, cast(u32) mip_level, 1 })
                     gpu_push_descriptors(cmd, &gpu, &descriptor_heap, &frame_descriptor, updates[:])
                     
@@ -850,12 +848,11 @@ main :: proc () {
                 
                 gpu_image_barrier_from_last_transition(cmd, &stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
                 
-                gpu_set_active_heap(cmd, &descriptor_heap)
                 gpu_set_pipeline(cmd, late_cull_pipeline)
                     
                     updates := [?] DescriptorUpdateData {
                         { stuff.depth_pyramid, 0, vk.REMAINING_MIP_LEVELS },
-                        { },
+                        { }, // depth_sampler
                     }
                     push_descriptor_heap(&gpu, &descriptor_heap, &frame_descriptor, updates[:])
                     
@@ -880,8 +877,17 @@ main :: proc () {
                 ////////////////////////////////////////////////
             
                 begin_meshlet_rendering(&gpu, cmd, stuff.color_buffer, stuff.depth_buffer, {}, early = false)
-                    
+                
                     gpu_set_pipeline(cmd, meshlet_pipeline)
+                        updates2 := [] DescriptorUpdateData {
+                            {}, // texture_sampler
+                            { textures[0], 0, vk.REMAINING_MIP_LEVELS },
+                            { textures[1], 0, vk.REMAINING_MIP_LEVELS },
+                            { textures[2], 0, vk.REMAINING_MIP_LEVELS },
+                        }
+                        
+                        gpu_push_descriptors(cmd, &gpu, &descriptor_heap, &frame_descriptor, updates2)
+                        
                         gpu_draw_meshlets_indirect_count(cmd, &frame_descriptor,
                             draw_command_gpu.p, draw_command_count_gpu, 
                             auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command),
@@ -1073,7 +1079,7 @@ get_next_image :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, frame_index: u64) ->
 begin_meshlet_rendering :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, color_buffer, depth_buffer: Image, clear_color: v4, early: bool) {
     desc := Render_Pass_Desc {
         // :ReversedZ: 0 is the maximal value
-        depth_target = { texture = depth_buffer, load_op = early ? .CLEAR : .LOAD, store_op = early ? .STORE : .DONT_CARE, clear_depth = 0 }, 
+        depth_target  = { texture = depth_buffer, load_op = early ? .CLEAR : .LOAD, store_op = early ? .STORE : .DONT_CARE, clear_depth = 0 }, 
         color_targets = {
             { texture = color_buffer, load_op = early ? .CLEAR : .LOAD, store_op = .STORE, clear_color = clear_color },
         }, 

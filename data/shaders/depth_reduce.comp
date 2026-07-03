@@ -7,18 +7,9 @@
 
 layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
 
-
-// #define HEAP @todo get this working here and in the late cull pass
-
-#ifdef HEAP
-layout(binding = 0, r32f) uniform writeonly image2D   Output;
-layout(binding = 1) uniform sampler global_sampler;
-layout(binding = 2) uniform texture2D textures_heap[];
-#else
 layout(binding = 0)       uniform           texture2D Input;
 layout(binding = 1)       uniform           sampler   depth_sampler;
 layout(binding = 2, r32f) uniform writeonly image2D   Output;
-#endif
 
 // @volatile
 layout(push_constant) uniform Push_Data {
