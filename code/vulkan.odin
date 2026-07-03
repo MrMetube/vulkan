@@ -349,5 +349,3 @@ present_the_queue :: proc (gpu: ^Gpu, queue: vk.Queue) {
         check(result)
     }
 }
-
-////////////////////////////////////////////////

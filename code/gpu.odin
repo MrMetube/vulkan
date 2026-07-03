@@ -917,13 +917,10 @@ create_pipeline_layout :: proc (gpu: ^Gpu, stage_flags: vk.ShaderStageFlags, set
         info.pSetLayouts    = &set_layouts[0]
     }
     
-    size_of_push_constant := cast(u32) size_of(vk.DeviceAddress)
-    if size_of_push_constant != 0 {
-        info.pushConstantRangeCount = 1
-        info.pPushConstantRanges = &vk.PushConstantRange {
-            stageFlags = stage_flags,
-            size       = size_of_push_constant,
-        }
+    info.pushConstantRangeCount = 1
+    info.pPushConstantRanges = &vk.PushConstantRange {
+        stageFlags = stage_flags,
+        size       = size_of(vk.DeviceAddress),
     }
     
     result: vk.PipelineLayout

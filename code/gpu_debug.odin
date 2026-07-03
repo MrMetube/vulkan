@@ -14,8 +14,6 @@ gpu_profiler: struct {
     zones:      [dynamic; QueryPoolSize] Profile_Zone,
     open_zones: [dynamic; QueryPoolSize] int,
     queries:    [dynamic; QueryPoolSize] Profile_Query,
-} = {
-    
 }
 
 Profile_Query :: struct { kind: Query_Kind, zone_index: int }

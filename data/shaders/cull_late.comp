@@ -12,7 +12,8 @@ layout(push_constant) uniform Push_Data {
     Cull_Globals globals;
 };
 
-layout(binding = 0) uniform sampler2D depth_pyramid;
+layout(binding = 0) uniform texture2D depth_pyramid;
+layout(binding = 1) uniform sampler   depth_sampler;
 
 // Based on this paper: 
 //     2D Polyhedral Bounds of a Clipped, Perspective-Projected 3D Sphere. Michael Mara, Morgan McGuire. 2013
@@ -85,7 +86,7 @@ void main() {
             float level = floor(log2(max(size_in_pixels.x, size_in_pixels.y)));
             vec2  rect_center = (rect.xy + rect.zw) * 0.5;
             
-            float depth = textureLod(depth_pyramid, rect_center, level).x;
+            float depth = textureLod(sampler2D(depth_pyramid, depth_sampler), rect_center, level).x;
             float min_sphere_depth = globals.data.near_z / (view_center.z - radius); // :ReversedZ:
             
             visible = visible && (min_sphere_depth > depth);

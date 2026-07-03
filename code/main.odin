@@ -20,10 +20,7 @@ VSync :: true when !Optimized else false
 
 ////////////////////////////////////////////////
 
-DescriptorUpdateData :: struct #raw_union {
-    buffer: vk.DescriptorBufferInfo,
-    image:  vk.DescriptorImageInfo,
-}
+DescriptorUpdateData :: vk.DescriptorImageInfo
 
 Geometry :: struct {
     // @todo(viktor): all this data is not needed on the cpu, we could just directly upload it to the gpu buffers
@@ -777,12 +774,13 @@ main :: proc () {
                     // @shaders depth_reduce.comp
                     
                     clear(&updates)
-                    append(&updates, DescriptorUpdateData { image = { 
-                        stuff.depth_sampler,
+                    append(&updates, DescriptorUpdateData { 
+                        {},
                         mip_level == 0 ? stuff.depth_buffer.view        : prev_mip.view,
                         mip_level == 0 ? stuff.depth_buffer.last_layout : .GENERAL,
-                    } })
-                    append(&updates, DescriptorUpdateData { image = { stuff.depth_sampler, mip.view, .GENERAL } })
+                    })
+                    append(&updates, DescriptorUpdateData { stuff.depth_sampler, {},       {} })
+                    append(&updates, DescriptorUpdateData { stuff.depth_sampler, mip.view, .GENERAL })
                     vk.CmdPushDescriptorSetWithTemplate(cmd, depth_pipeline.update_template, depth_pipeline.layout, 0, raw_data(&updates))
                     
                     prev_mip = &mip
@@ -867,8 +865,11 @@ main :: proc () {
                 
                 gpu_set_pipeline(cmd, late_cull_pipeline)
                     
-                    update := DescriptorUpdateData { image = { stuff.depth_sampler, stuff.depth_pyramid.view, .GENERAL } }
-                    vk.CmdPushDescriptorSetWithTemplate(cmd, late_cull_pipeline.update_template, late_cull_pipeline.layout, 0, &update)
+                    updates := [?] DescriptorUpdateData {
+                        { 0,                   stuff.depth_pyramid.view, .GENERAL },
+                        { stuff.depth_sampler, 0,                        {}       },
+                    }
+                    vk.CmdPushDescriptorSetWithTemplate(cmd, late_cull_pipeline.update_template, late_cull_pipeline.layout, 0, &updates[0])
                     
                     gpu_dispatch(cmd, cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)))
                     

@@ -255,6 +255,7 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
             
             constant: u32,
             storage_class: SpvStorageClass,
+            sampled: u32,
         }
         
         ids := make([] Id, id_bound, context.temp_allocator)
@@ -316,6 +317,10 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
                 
                 ids[id].opcode = opcode
                 
+                if opcode == .TypeImage {
+                    ids[id].sampled = code[7]
+                }
+                
             case .Constant:
                 id := code[2]
                 assert(ids[id].opcode == {})
@@ -353,6 +358,7 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
                     assert(id.binding not_in result.parsed.resource_mask)
                     
                     type_kind := ids[ids[id.type_id].type_id].opcode
+                    sampled   := ids[ids[id.type_id].type_id].sampled
                     
                     #partial switch type_kind {
                     case .TypeStruct:       
@@ -360,7 +366,7 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
                         result.parsed.resource_mask += { id.binding }
                         
                     case .TypeImage:        
-                        result.parsed.resource_types[id.binding] = .STORAGE_IMAGE
+                        result.parsed.resource_types[id.binding] = sampled == 1 ? .SAMPLED_IMAGE : .STORAGE_IMAGE
                         result.parsed.resource_mask += { id.binding }
                         
                     case .TypeSampler:      
