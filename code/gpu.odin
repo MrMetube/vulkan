@@ -1502,6 +1502,7 @@ gpu_push_constants :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Desc
         vk.CmdPushConstants(cmd, the_bound_pipeline.layout, the_bound_pipeline.shader_stages, 0, size_of(push_constant.p), &push_constant.p)
     }
 }
+
 // @cleanup
 gpu_push_descriptors :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, updates: [] DescriptorUpdateData, shaders: [] Shader) {
     descriptor_offset := push_descriptor_heap(frame_descriptor, updates, shaders)
@@ -1515,16 +1516,16 @@ gpu_push_descriptors :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_De
     vk.CmdPushDataEXT(cmd, &info)
 }
 
-gpu_dispatch :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, push_constant: GpuAddress($T), group_size: uv3, heap := false) {
-    gpu_push_constants(cmd, frame_descriptor, push_constant, heap)
+gpu_dispatch :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, push_constant: GpuAddress($T), group_size: uv3) {
+    gpu_push_constants(cmd, frame_descriptor, push_constant, true)
     vk.CmdDispatch(cmd, **group_size)
 }
 
-gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, commands: vk.DeviceAddress, count: GpuAddress(u32), max_count: u32, stride: u32, command_offset: umm, push_constant: GpuAddress($T)) {
+gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, commands: vk.DeviceAddress, count: GpuAddress(u32), max_count: u32, stride: u32, command_offset: umm, push_constant: GpuAddress($T), heap := false) {
     // @speed 
     commands, commands_base_offset := gpu_reflect_get_buffer(commands)
     count,    count_offset         := gpu_reflect_get_buffer(count.p)
     
-    gpu_push_constants(cmd, frame_descriptor, push_constant)
+    gpu_push_constants(cmd, frame_descriptor, push_constant, heap)
     vk.CmdDrawMeshTasksIndirectCountEXT(cmd, commands, commands_base_offset + cast(vk.DeviceSize) command_offset, count, count_offset, max_count, stride)
 }

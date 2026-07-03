@@ -287,8 +287,6 @@ main :: proc () {
             gpu_copy_to_texture(&gpu, cmd, texture, gpu_data, description.size)
             
             gpu_image_barrier_from_last_transition(cmd, &texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL) 
-            
-            write_texture_to_heap(&gpu, &descriptor_heap, index, texture.view, texture.last_layout)
         }
             
         gpu_barrier(cmd, { .ALL_TRANSFER }, { .ALL_COMMANDS }, { .descriptors })
@@ -296,12 +294,6 @@ main :: proc () {
         gpu_submit(gpu.transfer_queue, upload_semaphore, 1, cmd)
         gpu_wait_semaphore(&gpu, upload_semaphore, 1)
     }
-    
-    ////////////////////////////////////////////////
-    
-    global_sampler := create_sampler(&gpu, .LINEAR, .LINEAR, anisotropy = true)
-    write_sampler_to_heap(&gpu, &descriptor_heap, 0, global_sampler)
-    defer_destroy(vk.DestroySampler, global_sampler)
     
     ////////////////////////////////////////////////
     
@@ -704,6 +696,7 @@ main :: proc () {
                 
                 gpu_image_barrier(cmd, &stuff.depth_pyramid, {}, {}, .UNDEFINED, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
                 
+                gpu_set_active_heap(cmd, &descriptor_heap)
                 gpu_set_pipeline(cmd, early_cull_pipeline)
                     gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(early_cull_shader, auto_cast len(draws)))
                 
@@ -767,12 +760,12 @@ main :: proc () {
                 create_image_barrier_from_last(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL),
             )
             
+            gpu_set_active_heap(cmd, &descriptor_heap)
             gpu_set_pipeline(cmd, depth_pipeline)
                 
                 updates: [dynamic; 32] DescriptorUpdateData
                 for mip_size, mip_level in stuff.depth_pyramid_mip_sizes {
                     clear(&updates)
-                    gpu_set_active_heap(cmd, &descriptor_heap)
                     
                     append(&updates, DescriptorUpdateData {
                         mip_level == 0 ? stuff.depth_buffer : stuff.depth_pyramid,
@@ -786,7 +779,7 @@ main :: proc () {
                     depth_globals_cpu, depth_globals_gpu := bump_allocate_type(bump, Depth_Globals)
                     depth_globals_cpu^ = Depth_Globals { size = cast(v2) mip_size }
                     
-                    gpu_dispatch(cmd, &frame_descriptor, depth_globals_gpu, get_group_count(depth_reduce_shader, **mip_size), heap = true)
+                    gpu_dispatch(cmd, &frame_descriptor, depth_globals_gpu, get_group_count(depth_reduce_shader, **mip_size))
                     
                     gpu_image_barrier_from_last_transition(cmd, &stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL, flags = { .BY_REGION })
                 }
@@ -861,6 +854,7 @@ main :: proc () {
                 
                 gpu_image_barrier_from_last_transition(cmd, &stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
                 
+                gpu_set_active_heap(cmd, &descriptor_heap)
                 gpu_set_pipeline(cmd, late_cull_pipeline)
                     
                     updates := [?] DescriptorUpdateData {
@@ -869,7 +863,7 @@ main :: proc () {
                     }
                     push_descriptor_heap(&frame_descriptor, updates[:], { late_cull_shader })
                     
-                    gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)), heap = true)
+                    gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)))
                     
             gpu_profile_zone_end()
             gpu_labeled_region_end(cmd)

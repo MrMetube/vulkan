@@ -3,9 +3,9 @@ package main
 
 import vk "../lib/vulkan"
 
-DescriptorStaticLimit     :: 65536 // static resource descriptors
-DescriptorPerFrameLimit   :: 1024  // submitted per frame via push
-DescriptorSamplerLimit :: 16    // just sampler descriptors
+DescriptorStaticLimit   :: 65536 // static resource descriptors
+DescriptorPerFrameLimit :: 1024  // submitted per frame via push
+DescriptorSamplerLimit  :: 16    // just sampler descriptors
 
 Descriptor_Heap :: struct {
     resources_cpu: [] u8,
@@ -74,34 +74,7 @@ destroy_descriptor_heap :: proc (gpu: ^Gpu, heap: Descriptor_Heap) {
     gpu_free_pointer(gpu, heap.resources_gpu.p)
 }
 
-write_texture_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: int, view: vk.ImageView, layout: vk.ImageLayout) {
-    if true do return 
-    // get_info := vk.DescriptorGetInfoEXT {
-    //     sType = .DESCRIPTOR_GET_INFO_EXT,
-    //     type = .SAMPLED_IMAGE,
-    //     data = vk.DescriptorDataEXT{ pSampledImage = &vk.DescriptorImageInfo { imageView = view, imageLayout = layout } },
-    // }
-    
-    // resource_pointer := &heap.resources_cpu[heap.resource_stride * index]
-    
-    // vk.GetDescriptorEXT(gpu.device, &get_info, heap.resource_stride, resource_pointer)
-}
-
-write_sampler_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: int, sampler: vk.Sampler) {
-    if true do return 
-    // sampler := sampler
-    
-    // get_info := vk.DescriptorGetInfoEXT {
-    //     sType = .DESCRIPTOR_GET_INFO_EXT,
-    //     type  = .SAMPLER,
-    //     data  = vk.DescriptorDataEXT { pSampler = &sampler },
-    // }
-    
-    // sampler_pointer := &heap.samplers_cpu[heap.sampler_stride * index]
-    
-    // vk.GetDescriptorEXT(gpu.device, &get_info, heap.sampler_stride, sampler_pointer)
-}
-
+// @speed this is called multiple times in a frame. reduce this to once a frame as soon as all pipelines are migrated
 gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: ^Descriptor_Heap) {
     sampler_info := vk.BindHeapInfoEXT {
         sType = .BIND_HEAP_INFO_EXT,
