@@ -1,6 +1,7 @@
+#+vet explicit-allocators
 package main
 
-import vk "vendor:vulkan"
+import vk "../lib/vulkan"
 
 Bump_Allocator :: struct {
     backing: GpuAllocation,

@@ -9,7 +9,7 @@ import "core:time"
 import la "core:math/linalg"
 
 import sdl "vendor:sdl3"
-import vk  "vendor:vulkan"
+import vk  "../lib/vulkan"
 
 ////////////////////////////////////////////////
 
@@ -281,7 +281,7 @@ main :: proc () {
             
             description := default_texture_desc()
             description.size.xy = { loaded_texture.width, loaded_texture.height }
-            description.format  = loaded_texture.format
+            description.format  = auto_cast loaded_texture.format
             description.usage   = { .TRANSFER_DST, .SAMPLED }
             
             texture      = gpu_allocate_texture(&gpu, description)

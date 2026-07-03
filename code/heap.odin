@@ -1,6 +1,7 @@
+#+vet explicit-allocators
 package main
 
-import vk "vendor:vulkan"
+import vk "../lib/vulkan"
 
 Descriptor_Heap :: struct {
     cpu: [] u8,

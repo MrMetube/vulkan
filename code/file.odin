@@ -5,7 +5,7 @@ import "base:intrinsics"
 import "core:os"
 import "core:fmt"
 
-import vk "vendor:vulkan"
+import vk "../lib/vulkan"
 
 import "../lib/ktx"
 
@@ -29,7 +29,7 @@ load_ktx_texture :: proc (filename: string, allocator: Allocator) -> Loaded_Text
     defer ktx.Texture1_Destroy(cast(^ktx.Texture1) texture)
     
     result: Loaded_Texture
-    result.format = ktx.Texture_GetVkFormat(texture)
+    result.format = auto_cast ktx.Texture_GetVkFormat(texture)
     
     result.data = make([] u8, texture.dataSize, allocator)
     copy(result.data, texture.pData[:texture.dataSize])

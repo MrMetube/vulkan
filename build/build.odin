@@ -6,7 +6,7 @@ import "../code" // just for the shader compiling
 
 optimize       :: false
 pedantic       :: false
-strict_shaders :: true
+strict_shaders :: !true
 
 main :: proc () {
     init_build(run_from_data = true)
@@ -14,6 +14,8 @@ main :: proc () {
     parse_run_and_debug_arguments()
     
     // @copypasta from code.main: shader setup code
+    code.generate_shader_api("data/shaders/api.generated.glslh")
+    
     shaders: [dynamic] string
     code.get_all_files_with_extension(&shaders, "data/shaders", context.temp_allocator, ".frag", ".mesh", ".task", ".comp")
     

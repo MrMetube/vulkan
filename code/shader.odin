@@ -7,7 +7,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 
-import vk "vendor:vulkan"
+import vk "../lib/vulkan"
 
 /*
     simple struct: 
@@ -26,9 +26,9 @@ generate_shader_api :: proc (output_file: string) {
     builder := strings.builder_make(context.temp_allocator)
     
     // @shaders all types used by the cpu and the gpu
+    
+    // structs used in buffers
     append_simple_struct(&builder, vk.DrawMeshTasksIndirectCommandEXT)
-    append_simple_struct(&builder, Draw_Data)
-    append_simple_struct(&builder, Cull_Data)
     append_simple_struct(&builder, Draw_Command)
     append_simple_struct(&builder, Draw)
     append_simple_struct(&builder, Mesh_LOD)
@@ -36,15 +36,27 @@ generate_shader_api :: proc (output_file: string) {
     append_simple_struct(&builder, Meshlet)
     append_simple_struct(&builder, Vertex)
     
-    reference_types := make(map[string] struct {}, context.allocator)
-    collect_reference_types(&reference_types, Cull_Globals)
-    collect_reference_types(&reference_types, Draw_Globals)
-    collect_reference_types(&reference_types, Depth_Globals)
+    reference_types := make(map[string] struct {}, context.temp_allocator)
+    simple_types    := make(map[typeid] struct {}, context.temp_allocator)
+    
+    // structs used in push constants
+    collect_types(&simple_types, &reference_types, Cull_Globals)
+    collect_types(&simple_types, &reference_types, Draw_Globals)
+    collect_types(&simple_types, &reference_types, Depth_Globals)
     append_reference_types(&builder, reference_types)
     
+    // nested structs
+    for simple_type, _ in simple_types {
+        append_simple_struct(&builder, simple_type)
+    }
+    
+    // push constants again
     append_buffer_reference_struct(&builder, Cull_Globals)
     append_buffer_reference_struct(&builder, Draw_Globals)
     append_buffer_reference_struct(&builder, Depth_Globals)
+    
+    ////////////////////////////////////////////////
+    // implementation
     
     get_type_name :: proc (info: ^runtime.Type_Info) -> (string, string) {
         type_name: string
@@ -93,14 +105,19 @@ generate_shader_api :: proc (output_file: string) {
         fmt.sbprintf(builder, "};\n\n")
     }
     
-    collect_reference_types :: proc (refs: ^map[string] struct {}, type: typeid) {
+    collect_types :: proc (simples: ^map[typeid] struct {}, references: ^map[string] struct {}, type: typeid) {
         info := type_info_of(runtime.typeid_base(type))
         s :=  info.variant.(runtime.Type_Info_Struct)
         
-        // @todo(viktor): currently all fields are vk.DeviceAddress, but that hides the type for this metaprogram. Can we make a wrapper like GPU_Pointer(T) so that we can read the inner type here and not have to specify it in the tag string?
-        for field in soa_zip(type = s.types[:s.field_count], tag = s.tags[:s.field_count]) {
-            if field.tag != "" && field.type.id == typeid_of(vk.DeviceAddress) {
-                refs[field.tag] = {}
+        for field in soa_zip(info = s.types[:s.field_count], tag = s.tags[:s.field_count]) {
+            field_info := field.info
+            id := field_info.id
+            field_base_info := type_info_of(runtime.typeid_base(id))
+            
+            if field.tag != "" && id == typeid_of(vk.DeviceAddress) {
+                references[field.tag] = {}
+            } else if _, is_struct := field_base_info.variant.(runtime.Type_Info_Struct); is_struct {
+                simples[field_info.id] = {}
             }
         }
     }

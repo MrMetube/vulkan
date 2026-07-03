@@ -16,7 +16,7 @@ import "base:runtime"
 
 import "core:fmt"
 
-import vk  "vendor:vulkan"
+import vk  "../lib/vulkan"
 import sdl "vendor:sdl3"
 
 // @todo import the cpu profiler and extract the common parts with the gpu profiler,
@@ -181,7 +181,7 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
                     continue
                 }
                 
-                if !sdl.Vulkan_GetPresentationSupport(result.instance, device, family_index_with_graphics) {
+                if !sdl.Vulkan_GetPresentationSupport(auto_cast result.instance, auto_cast device, family_index_with_graphics) {
                     continue
                 }
                 
@@ -213,7 +213,7 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
         
         ////////////////////////////////////////////////
         
-        check_sdl(sdl.Vulkan_CreateSurface(window, result.instance, nil, &result.surface))
+        check_sdl(sdl.Vulkan_CreateSurface(window, auto_cast result.instance, nil, auto_cast &result.surface))
     }
     
     ////////////////////////////////////////////////
@@ -524,6 +524,7 @@ default_texture_desc :: proc (
 GpuAddress :: struct ($T: typeid) {
     p: vk.DeviceAddress,
 }
+
 GpuSlice :: struct ($T: typeid) {
     p:         vk.DeviceAddress,
     byte_size: int,
