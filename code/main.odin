@@ -505,8 +505,8 @@ main :: proc () {
         
         // @cleanup
         frame_descriptor: Frame_Descriptor
-        frame_descriptor.resource_offset = DescriptorStaticLimit            + cast(u32) frame_index * DescriptorPerFrameLimit
-        frame_descriptor.resource_end    = frame_descriptor.resource_offset +                     1 * DescriptorPerFrameLimit
+        frame_descriptor.descriptor_offset = DescriptorStaticLimit            + cast(u32) frame_index * DescriptorPerFrameLimit
+        frame_descriptor.descriptor_end    = frame_descriptor.descriptor_offset +                     1 * DescriptorPerFrameLimit
         frame_descriptor.sampler_offset  = 0
         frame_descriptor.sampler_end     = DescriptorSamplerLimit
         frame_descriptor.gpu = &gpu
@@ -529,10 +529,10 @@ main :: proc () {
             fmt.printfln("Recreated late_cull_pipeline.")
         }
         
-        depth_pyramid_with_heap := true
+        depth_pyramid_with_heap := !false
         if reload_shaders_if_needed(watchers, shader_allocator, &depth_reduce_shader) || !pipeline_is_valid(depth_pipeline) {
             destroy_pipeline(&gpu, depth_pipeline)
-            depth_pipeline = gpu_create_compute_pipeline(&gpu, depth_reduce_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, depth_descriptor_set_layout, heap = depth_pyramid_with_heap)
+            depth_pipeline = gpu_create_compute_pipeline(&gpu, depth_reduce_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, depth_descriptor_set_layout, heap = depth_pyramid_with_heap, sampler_hack_names = {"", "depth_sampler", ""})
             if !depth_pyramid_with_heap {
                 depth_pipeline.update_template = create_update_template(gpu.device, .COMPUTE, depth_pipeline.layout, depth_reduce_shader)
             }
@@ -799,7 +799,7 @@ main :: proc () {
                             mip_level == 0 ? 0 : cast(u32) mip_level-1, 
                             1,
                         }})
-                        append(&updates, DescriptorUpdateData { sampler = xx_sampler(.LINEAR, .LINEAR) })
+                        append(&updates, DescriptorUpdateData { sampler = {}})
                         append(&updates, DescriptorUpdateData { image = {  {}, stuff.depth_pyramid, mip.view, cast(u32) mip_level, 1 }})
                         gpu_push_descriptors(cmd, &frame_descriptor, updates[:], { depth_reduce_shader })
                     } else{

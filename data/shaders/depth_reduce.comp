@@ -16,7 +16,7 @@ layout(binding = 1) uniform sampler global_sampler;
 layout(binding = 2) uniform texture2D textures_heap[];
 #else
 layout(binding = 0)       uniform           texture2D Input;
-layout(binding = 1)       uniform           sampler   pyramid_sampler;
+layout(binding = 1)       uniform           sampler   depth_sampler;
 layout(binding = 2, r32f) uniform writeonly image2D   Output;
 #endif
 
@@ -33,7 +33,7 @@ void main() {
     #ifdef HEAP
     vec4 depth4 = textureGather(sampler2D(textures_heap[nonuniformEXT(globals.texture_index)], global_sampler), uv);
     #else
-    vec4 depth4 = textureGather(sampler2D(Input, pyramid_sampler), uv);
+    vec4 depth4 = textureGather(sampler2D(Input, depth_sampler), uv);
     #endif
     float depth = min( min(depth4.x, depth4.y), min(depth4.z, depth4.w) );
     

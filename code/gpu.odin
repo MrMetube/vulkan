@@ -740,7 +740,7 @@ gpu_create_texture_view :: proc (gpu: ^Gpu, image: Image, mip_base: u32, mip_cou
 }
 
 // @cleanup
-xx_sampler :: proc (filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, max_lod: f32 = 16, anisotropy: b32 = false) -> vk.SamplerCreateInfo {
+xx_sampler :: proc (filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, address_mode: vk.SamplerAddressMode, anisotropy: b32 = false) -> vk.SamplerCreateInfo {
     result := vk.SamplerCreateInfo {
         sType = .SAMPLER_CREATE_INFO,
         
@@ -748,19 +748,22 @@ xx_sampler :: proc (filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, max_lo
         minFilter  = filter,
         mipmapMode = mipmap_mode,
         
-        addressModeU = .CLAMP_TO_EDGE,
-        addressModeV = .CLAMP_TO_EDGE,
-        addressModeW = .CLAMP_TO_EDGE,
+        addressModeU = address_mode,
+        addressModeV = address_mode,
+        addressModeW = address_mode,
         
         anisotropyEnable = anisotropy,
-        maxAnisotropy    = anisotropy ? 8 : 0,
-        maxLod           = max_lod,
+        maxAnisotropy    = anisotropy ? 8 : 1,
+        
+        minLod = 0,
+        maxLod = 16,
     }
     return result
 }
 
-create_sampler :: proc (gpu: ^Gpu, filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, max_lod: f32 = 16, anisotropy: b32 = false) -> vk.Sampler {
-    sampler_create_info := xx_sampler(filter, mipmap_mode, max_lod, anisotropy)
+// @todo deprecate this
+create_sampler :: proc (gpu: ^Gpu, filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, anisotropy: b32 = false) -> vk.Sampler {
+    sampler_create_info := xx_sampler(filter, mipmap_mode, .CLAMP_TO_EDGE, anisotropy)
     
     result: vk.Sampler
     check(vk.CreateSampler(gpu.device, &sampler_create_info, nil, &result))
@@ -858,7 +861,7 @@ gpu_destroy_texture_view :: proc (gpu: ^Gpu, view: vk.ImageView) {
 // Pipelines 
 
 // @cleanup
-gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, descriptor_size, sampler_size: u32, set_layout: ..vk.DescriptorSetLayout, heap := false) -> Pipeline {
+gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, descriptor_size, sampler_size: u32, set_layout: ..vk.DescriptorSetLayout, heap := false, sampler_hack_names: [] string = {}) -> Pipeline {
     // @todo(viktor): allow for optional shader constant, i.e. vulkan specialization constants
     assert(compute.stage == .COMPUTE)
     compute := compute
@@ -870,7 +873,7 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, descriptor_size
     mappings := [32] vk.DescriptorSetAndBindingMappingEXT {}
     heap_mapping: vk.ShaderDescriptorSetAndBindingMappingInfoEXT
     if heap {
-        heap_mapping = generate_heap_mappings(compute.parsed.resource_mask, compute.parsed.resource_types, size_of(vk.DeviceAddress), descriptor_size, sampler_size, &mappings)
+        heap_mapping = generate_heap_mappings(compute.parsed.resource_mask, compute.parsed.resource_types, sampler_hack_names, size_of(vk.DeviceAddress), descriptor_size, sampler_size, &mappings)
     } else {
         result.layout = create_pipeline_layout(gpu, result.shader_stages, ..set_layout)
     }
@@ -956,7 +959,7 @@ create_pipeline_layout :: proc (gpu: ^Gpu, stage_flags: vk.ShaderStageFlags, set
     return result
 }
 
-gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info: Raster_Desc, descriptor_size, sampler_size: u32, shaders: ..Shader, heap := false) {
+gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info: Raster_Desc, descriptor_size, sampler_size: u32, shaders: ..Shader, heap := false, sampler_hack_names := [] string {}) {
     for &shader in shaders {
         result.shader_stages += { shader.stage }
     }
@@ -967,7 +970,7 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
     mappings := [32] vk.DescriptorSetAndBindingMappingEXT {}
     heap_mapping: vk.ShaderDescriptorSetAndBindingMappingInfoEXT
     if heap {
-        heap_mapping = generate_heap_mappings(result.resource_mask, result.resource_types, size_of(vk.DeviceAddress), descriptor_size, sampler_size, &mappings)
+        heap_mapping = generate_heap_mappings(result.resource_mask, result.resource_types, sampler_hack_names, size_of(vk.DeviceAddress), descriptor_size, sampler_size, &mappings)
     } else {
         result.layout = create_pipeline_layout(gpu, result.shader_stages)
     }
@@ -1433,6 +1436,59 @@ gpu_end_render_pass :: proc (cmd: vk.CommandBuffer) {
 // void gpuDrawMeshlets(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, uvec3 dim);
 // void gpuDrawMeshletsIndirect(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, void *dimGpu);
 
+push_descriptor_heap :: proc (frame_descriptor: ^Frame_Descriptor, updates: [] DescriptorUpdateData, shaders: [] Shader) -> u32 {
+    // @waste
+    resource_types, resource_mask := gather_descriptor_resources(..shaders)
+    resource_count := cast(u32) card(resource_mask)
+    
+    descriptor_count := card(resource_mask)
+    
+    assert(frame_descriptor.descriptor_offset + auto_cast descriptor_count <= frame_descriptor.descriptor_end)
+    descriptor_size := frame_descriptor.heap.resource_size
+    
+    result := frame_descriptor.descriptor_offset
+    for index in cast(u32) 0..<32 {
+        if index in resource_mask {
+            info := &updates[index]
+            
+            descriptor: Descriptor
+            type := resource_types[index]
+            
+            #partial switch type {
+            case .SAMPLER: continue // mapped via constant offsets (statically)
+            
+            case .SAMPLED_IMAGE, .STORAGE_IMAGE:
+                image := info.image
+                
+                get_descriptor_image(frame_descriptor.gpu, image.image.image, image.image.format, image.image.last_layout, image.mip_base, image.mip_count, type, &descriptor, descriptor_size)
+            
+            case .UNIFORM_BUFFER, .STORAGE_BUFFER:
+                unimplemented()
+                /* 
+                const Buffer* buffer = static_cast<const Buffer*>(info.resource);
+				getDescriptor(framedesc.device, buffer->address, buffer->size, program.resourceTypes[i], descriptor, framedesc.descriptorSize);
+                 */
+                
+            case .ACCELERATION_STRUCTURE_KHR: 
+                unimplemented()
+                /* 
+                VkAccelerationStructureDeviceAddressInfoKHR addressInfo = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR };
+				addressInfo.accelerationStructure = info.accelerationStructure;
+				VkDeviceAddress address = vkGetAccelerationStructureDeviceAddressKHR(framedesc.device, &addressInfo);
+				getDescriptor(framedesc.device, address, 0, program.resourceTypes[i], descriptor, framedesc.descriptorSize);
+                */
+            case:
+                unreachable()
+            }
+            
+            copy(frame_descriptor.heap.resources_cpu[frame_descriptor.descriptor_offset * descriptor_size:], descriptor[:descriptor_size])
+            frame_descriptor.descriptor_offset += 1
+        }
+    }
+    
+    return result
+}
+
 // @api we may want to allow the pipeline to have a push constant per stage. For that we need the shaders to each declare the push data to be N pointers to their respective data. Then the pipeline layout and this command both need to declare the correct size of 3 pointers and their offsets in the push data.
 gpu_push_constants :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, push_constant: GpuAddress($T), heap := false) {
     push_constant := push_constant
@@ -1448,50 +1504,13 @@ gpu_push_constants :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Desc
 }
 // @cleanup
 gpu_push_descriptors :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, updates: [] DescriptorUpdateData, shaders: [] Shader) {
-    // @waste
-    resource_types, resource_mask := gather_descriptor_resources(..shaders)
-    resource_count := cast(u32) card(resource_mask)
-    
-    resource_index: u32
-    sampler_index:  u32
-    
-    for index in cast(u32) 0..<32 {
-        if index in resource_mask {
-            type := resource_types[index]
-            
-            if type == .STORAGE_IMAGE || type == .SAMPLED_IMAGE {
-                u := updates[index].image
-                descriptor_bytes: Descriptor
-                descriptor_size := frame_descriptor.heap.resource_size
-                get_descriptor_image(frame_descriptor.gpu, u.image.image, u.image.format, u.image.last_layout, u.mip_base, u.mip_count, type, &descriptor_bytes, descriptor_size)
-                
-                copy(frame_descriptor.heap.resources_cpu[frame_descriptor.resource_offset + index * descriptor_size:], descriptor_bytes[:descriptor_size])
-                
-                resource_index += 1
-            } else if type == .SAMPLER {
-                info := updates[index].sampler
-                descriptor_bytes: Descriptor
-                
-                sampler_size := frame_descriptor.heap.sampler_size
-                
-                {
-                    descriptor := &descriptor_bytes
-                    range := vk.HostAddressRangeEXT { address = raw_data(descriptor), size = cast(int) sampler_size }
-                    vk.WriteSamplerDescriptorsEXT(frame_descriptor.gpu.device, 1, &info, &range)
-                }
-                
-                copy(frame_descriptor.heap.samplers_cpu[frame_descriptor.sampler_offset + sampler_index * sampler_size:], descriptor_bytes[:sampler_size])
-                sampler_index += 1
-            } else {
-                unreachable()
-            }
-        }
-    }
+    descriptor_offset := push_descriptor_heap(frame_descriptor, updates, shaders)
     
     info := vk.PushDataInfoEXT {
         sType = .PUSH_DATA_INFO_EXT,
-        data = { address = &frame_descriptor.resource_offset, size = size_of(frame_descriptor.resource_offset) },
-        offset = size_of(vk.DeviceAddress),
+        
+        offset = size_of(vk.DeviceAddress), // size of the push_constant
+        data = { address = &descriptor_offset, size = size_of(descriptor_offset) },
     }
     vk.CmdPushDataEXT(cmd, &info)
 }

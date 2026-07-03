@@ -24,8 +24,8 @@ Descriptor_Heap :: struct {
 }
 
 Frame_Descriptor :: struct {
-    resource_offset: u32,
-    resource_end:    u32,
+    descriptor_offset: u32,
+    descriptor_end:    u32,
     sampler_offset: u32,
     sampler_end:    u32,
     
@@ -59,6 +59,12 @@ create_descriptor_heap :: proc (gpu: ^Gpu) -> Descriptor_Heap {
     
     result.resource_size = cast(u32) resource_size
     result.sampler_size  = cast(u32) sampler_size
+    
+    // :SamplerHack: fill samplers[0] with texture sampler and samplers[1] with depth sampler
+    sampler_descriptor_size := resource_size // :SamplerHack:
+    get_descriptor_sampler(gpu, .LINEAR, .LINEAR,  .REPEAT,        .WEIGHTED_AVERAGE, auto_cast &result.samplers_cpu[0 * sampler_descriptor_size], cast(u32) sampler_size);
+    get_descriptor_sampler(gpu, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .WEIGHTED_AVERAGE, auto_cast &result.samplers_cpu[1 * sampler_descriptor_size], cast(u32) sampler_size);
+    get_descriptor_sampler(gpu, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .MIN,              auto_cast &result.samplers_cpu[2 * sampler_descriptor_size], cast(u32) sampler_size);
     
     return result
 }
@@ -123,7 +129,7 @@ gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: ^Descriptor_Heap) {
 
 Descriptor :: distinct [128] u8
 
-get_descriptor :: proc { get_descriptor_image, get_descriptor_memory }
+get_descriptor :: proc { get_descriptor_image, get_descriptor_memory, get_descriptor_sampler }
 // @todo switch to .GENERAL layout for all images
 get_descriptor_image :: proc (gpu: ^Gpu, image: vk.Image, format: vk.Format, layout: vk.ImageLayout, mip_base: u32, mip_count: u32, type: vk.DescriptorType, descriptor: ^Descriptor, descriptor_size: u32) {
     aspect_mask := get_image_aspect_mask(format)
@@ -161,4 +167,20 @@ get_descriptor_memory :: proc (gpu: ^Gpu, address: vk.DeviceAddress, size: vk.De
     
     range := vk.HostAddressRangeEXT { address = raw_data(descriptor), size = cast(int) descriptor_size }
     check(vk.WriteResourceDescriptorsEXT(gpu.device, 1, &info, &range))
+}
+
+get_descriptor_sampler :: proc (gpu: ^Gpu, filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, address_mode: vk.SamplerAddressMode, reduction_mode: vk.SamplerReductionMode, descriptor: ^Descriptor, descriptor_size: u32) {
+    info := xx_sampler(filter, mipmap_mode, address_mode)
+    
+    reduction_info := vk.SamplerReductionModeCreateInfo {
+        sType = .SAMPLER_REDUCTION_MODE_CREATE_INFO,
+        reductionMode = reduction_mode,
+    }
+    
+    if reduction_mode != .WEIGHTED_AVERAGE {
+        info.pNext = &reduction_info
+    }
+    
+    range := vk.HostAddressRangeEXT { address = raw_data(descriptor), size = cast(int) descriptor_size }
+    check(vk.WriteSamplerDescriptorsEXT(gpu.device, 1, &info, &range))
 }

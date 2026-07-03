@@ -258,40 +258,90 @@ create_descriptor_set_layout :: proc (device: vk.Device, shaders: ..Shader) -> v
     return result
 }
 
-generate_heap_mappings :: proc (resource_mask: Shader_Resource_Mask, resource_types: [32] vk.DescriptorType, push_constant_size: u32, descriptor_size, sampler_size: u32, mappings: ^[32] vk.DescriptorSetAndBindingMappingEXT) -> vk.ShaderDescriptorSetAndBindingMappingInfoEXT { // fill heap mapping
+generate_heap_mappings :: proc (resource_mask: Shader_Resource_Mask, resource_types: [32] vk.DescriptorType, resource_names: [] string, push_constant_size: u32, descriptor_size, sampler_size: u32, mappings: ^[32] vk.DescriptorSetAndBindingMappingEXT) -> vk.ShaderDescriptorSetAndBindingMappingInfoEXT {
     mapping_offset: u32
+    descriptor_offset: u32
+    // :SamplerHack: we define name->id correspondence here for now; this will move to shader code when descriptor heaps conquer the world
+	sampler_names := [] string {
+		"texture_sampler",
+		"filter_sampler",
+		"depth_sampler",
+	}
+    
+    // push descriptors
     for i in cast(u32) 0..<32 {
         if i in resource_mask {
             mapping := &mappings[mapping_offset]
             mapping_offset += 1
             
-            stride := resource_types[i] == .SAMPLER ? sampler_size : descriptor_size
-            
-            mapping^ = {
+             mapping^ = {
                 sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
                 
-                firstBinding = i,
-                bindingCount = 1,
+                descriptorSet = 0,
+                firstBinding  = i,
+                bindingCount  = 1,
+                resourceMask  = vk.SpirvResourceTypeFlagsEXT_ALL,
+            }
+            
+            if resource_types[i] == .SAMPLER {
+                mapping.source = .HEAP_WITH_CONSTANT_OFFSET
                 
-                resourceMask = vk.SpirvResourceTypeFlagsEXT_ALL,
+                // :SamplerHack: for now we map samplers by name to avoid having to bind them via push path
+				// in the future we will change the shader code to carry the name->binding correspondence statically
                 
-                source = .HEAP_WITH_PUSH_INDEX,
-                sourceData = {
-                    pushIndex = {
-                        heapOffset = 0,
-                        pushOffset = push_constant_size,
-                        heapIndexStride = stride,
-                        heapArrayStride = stride,
-                    },
-                },
+                for name, name_index in sampler_names {
+                    if resource_names[i] == name {
+                        mapping.sourceData.constantOffset.heapOffset = cast(u32) name_index * descriptor_size
+                    }
+                }
+            } else {
+                mapping.source = .HEAP_WITH_PUSH_INDEX
+                mapping.sourceData.pushIndex = {
+                    heapOffset = descriptor_offset * descriptor_size,
+                    pushOffset = push_constant_size,
+                    heapIndexStride = descriptor_size,
+                    heapArrayStride = descriptor_size,
+                }
+                
+                descriptor_offset += 1
             }
         }
     }
     
-    result := vk.ShaderDescriptorSetAndBindingMappingInfoEXT {
+	{ // texture array descriptor
+		mapping := &mappings[mapping_offset]
+        mapping_offset += 1
+        
+		mapping^ = {
+            sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
+            descriptorSet = 1,
+            firstBinding = 0,
+            bindingCount = 1,
+            resourceMask =  vk.SpirvResourceTypeFlagsEXT_ALL,
+            source = .HEAP_WITH_CONSTANT_OFFSET,
+        }
+		mapping.sourceData.constantOffset.heapArrayStride = descriptor_size
+	}
+	
+	{ // sampler descriptors
+		mapping := &mappings[mapping_offset]
+        mapping_offset += 1
+        
+        mapping^ = {
+            sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
+            descriptorSet = 2,
+            firstBinding = 0,
+            bindingCount = DescriptorSamplerLimit,
+            resourceMask = vk.SpirvResourceTypeFlagsEXT_ALL,
+            source = .HEAP_WITH_CONSTANT_OFFSET,
+        }
+		mapping.sourceData.constantOffset.heapArrayStride = descriptor_size
+	}
+    
+	result := vk.ShaderDescriptorSetAndBindingMappingInfoEXT { 
         sType = .SHADER_DESCRIPTOR_SET_AND_BINDING_MAPPING_INFO_EXT,
         mappingCount = mapping_offset,
-        pMappings    = &mappings[0]
+        pMappings    = &mappings[0],
     }
     
     return result
