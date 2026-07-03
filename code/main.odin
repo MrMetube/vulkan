@@ -21,11 +21,7 @@ VSync :: true when !Optimized else false
 ////////////////////////////////////////////////
 
 // @cleanup
-DescriptorUpdateData :: struct #raw_union {
-    old: vk.DescriptorImageInfo,
-    image: struct { sampler: vk.Sampler, image: Image, view_override: Maybe(vk.ImageView), mip_base, mip_count: u32 },
-    sampler: vk.SamplerCreateInfo,
-}
+DescriptorUpdateData :: struct { image: Image, mip_base, mip_count: u32 }
 
 Geometry :: struct {
     // @todo(viktor): all this data is not needed on the cpu, we could just directly upload it to the gpu buffers
@@ -36,11 +32,6 @@ Geometry :: struct {
     meshes: [dynamic] Mesh,
 }
 
-Depth_Pyramid_Mip :: struct {
-    view: vk.ImageView,
-    size: uv2,
-}
-
 Stuff_With_The_Same_Lifetime_As_The_Swapchain :: struct {
     color_buffer: Image,
     depth_buffer: Image,
@@ -48,7 +39,7 @@ Stuff_With_The_Same_Lifetime_As_The_Swapchain :: struct {
     depth_sampler: vk.Sampler,
     depth_pyramid: Image,
     depth_pyramid_size: uv2,
-    depth_pyramid_mips: [dynamic; 16] Depth_Pyramid_Mip,
+    depth_pyramid_mip_sizes: [dynamic; 16] uv2,
 }
 
 ////////////////////////////////////////////////
@@ -439,8 +430,8 @@ main :: proc () {
                 
                 case sdl.K_I:     print_profile_and_stats = true
                 
-                case sdl.K_PLUS:  debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level+1, 0, cast(i32) len(stuff.depth_pyramid_mips)-1)
-                case sdl.K_MINUS: debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level-1, 0, cast(i32) len(stuff.depth_pyramid_mips)-1)
+                case sdl.K_PLUS:  debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level+1, 0, cast(i32) len(stuff.depth_pyramid_mip_sizes)-1)
+                case sdl.K_MINUS: debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level-1, 0, cast(i32) len(stuff.depth_pyramid_mip_sizes)-1)
                 
                 case sdl.K_ESCAPE: quit = true
                 }
@@ -524,18 +515,14 @@ main :: proc () {
         
         if reload_shaders_if_needed(watchers, shader_allocator, &late_cull_shader) || !pipeline_is_valid(late_cull_pipeline) {
             destroy_pipeline(&gpu, late_cull_pipeline)
-            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, late_cull_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, late_cull_descriptor_set_layout)
-            late_cull_pipeline.update_template = create_update_template(gpu.device, .COMPUTE, late_cull_pipeline.layout, late_cull_shader)
+            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, late_cull_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, heap = true, sampler_hack_names = {"", "depth_sampler"})
+            // late_cull_pipeline.update_template = create_update_template(gpu.device, .COMPUTE, late_cull_pipeline.layout, late_cull_shader)
             fmt.printfln("Recreated late_cull_pipeline.")
         }
         
-        depth_pyramid_with_heap := !false
         if reload_shaders_if_needed(watchers, shader_allocator, &depth_reduce_shader) || !pipeline_is_valid(depth_pipeline) {
             destroy_pipeline(&gpu, depth_pipeline)
-            depth_pipeline = gpu_create_compute_pipeline(&gpu, depth_reduce_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, depth_descriptor_set_layout, heap = depth_pyramid_with_heap, sampler_hack_names = {"", "depth_sampler", ""})
-            if !depth_pyramid_with_heap {
-                depth_pipeline.update_template = create_update_template(gpu.device, .COMPUTE, depth_pipeline.layout, depth_reduce_shader)
-            }
+            depth_pipeline = gpu_create_compute_pipeline(&gpu, depth_reduce_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, depth_descriptor_set_layout, heap = true, sampler_hack_names = {"", "depth_sampler", ""})
             fmt.printfln("Recreated depth_pipeline.")
         }
         
@@ -783,42 +770,23 @@ main :: proc () {
             gpu_set_pipeline(cmd, depth_pipeline)
                 
                 updates: [dynamic; 32] DescriptorUpdateData
-                prev_mip: ^Depth_Pyramid_Mip
-                for &mip, mip_level in stuff.depth_pyramid_mips {
-                    // @shaders depth_reduce.comp
-                    
-                    
+                for mip_size, mip_level in stuff.depth_pyramid_mip_sizes {
                     clear(&updates)
-                    if depth_pyramid_with_heap {
-                        gpu_set_active_heap(cmd, &descriptor_heap)
-                        
-                        append(&updates, DescriptorUpdateData { image = {
-                            {},
-                            mip_level == 0 ? stuff.depth_buffer                        : stuff.depth_pyramid,
-                            mip_level == 0 ? stuff.depth_buffer.view                   : prev_mip.view,
-                            mip_level == 0 ? 0 : cast(u32) mip_level-1, 
-                            1,
-                        }})
-                        append(&updates, DescriptorUpdateData { sampler = {}})
-                        append(&updates, DescriptorUpdateData { image = {  {}, stuff.depth_pyramid, mip.view, cast(u32) mip_level, 1 }})
-                        gpu_push_descriptors(cmd, &frame_descriptor, updates[:], { depth_reduce_shader })
-                    } else{
-                        append(&updates, DescriptorUpdateData { old = {
-                            {},
-                            mip_level == 0 ? stuff.depth_buffer.view        : prev_mip.view,
-                            mip_level == 0 ? stuff.depth_buffer.last_layout : .GENERAL,
-                        }})
-                        append(&updates, DescriptorUpdateData { old = {stuff.depth_sampler, {},       {} } })
-                        append(&updates, DescriptorUpdateData { old = {stuff.depth_sampler, mip.view, .GENERAL } })
-                        vk.CmdPushDescriptorSetWithTemplate(cmd, depth_pipeline.update_template, depth_pipeline.layout, 0, raw_data(&updates))
-                    }
+                    gpu_set_active_heap(cmd, &descriptor_heap)
                     
-                    prev_mip = &mip
+                    append(&updates, DescriptorUpdateData {
+                        mip_level == 0 ? stuff.depth_buffer : stuff.depth_pyramid,
+                        mip_level == 0 ? 0 : cast(u32) mip_level-1, 
+                        1,
+                    })
+                    append(&updates, DescriptorUpdateData {})
+                    append(&updates, DescriptorUpdateData { stuff.depth_pyramid, cast(u32) mip_level, 1 })
+                    gpu_push_descriptors(cmd, &frame_descriptor, updates[:], { depth_reduce_shader })
                     
                     depth_globals_cpu, depth_globals_gpu := bump_allocate_type(bump, Depth_Globals)
-                    depth_globals_cpu^ = Depth_Globals { size = cast(v2) mip.size }
+                    depth_globals_cpu^ = Depth_Globals { size = cast(v2) mip_size }
                     
-                    gpu_dispatch(cmd, &frame_descriptor, depth_globals_gpu, get_group_count(depth_reduce_shader, **mip.size), heap = depth_pyramid_with_heap)
+                    gpu_dispatch(cmd, &frame_descriptor, depth_globals_gpu, get_group_count(depth_reduce_shader, **mip_size), heap = true)
                     
                     gpu_image_barrier_from_last_transition(cmd, &stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL, flags = { .BY_REGION })
                 }
@@ -896,12 +864,12 @@ main :: proc () {
                 gpu_set_pipeline(cmd, late_cull_pipeline)
                     
                     updates := [?] DescriptorUpdateData {
-                        { old = { 0,                   stuff.depth_pyramid.view, .GENERAL } },
-                        { old = { stuff.depth_sampler, 0,                        {}       } },
+                        { stuff.depth_pyramid, 0, vk.REMAINING_MIP_LEVELS },
+                        { },
                     }
-                    vk.CmdPushDescriptorSetWithTemplate(cmd, late_cull_pipeline.update_template, late_cull_pipeline.layout, 0, &updates[0])
+                    push_descriptor_heap(&frame_descriptor, updates[:], { late_cull_shader })
                     
-                    gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)))
+                    gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)), heap = true)
                     
             gpu_profile_zone_end()
             gpu_labeled_region_end(cmd)
@@ -959,7 +927,7 @@ main :: proc () {
             } else {
                 source := stuff.depth_pyramid
                 
-                mip_size  := cast(iv2) stuff.depth_pyramid_mips[debug.display_pyramid_mip_level].size
+                mip_size  := cast(iv2) stuff.depth_pyramid_mip_sizes[debug.display_pyramid_mip_level]
                 dest_size := cast(iv2) gpu.swapchain_size
                 
                 vk.CmdBlitImage(cmd, source.image, source.last_layout, destination.image, destination.last_layout, 1, &vk.ImageBlit {
@@ -1144,32 +1112,26 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_S
     stuff.color_buffer = gpu_allocate_texture(gpu, default_texture_desc(size = {gpu.swapchain_size.x, gpu.swapchain_size.y, 1}, format = gpu.swapchain_format,      usage = { .COLOR_ATTACHMENT, .TRANSFER_SRC }))
     
     for i in 0..<mip_count {
-        mip := append_into(&stuff.depth_pyramid_mips)
-        mip.view = gpu_create_texture_view(gpu, stuff.depth_pyramid, i, 1)
-        mip.size = pyramid_size
-        mip.size.x >>= i
-        mip.size.y >>= i
-        mip.size = vec_max(mip.size, 1)
+        mip_size := pyramid_size
+        mip_size.x >>= i
+        mip_size.y >>= i
+        mip_size = vec_max(mip_size, 1)
+        append(&stuff.depth_pyramid_mip_sizes, mip_size)
     }
     
-    stuff.depth_pyramid.view = gpu_create_texture_view(gpu, stuff.depth_pyramid, 0, mip_count)
     stuff.depth_buffer.view  = gpu_create_texture_view(gpu, stuff.depth_buffer, 0, 1)
     stuff.color_buffer.view  = gpu_create_texture_view(gpu, stuff.color_buffer, 0, 1)
 }
 
 destroy_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain, final := false) {
     gpu_free_image(gpu, stuff.depth_pyramid)
-    gpu_destroy_texture_view(gpu, stuff.depth_pyramid.view)
     
     gpu_free_image(gpu, stuff.depth_buffer)
     gpu_free_image(gpu, stuff.color_buffer)
     gpu_destroy_texture_view(gpu, stuff.depth_buffer.view)
     gpu_destroy_texture_view(gpu, stuff.color_buffer.view)
     
-    for &it in stuff.depth_pyramid_mips {
-        gpu_destroy_texture_view(gpu, it.view)
-    }
-    clear(&stuff.depth_pyramid_mips)
+    clear(&stuff.depth_pyramid_mip_sizes)
     
     if final {
         // @todo(viktor): make gpu_destroy_sampler

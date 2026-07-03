@@ -1460,7 +1460,7 @@ push_descriptor_heap :: proc (frame_descriptor: ^Frame_Descriptor, updates: [] D
             case .SAMPLED_IMAGE, .STORAGE_IMAGE:
                 image := info.image
                 
-                get_descriptor_image(frame_descriptor.gpu, image.image.image, image.image.format, image.image.last_layout, image.mip_base, image.mip_count, type, &descriptor, descriptor_size)
+                get_descriptor_image(frame_descriptor.gpu, image.image, image.format, image.last_layout, info.mip_base, info.mip_count, type, &descriptor, descriptor_size)
             
             case .UNIFORM_BUFFER, .STORAGE_BUFFER:
                 unimplemented()
