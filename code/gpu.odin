@@ -529,24 +529,26 @@ GpuSlice :: struct ($T: typeid) {
     byte_size: int,
 }
 
-// @todo(viktor): can we find a way not to store this metadata per allocation?
-_the_buffer_allocations: map[vk.DeviceAddress] Buffer_Allocation
-Buffer_Allocation :: struct {
-    buffer: Buffer,
-    offset: vk.DeviceSize,
+// @todo(viktor): can we find a way not or a better place to store this metadata per allocation?
+_the_gpu_allocations: map[vk.DeviceAddress] GpuAllocation
+GpuAllocation :: struct {
+    buffer:  vk.Buffer,
+    memory:  vk.DeviceMemory,
+    address: vk.DeviceAddress,
+    offset:  vk.DeviceSize,
 }
 
-gpu_reflect_get_allocation :: proc (address: vk.DeviceAddress) -> Buffer_Allocation {
-    alloc, ok := _the_buffer_allocations[address]
+gpu_reflect_get_allocation :: proc (address: vk.DeviceAddress) -> GpuAllocation {
+    alloc, ok := _the_gpu_allocations[address]
     assert(ok)
     return alloc
 } 
-gpu_reflect_get_buffer :: proc (address: vk.DeviceAddress) -> (Buffer, vk.DeviceSize) {
+gpu_reflect_get_buffer :: proc (address: vk.DeviceAddress) -> (vk.Buffer, vk.DeviceSize) {
     alloc := gpu_reflect_get_allocation(address)
     return alloc.buffer, alloc.offset
 }
-gpu_reflect_set_allocation :: proc (address: vk.DeviceAddress, buffer: Buffer, offset: u32 = 0) {
-    _the_buffer_allocations[address] = { buffer, cast(vk.DeviceSize) offset }
+gpu_reflect_set_allocation :: proc (address: vk.DeviceAddress, buffer: GpuAllocation, offset: u32 = 0) {
+    _the_gpu_allocations[address] = { buffer.buffer, buffer.memory, buffer.address, buffer.offset + cast(vk.DeviceSize) offset }
 }
 
 gpu_allocate :: proc { gpu_allocate_size, gpu_allocate_slice, gpu_allocate_type }
@@ -561,39 +563,39 @@ gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Me
     case .Readback: flags = { .HOST_VISIBLE, .HOST_COHERENT, .HOST_CACHED }
     }
     
-    buffer: Buffer
+    alloc: GpuAllocation
     create_info := vk.BufferCreateInfo {
         sType = .BUFFER_CREATE_INFO,
         size  = auto_cast size,
         usage = usage,
     }
     
-    check(vk.CreateBuffer(gpu.device, &create_info, nil, &buffer.buffer))
+    check(vk.CreateBuffer(gpu.device, &create_info, nil, &alloc.buffer))
     
     requirements: vk.MemoryRequirements
-    vk.GetBufferMemoryRequirements(gpu.device, buffer.buffer, &requirements)
+    vk.GetBufferMemoryRequirements(gpu.device, alloc.buffer, &requirements)
     if requirements.alignment < cast(vk.DeviceSize) alignment {
         requirements.alignment = cast(vk.DeviceSize) alignment
     }
     
-    buffer.memory = select_memory_type_and_allocate(gpu, requirements, flags, add_device_address_flag = true)
+    alloc.memory = select_memory_type_and_allocate(gpu, requirements, flags, add_device_address_flag = true)
     
-    check(vk.BindBufferMemory(gpu.device, buffer.buffer, buffer.memory, 0))
+    check(vk.BindBufferMemory(gpu.device, alloc.buffer, alloc.memory, 0))
     
-    vk.MapMemory(gpu.device, buffer.memory, 0, auto_cast size, {}, &cpu_result)
+    vk.MapMemory(gpu.device, alloc.memory, 0, auto_cast size, {}, &cpu_result)
     
     adress_create_info := vk.BufferDeviceAddressInfo {
         sType = .BUFFER_DEVICE_ADDRESS_INFO,
-        buffer = buffer.buffer,
+        buffer = alloc.buffer,
     }
     
-    buffer.address = vk.GetBufferDeviceAddress(gpu.device, &adress_create_info)
-    assert(buffer.address != 0)
+    alloc.address = vk.GetBufferDeviceAddress(gpu.device, &adress_create_info)
+    assert(alloc.address != 0)
     
-    info := vk.BufferDeviceAddressInfo { sType  = .BUFFER_DEVICE_ADDRESS_INFO, buffer = buffer.buffer }
+    info := vk.BufferDeviceAddressInfo { sType  = .BUFFER_DEVICE_ADDRESS_INFO, buffer = alloc.buffer }
     gpu_result = vk.GetBufferDeviceAddress(gpu.device, &info)
     
-    gpu_reflect_set_allocation(gpu_result, buffer)
+    gpu_reflect_set_allocation(gpu_result, alloc)
     
     return cpu_result, gpu_result
 }
@@ -613,10 +615,10 @@ gpu_allocate_type :: proc (gpu: ^Gpu, $T: typeid, memory: Memory_Kind = .Default
 
 gpu_free :: proc { gpu_free_pointer, gpu_free_address, gpu_free_slice }
 gpu_free_pointer :: proc (gpu: ^Gpu, pointer: vk.DeviceAddress) {
-    buffer, offset := gpu_reflect_get_buffer(pointer)
-    assert(offset == 0)
-    vk.FreeMemory(gpu.device,    buffer.memory, nil)
-    vk.DestroyBuffer(gpu.device, buffer.buffer, nil)
+    alloc := gpu_reflect_get_allocation(pointer)
+    assert(alloc.offset == 0)
+    vk.FreeMemory(gpu.device,    alloc.memory, nil)
+    vk.DestroyBuffer(gpu.device, alloc.buffer, nil)
 }
 gpu_free_address :: proc (gpu: ^Gpu, address: GpuAddress($T)) {
     gpu_free_pointer(gpu, address.p)
@@ -671,6 +673,7 @@ gpu_allocate_texture :: proc (gpu: ^Gpu, desc: Texture_Desc) -> Image {
 }
 
 get_image_aspect_mask :: proc (format: vk.Format) -> vk.ImageAspectFlags {
+    // :Stencil: add .STENCIL to the aspect mask
     result := vk.ImageAspectFlags { .COLOR }
     #partial switch format {
     case .D32_SFLOAT, .D32_SFLOAT_S8_UINT, .D16_UNORM, .D16_UNORM_S8_UINT, .D24_UNORM_S8_UINT: result = { .DEPTH }
@@ -917,7 +920,6 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
     
     result.layout = create_pipeline_layout(gpu, result.shader_stages, set_layout)
         
-    // @todo(viktor): make as much of this a dynamic state
     dynamic_states := [] vk.DynamicState { .VIEWPORT, .SCISSOR, .LINE_WIDTH }
     
     color_formats: [dynamic; 32] Format
@@ -1205,7 +1207,7 @@ gpu_copy_to_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: Imag
         imageExtent      = { **size },
     }
     
-    vk.CmdCopyBufferToImage(cmd, alloc.buffer.buffer, destination.image, destination.last_transition.layout, 1, &region)
+    vk.CmdCopyBufferToImage(cmd, alloc.buffer, destination.image, destination.last_transition.layout, 1, &region)
 }
 
 gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: vk.DeviceAddress, source: Image, size: uv3) {
@@ -1217,7 +1219,7 @@ gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: vk
         imageExtent      = { **size },
     }
     
-    vk.CmdCopyImageToBuffer(cmd, source.image, source.last_transition.layout, alloc.buffer.buffer, 1, &region)
+    vk.CmdCopyImageToBuffer(cmd, source.image, source.last_transition.layout, alloc.buffer, 1, &region)
 }
 
 gpu_barrier :: proc (command_buffer: vk.CommandBuffer, before, after: vk.PipelineStageFlags2, hazard := Hazard_Flags {}, loc := #caller_location) {
@@ -1369,7 +1371,7 @@ gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, commands: vk.De
     // @speed 
     commands, commands_base_offset := gpu_reflect_get_buffer(commands)
     count,    count_offset         := gpu_reflect_get_buffer(count.p)
-    vk.CmdDrawMeshTasksIndirectCountEXT(cmd, commands.buffer, commands_base_offset + cast(vk.DeviceSize) command_offset, count.buffer, count_offset, max_count, stride)
+    vk.CmdDrawMeshTasksIndirectCountEXT(cmd, commands, commands_base_offset + cast(vk.DeviceSize) command_offset, count, count_offset, max_count, stride)
 }
 
 

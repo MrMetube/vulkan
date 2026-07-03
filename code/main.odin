@@ -687,7 +687,7 @@ main :: proc () {
                 
                 {
                     count, offset := gpu_reflect_get_buffer(draw_command_count_gpu.p)
-                    vk.CmdFillBuffer(cmd, count.buffer, offset, gpu_size_of(draw_command_count_gpu), 0)
+                    vk.CmdFillBuffer(cmd, count, offset, gpu_size_of(draw_command_count_gpu), 0)
                 }
                 
                 gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
@@ -696,7 +696,7 @@ main :: proc () {
                     dvb_cleared = true
                     
                     visibility_buffer, offset := gpu_reflect_get_buffer(draw_visibilty_buffer.p)
-                    vk.CmdFillBuffer(cmd, visibility_buffer.buffer, offset, cast(vk.DeviceSize) len(draws) * size_of(dvb_view[0]), 1)
+                    vk.CmdFillBuffer(cmd, visibility_buffer, offset, cast(vk.DeviceSize) len(draws) * size_of(dvb_view[0]), 1)
                     
                     gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
                 }
@@ -713,12 +713,10 @@ main :: proc () {
             
             ////////////////////////////////////////////////
             
-            // @todo(viktor): should these be combined into one api call?
             // this apparently needs to happend before we do anything related to rendering
             gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
             gpu_image_barriers(cmd,  { .BY_REGION },
                 create_image_barrier(&stuff.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL),
-                // :Stencil: add .STENCIL to the aspect mask
                 create_image_barrier(&stuff.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL), 
             )
             
@@ -856,7 +854,7 @@ main :: proc () {
                 
                 {
                     count, offset := gpu_reflect_get_buffer(draw_command_count_gpu.p)
-                    vk.CmdFillBuffer(cmd, count.buffer, offset, gpu_size_of(draw_command_count_gpu), 0)
+                    vk.CmdFillBuffer(cmd, count, offset, gpu_size_of(draw_command_count_gpu), 0)
                 }
                 
                 gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
@@ -881,12 +879,10 @@ main :: proc () {
             gpu_profile_zone_begin("late rendering pass")
             gpu_labeled_region_begin(cmd, "late rendering pass", {0.6, 0.1, 07, 1.0})
             
-                // @todo(viktor): should these be combined into one api call?
                 // this apparently needs to happend before we do anything related to rendering
                 gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
                 gpu_image_barriers(cmd, { .BY_REGION },
                     create_image_barrier_from_last_transition(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL), 
-                    // :Stencil: add .STENCIL to the aspect mask
                     create_image_barrier_from_last_transition(&stuff.color_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL),
                 )
                 
@@ -1111,7 +1107,6 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_S
     
     stuff.depth_pyramid_size = pyramid_size
     stuff.depth_pyramid = gpu_allocate_texture(gpu, default_texture_desc(size = {pyramid_size.x, pyramid_size.y, 1}, format = .R32_SFLOAT, mip_count = mip_count, usage = { .SAMPLED, .STORAGE, .TRANSFER_SRC }))
-    // :Stencil: add the .STENCIL mask bit
     stuff.depth_buffer = gpu_allocate_texture(gpu, default_texture_desc(size = {gpu.swapchain_size.x, gpu.swapchain_size.y, 1}, format = stuff.depth_buffer.format, usage = { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED }))
     stuff.color_buffer = gpu_allocate_texture(gpu, default_texture_desc(size = {gpu.swapchain_size.x, gpu.swapchain_size.y, 1}, format = gpu.swapchain_format,      usage = { .COLOR_ATTACHMENT, .TRANSFER_SRC }))
     

@@ -43,12 +43,6 @@ Image :: struct {
     last_transition: Transition,
 }
 
-Buffer :: struct {
-    buffer:  vk.Buffer,
-    memory:  vk.DeviceMemory,
-    address: vk.DeviceAddress,
-}
-
 Transition :: struct {
     stage:  vk.PipelineStageFlags2,
     access: vk.AccessFlags2,

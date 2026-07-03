@@ -3,10 +3,10 @@ package main
 import vk "vendor:vulkan"
 
 Bump_Allocator :: struct {
-    backing: Buffer,
+    backing: GpuAllocation,
     
     cpu: [] u8,
-    gpu: [] u8,
+    gpu: vk.DeviceAddress,
     
     offset: u32,
 }
@@ -16,9 +16,9 @@ bump_allocator_make_temporary :: proc (gpu: ^Gpu, size: u32, usage := vk.BufferU
     
     gpu_slice: GpuSlice(u8)
     result.cpu, gpu_slice = gpu_allocate_slice(gpu, [] u8, size, usage = usage)
-    result.gpu = slice_from_parts(u8, transmute(pmm) gpu_slice.p, size)
+    result.gpu = gpu_slice.p
     
-    result.backing, _ = gpu_reflect_get_buffer(gpu_slice.p)
+    result.backing = gpu_reflect_get_allocation(gpu_slice.p)
     
     return result
 }
@@ -28,8 +28,7 @@ bump_free_all :: proc (bump: ^Bump_Allocator) {
 }
 
 bump_allocator_delete :: proc (gpu: ^Gpu, bump: ^Bump_Allocator) {
-    address := transmute(vk.DeviceAddress) &bump.gpu[0]
-    gpu_free(gpu, address)
+    gpu_free(gpu, bump.gpu)
     
     bump^ = {}
 }
@@ -42,7 +41,7 @@ bump_allocate :: proc (bump: ^Bump_Allocator, size: u32, alignment: u32 = 16) ->
     // if bump.offset + size > auto_cast len(bump.cpu) { bump.offset = 0 }
     
     cpu = bump.cpu[bump.offset:][:size]
-    gpu = transmute(vk.DeviceAddress) &bump.gpu[bump.offset]
+    gpu = bump.gpu + cast(vk.DeviceAddress) bump.offset
     
     gpu_reflect_set_allocation(gpu, bump.backing, bump.offset)
     
