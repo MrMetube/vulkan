@@ -40,13 +40,9 @@ Image :: struct {
     view:   vk.ImageView,
     memory: vk.DeviceMemory,
     
-    last_transition: Transition,
-}
-
-Transition :: struct {
-    stage:  vk.PipelineStageFlags2,
-    access: vk.AccessFlags2,
-    layout: vk.ImageLayout,
+    last_stage:  vk.PipelineStageFlags2,
+    last_access: vk.AccessFlags2,
+    last_layout: vk.ImageLayout,
 }
 
 ////////////////////////////////////////////////
@@ -173,19 +169,20 @@ create_image_barrier :: proc (image: ^Image, src_stage: vk.PipelineStageFlags2, 
         image = image.image,
         subresourceRange = { aspectMask = aspect_mask, levelCount = vk.REMAINING_MIP_LEVELS, layerCount = vk.REMAINING_ARRAY_LAYERS },
     }
-    image.last_transition = { dst_stage, dst_access, new_layout }
+    image.last_stage  = dst_stage
+    image.last_access = dst_access
+    image.last_layout = new_layout
     
     return result
 }
 
-create_image_barrier_from_last_transition :: proc (image: ^Image, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout) -> vk.ImageMemoryBarrier2 {
-    last := image.last_transition
-    result := create_image_barrier(image, last.stage, last.access, last.layout, dst_stage, dst_access, new_layout)
+create_image_barrier_from_last :: proc (image: ^Image, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout) -> vk.ImageMemoryBarrier2 {
+    result := create_image_barrier(image, image.last_stage, image.last_access, image.last_layout, dst_stage, dst_access, new_layout)
     return result
 }
 
 gpu_image_barrier_from_last_transition :: proc (cmd: vk.CommandBuffer, image: ^Image, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, flags := vk.DependencyFlags {}) {
-    barrier := create_image_barrier_from_last_transition(image, dst_stage, dst_access, new_layout)
+    barrier := create_image_barrier_from_last(image, dst_stage, dst_access, new_layout)
     
     gpu_image_barriers(cmd, flags, barrier)
 }

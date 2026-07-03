@@ -297,7 +297,7 @@ main :: proc () {
             
             gpu_image_barrier_from_last_transition(cmd, &texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL) 
             
-            write_texture_to_heap(&gpu, &texture_heap, index, texture.view, texture.last_transition.layout)
+            write_texture_to_heap(&gpu, &texture_heap, index, texture.view, texture.last_layout)
         }
             
         gpu_barrier(cmd, { .ALL_TRANSFER }, { .ALL_COMMANDS }, { .descriptors })
@@ -621,7 +621,7 @@ main :: proc () {
         gpu_profile_frame_begin(gpu.device, cmd)
         
         ////////////////////////////////////////////////
-        // Setting these outside of rendering-sections means they persist across all sections.
+        // Setting these outside of rendering-passes means they persist across all passes.
         gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
         gpu_set_scissor(cmd,  size = gpu.swapchain_size)
         
@@ -765,8 +765,8 @@ main :: proc () {
             ////////////////////////////////////////////////
             
             gpu_image_barriers(cmd, { .BY_REGION },
-                create_image_barrier_from_last_transition(&stuff.depth_buffer,  { .COMPUTE_SHADER }, { .SHADER_READ  }, .SHADER_READ_ONLY_OPTIMAL),
-                create_image_barrier_from_last_transition(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL),
+                create_image_barrier_from_last(&stuff.depth_buffer,  { .COMPUTE_SHADER }, { .SHADER_READ  }, .SHADER_READ_ONLY_OPTIMAL),
+                create_image_barrier_from_last(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL),
             )
             
             gpu_set_pipeline(cmd, depth_pipeline)
@@ -779,8 +779,8 @@ main :: proc () {
                     clear(&updates)
                     append(&updates, DescriptorUpdateData { image = { 
                         stuff.depth_sampler,
-                        mip_level == 0 ? stuff.depth_buffer.view                   : prev_mip.view,
-                        mip_level == 0 ? stuff.depth_buffer.last_transition.layout : .GENERAL,
+                        mip_level == 0 ? stuff.depth_buffer.view        : prev_mip.view,
+                        mip_level == 0 ? stuff.depth_buffer.last_layout : .GENERAL,
                     } })
                     append(&updates, DescriptorUpdateData { image = { stuff.depth_sampler, mip.view, .GENERAL } })
                     vk.CmdPushDescriptorSetWithTemplate(cmd, depth_pipeline.update_template, depth_pipeline.layout, 0, raw_data(&updates))
@@ -884,8 +884,8 @@ main :: proc () {
                 // this apparently needs to happend before we do anything related to rendering
                 gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
                 gpu_image_barriers(cmd, { .BY_REGION },
-                    create_image_barrier_from_last_transition(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL), 
-                    create_image_barrier_from_last_transition(&stuff.color_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL),
+                    create_image_barrier_from_last(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL), 
+                    create_image_barrier_from_last(&stuff.color_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL),
                 )
                 
                 ////////////////////////////////////////////////
@@ -917,12 +917,12 @@ main :: proc () {
             }
             gpu_image_barriers(cmd,  { .BY_REGION },
                 create_image_barrier(&gpu.swapchain_images[gpu.image_index], { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL),
-                create_image_barrier_from_last_transition(source_image, { .ALL_TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL),
+                create_image_barrier_from_last(source_image, { .ALL_TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL),
             )
             
             destination := gpu.swapchain_images[gpu.image_index]
             if !debug.display_pyramid {
-                vk.CmdCopyImage(cmd, stuff.color_buffer.image, stuff.color_buffer.last_transition.layout, destination.image, destination.last_transition.layout, 1, &vk.ImageCopy {
+                vk.CmdCopyImage(cmd, stuff.color_buffer.image, stuff.color_buffer.last_layout, destination.image, destination.last_layout, 1, &vk.ImageCopy {
                     srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     extent         = { gpu.swapchain_size.x, gpu.swapchain_size.y, 1 },
@@ -933,7 +933,7 @@ main :: proc () {
                 mip_size  := cast(iv2) stuff.depth_pyramid_mips[debug.display_pyramid_mip_level].size
                 dest_size := cast(iv2) gpu.swapchain_size
                 
-                vk.CmdBlitImage(cmd, source.image, source.last_transition.layout, destination.image, destination.last_transition.layout, 1, &vk.ImageBlit {
+                vk.CmdBlitImage(cmd, source.image, source.last_layout, destination.image, destination.last_layout, 1, &vk.ImageBlit {
                     srcSubresource = { aspectMask = { .COLOR }, layerCount = 1, mipLevel = cast(u32) debug.display_pyramid_mip_level },
                     dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     srcOffsets = { {0, 0, 0}, {mip_size.x, mip_size.y,   1}},

@@ -59,7 +59,7 @@ Gpu :: struct {
     swapchain_size: uv2,
     
     swapchain: vk.SwapchainKHR,
-    swapchain_images: [dynamic] Image, // this is only an image to make use of the last: Transition
+    swapchain_images: [dynamic] Image, // this is only an image to make use of the last stage access and layout
     render_completes: [dynamic] vk.Semaphore,
 }
 
@@ -1244,7 +1244,7 @@ gpu_copy_to_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: Imag
         imageExtent      = { **size },
     }
     
-    vk.CmdCopyBufferToImage(cmd, alloc.buffer, destination.image, destination.last_transition.layout, 1, &region)
+    vk.CmdCopyBufferToImage(cmd, alloc.buffer, destination.image, destination.last_layout, 1, &region)
 }
 
 gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: vk.DeviceAddress, source: Image, size: uv3) {
@@ -1256,7 +1256,7 @@ gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: vk
         imageExtent      = { **size },
     }
     
-    vk.CmdCopyImageToBuffer(cmd, source.image, source.last_transition.layout, alloc.buffer, 1, &region)
+    vk.CmdCopyImageToBuffer(cmd, source.image, source.last_layout, alloc.buffer, 1, &region)
 }
 
 gpu_barrier :: proc (command_buffer: vk.CommandBuffer, before, after: vk.PipelineStageFlags2, hazard := Hazard_Flags {}, loc := #caller_location) {
