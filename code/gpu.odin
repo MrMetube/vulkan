@@ -1133,7 +1133,7 @@ gpu_copy :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: any, source: pm
     unimplemented()
 }
 
-gpu_copy_to_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: Image, source: vk.DeviceAddress) {
+    gpu_copy_to_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: Image, source: vk.DeviceAddress, layout := vk.ImageLayout.GENERAL) {
     alloc := gpu_reflect_get_allocation(source)
     
     region := vk.BufferImageCopy {
@@ -1142,10 +1142,10 @@ gpu_copy_to_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: Imag
         imageExtent      = { **destination.size },
     }
     
-    vk.CmdCopyBufferToImage(cmd, alloc.buffer, destination.image, destination.last_layout, 1, &region)
+    vk.CmdCopyBufferToImage(cmd, alloc.buffer, destination.image, layout, 1, &region)
 }
 
-gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: vk.DeviceAddress, source: Image, size: uv3) {
+gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: vk.DeviceAddress, source: Image, size: uv3, layout := vk.ImageLayout.GENERAL) {
     alloc := gpu_reflect_get_allocation(destination)
     
     region := vk.BufferImageCopy {
@@ -1154,7 +1154,7 @@ gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: vk
         imageExtent      = { **size },
     }
     
-    vk.CmdCopyImageToBuffer(cmd, source.image, source.last_layout, alloc.buffer, 1, &region)
+    vk.CmdCopyImageToBuffer(cmd, source.image, layout, alloc.buffer, 1, &region)
 }
 
 gpu_barrier :: proc (command_buffer: vk.CommandBuffer, before, after: vk.PipelineStageFlags2, hazard := Hazard_Flags {}, loc := #caller_location) {
@@ -1217,6 +1217,7 @@ gpu_set_scissor :: proc (cmd: vk.CommandBuffer, offset: iv2 = 0, size: uv2) {
 
 Render_Target :: struct {
     texture: Image,
+    view:    vk.ImageView,
     
     load_op:  vk.AttachmentLoadOp,
     store_op: vk.AttachmentStoreOp,
@@ -1242,8 +1243,8 @@ gpu_begin_render_pass :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, desc: Render_Pa
         it^ = {
             sType = .RENDERING_ATTACHMENT_INFO,
             
-            imageLayout = .ATTACHMENT_OPTIMAL,
-            imageView   = target.texture.view,
+            imageLayout = .GENERAL,
+            imageView   = target.view,
             loadOp  = target.load_op,
             storeOp = target.store_op,
         }
@@ -1263,8 +1264,8 @@ gpu_begin_render_pass :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, desc: Render_Pa
     if desc.depth_target.texture.image != 0 {
         rendering_info.pDepthAttachment = &vk.RenderingAttachmentInfo {
             sType = .RENDERING_ATTACHMENT_INFO,
-            imageLayout = .ATTACHMENT_OPTIMAL,
-            imageView   = desc.depth_target.texture.view,
+            imageLayout = .GENERAL,
+            imageView   = desc.depth_target.view,
             loadOp      = desc.depth_target.load_op,
             storeOp     = desc.depth_target.store_op,
             clearValue  = { depthStencil = { depth = desc.depth_target.clear_depth } },
@@ -1274,8 +1275,8 @@ gpu_begin_render_pass :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, desc: Render_Pa
     if desc.stencil_target.texture.image != 0 {
         rendering_info.pStencilAttachment = &vk.RenderingAttachmentInfo {
             sType = .RENDERING_ATTACHMENT_INFO,
-            imageLayout = .ATTACHMENT_OPTIMAL,
-            imageView   = desc.stencil_target.texture.view,
+            imageLayout = .GENERAL,
+            imageView   = desc.stencil_target.view,
             loadOp      = desc.stencil_target.load_op,
             storeOp     = desc.stencil_target.store_op,
             clearValue  = { depthStencil = { stencil = desc.stencil_target.clear_stencil } },
@@ -1297,7 +1298,7 @@ gpu_end_render_pass :: proc (cmd: vk.CommandBuffer) {
 // void gpuDrawMeshlets(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, uvec3 dim);
 // void gpuDrawMeshletsIndirect(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, void *dimGpu);
 
-push_descriptor_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, frame_descriptor: ^Frame_Descriptor, updates: [] DescriptorUpdateData) -> u32 {
+push_descriptor_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, frame_descriptor: ^Frame_Descriptor, updates: [] ImageUpdateData) -> u32 {
     resource_types, resource_mask := the_bound_pipeline.resource_types, the_bound_pipeline.resource_mask
     
     descriptor_count := card(resource_mask)
@@ -1319,7 +1320,7 @@ push_descriptor_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, frame_descripto
             case .SAMPLED_IMAGE, .STORAGE_IMAGE:
                 image := info.image
                 
-                get_descriptor_image(gpu, image.image, image.format, image.last_layout, info.mip_base, info.mip_count, type, &descriptor, descriptor_size)
+                get_descriptor_image(gpu, image.image, image.format, info.mip_base, info.mip_count, type, &descriptor, descriptor_size)
             
             case .UNIFORM_BUFFER, .STORAGE_BUFFER:
                 unimplemented()
@@ -1359,7 +1360,7 @@ gpu_push_constants :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Desc
 }
 
 // @cleanup
-gpu_push_descriptors :: proc (cmd: vk.CommandBuffer, gpu: ^Gpu, heap: ^Descriptor_Heap, frame_descriptor: ^Frame_Descriptor, updates: [] DescriptorUpdateData) {
+gpu_push_descriptors :: proc (cmd: vk.CommandBuffer, gpu: ^Gpu, heap: ^Descriptor_Heap, frame_descriptor: ^Frame_Descriptor, updates: [] ImageUpdateData) {
     descriptor_offset := push_descriptor_heap(gpu, heap, frame_descriptor, updates)
     
     info := vk.PushDataInfoEXT {
@@ -1485,8 +1486,7 @@ gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: ^Descriptor_Heap) {
 }
 
 get_descriptor :: proc { get_descriptor_image, get_descriptor_buffer, get_descriptor_sampler }
-// @todo switch to .GENERAL layout for all images
-get_descriptor_image :: proc (gpu: ^Gpu, image: vk.Image, format: vk.Format, layout: vk.ImageLayout, mip_base: u32, mip_count: u32, type: vk.DescriptorType, descriptor: ^Descriptor, descriptor_size: u32) {
+get_descriptor_image :: proc (gpu: ^Gpu, image: vk.Image, format: vk.Format, mip_base: u32, mip_count: u32, type: vk.DescriptorType, descriptor: ^Descriptor, descriptor_size: u32) {
     aspect_mask := get_image_aspect_mask(format)
     
     image_info := vk.ImageDescriptorInfoEXT {
@@ -1498,7 +1498,7 @@ get_descriptor_image :: proc (gpu: ^Gpu, image: vk.Image, format: vk.Format, lay
             format   = format,
             subresourceRange = { aspectMask = aspect_mask, baseMipLevel = mip_base, levelCount = mip_count, layerCount = 1 },
         },
-        layout = layout,
+        layout = .GENERAL,
     }
     
     info := vk.ResourceDescriptorInfoEXT {

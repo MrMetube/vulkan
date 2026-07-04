@@ -15,13 +15,14 @@ import vk  "../lib/vulkan"
 
 Optimized :: ODIN_OPTIMIZATION_MODE == .Speed
 
-// @todo(viktor): make this runtime changeable
-VSync :: true when !Optimized else false
+// @todo make this runtime changeable
+// @todo disabling VSync produces a validation error, that we wont see if optimizations are enabled, as those disable validation
+VSync :: false when Optimized else true
 
 ////////////////////////////////////////////////
 
 // @cleanup
-DescriptorUpdateData :: struct { image: Image, mip_base, mip_count: u32 }
+ImageUpdateData :: struct { image: Image, mip_base, mip_count: u32 }
 
 Geometry :: struct {
     // @todo(viktor): all this data is not needed on the cpu, we could just directly upload it to the gpu buffers
@@ -35,6 +36,8 @@ Geometry :: struct {
 Stuff_With_The_Same_Lifetime_As_The_Swapchain :: struct {
     color_buffer: Image,
     depth_buffer: Image,
+    color_view: vk.ImageView,
+    depth_view: vk.ImageView,
     
     depth_pyramid: Image,
     depth_pyramid_mip_sizes: [dynamic; 16] uv2,
@@ -275,14 +278,14 @@ main :: proc () {
             cpu_data, gpu_data := bump_allocate(&upload_bump, cast(u32) len(loaded_texture.data), alignment = 32)
             copy(cpu_data, loaded_texture.data)
             
-            gpu_image_barrier(cmd, &texture, {}, {}, .UNDEFINED, { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL)
+            gpu_image_barriers(cmd, {},
+                create_image_barrier_from_undefined(&texture, { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .GENERAL)
+            )
             
             gpu_copy_to_texture(&gpu, cmd, texture, gpu_data)
-            
-            gpu_image_barrier_from_last_transition(cmd, &texture, { .FRAGMENT_SHADER }, { .SHADER_READ }, .READ_ONLY_OPTIMAL) 
         }
-        
-        gpu_barrier(cmd, { .ALL_TRANSFER }, { .ALL_COMMANDS }, { .descriptors })
+            
+        gpu_barrier(cmd, { .ALL_TRANSFER }, { .ALL_GRAPHICS })
         
         gpu_submit(gpu.transfer_queue, upload_semaphore, 1, cmd)
         gpu_wait_semaphore(&gpu, upload_semaphore, 1)
@@ -431,8 +434,8 @@ main :: proc () {
         delta_tick    := time.tick_diff(last_time, current_time)
         delta_tick    -= window_event_delta
         
-        delta_time_64 := time.duration_seconds(delta_tick)
-        delta_time := cast(f32) delta_time_64
+        cpu_delta := time.duration_seconds(delta_tick)
+        delta_time := cast(f32) cpu_delta
         last_time = current_time
         
         if mouse_wheel_delta != 0 {
@@ -459,9 +462,12 @@ main :: proc () {
             assert(ok)
         }
         
+        // @cleanup this signals that we need to transition all images in stuff from .UNDEFINED to .GENERAL image layout
+        recreated_stuff_this_frame := false
         if gpu.swapchain_state == .Was_Resized {
             gpu.swapchain_state = .Ok
             recreate_stuff(&gpu, &stuff)
+            recreated_stuff_this_frame = true
         }
         
         assert(gpu.swapchain_state != .Dirty)
@@ -664,18 +670,16 @@ main :: proc () {
                     vk.CmdFillBuffer(cmd, count, offset, gpu_size_of(draw_command_count_gpu), 0)
                 }
                 
-                gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
-                
                 if !dvb_cleared {
                     dvb_cleared = true
                     
                     visibility_buffer, offset := gpu_reflect_get_buffer(draw_visibilty_buffer.p)
                     vk.CmdFillBuffer(cmd, visibility_buffer, offset, cast(vk.DeviceSize) len(draws) * size_of(dvb_view[0]), 1)
-                    
-                    gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
                 }
                 
                 ////////////////////////////////////////////////
+                
+                gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
                 
                 gpu_set_pipeline(cmd, early_cull_pipeline)
                     gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(early_cull_shader, auto_cast len(draws)))
@@ -685,19 +689,21 @@ main :: proc () {
             
             ////////////////////////////////////////////////
             
-            // this apparently needs to happend before we do anything related to rendering
-            gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT, .MESH_SHADER_EXT, .TASK_SHADER_EXT })
-            gpu_image_barriers(cmd,  { .BY_REGION },
-                create_image_barrier(&stuff.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL),
-                create_image_barrier(&stuff.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL), 
-            )
+            gpu_barrier(cmd, { .BOTTOM_OF_PIPE, .COMPUTE_SHADER }, { .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS })
+            if recreated_stuff_this_frame {
+                gpu_image_barriers(cmd,  { .BY_REGION },
+                    create_image_barrier_from_undefined(&stuff.color_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .GENERAL),
+                    create_image_barrier_from_undefined(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE, .MEMORY_READ }, .GENERAL), 
+                    create_image_barrier_from_undefined(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .MEMORY_READ, .MEMORY_WRITE }, .GENERAL),
+                )
+            }
             
             ////////////////////////////////////////////////
             // early render - render objects that were visible last frame
             
             gpu_profile_zone_begin("early rendering pass")
             gpu_labeled_region_begin(cmd, "early rendering pass", {0.6, 0.1, 07, 1.0})
-                begin_meshlet_rendering(&gpu, cmd, stuff.color_buffer, stuff.depth_buffer, {0.07, 0.07, 0.07, 1}, early = true)
+                begin_meshlet_rendering(&gpu, cmd, &stuff, {0.07, 0.07, 0.07, 1}, early = true)
                         
                     if print_profile_and_stats {
                         vk.ResetQueryPool(gpu.device, stats_pool, 0, stats_count)
@@ -708,7 +714,7 @@ main :: proc () {
                     gpu_profile_zone_begin("meshlets")
                     
                     gpu_set_pipeline(cmd, meshlet_pipeline)
-                        updates := [] DescriptorUpdateData {
+                        updates := [] ImageUpdateData {
                             {},
                             { textures[0], 0, vk.REMAINING_MIP_LEVELS },
                             { textures[1], 0, vk.REMAINING_MIP_LEVELS },
@@ -741,27 +747,19 @@ main :: proc () {
             gpu_profile_zone_begin("depth pyramid building")
             gpu_labeled_region_begin(cmd, "depth pyramid building", {0.4, 0.8, 0, 1.0})
             
-            ////////////////////////////////////////////////
-            
-            gpu_image_barriers(cmd, { .BY_REGION },
-                create_image_barrier_from_last(&stuff.depth_buffer,  { .COMPUTE_SHADER }, { .SHADER_READ  }, .SHADER_READ_ONLY_OPTIMAL),
-                create_image_barrier(&stuff.depth_pyramid, {}, {}, .UNDEFINED, { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL),
-                
-            )
+            gpu_barrier(cmd, { .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COMPUTE_SHADER })
             
             gpu_set_pipeline(cmd, depth_pipeline)
-                
-                updates: [dynamic; 32] DescriptorUpdateData
                 for mip_size, mip_level in stuff.depth_pyramid_mip_sizes {
-                    clear(&updates)
-                    
-                    append(&updates, DescriptorUpdateData {
-                        mip_level == 0 ? stuff.depth_buffer : stuff.depth_pyramid,
-                        mip_level == 0 ? 0 : cast(u32) mip_level-1, 
-                        1,
-                    })
-                    append(&updates, DescriptorUpdateData {}) // depth_sampler
-                    append(&updates, DescriptorUpdateData { stuff.depth_pyramid, cast(u32) mip_level, 1 })
+                    updates := [] ImageUpdateData {
+                        {
+                            mip_level == 0 ? stuff.depth_buffer : stuff.depth_pyramid,
+                            mip_level == 0 ? 0 : cast(u32) mip_level-1, 
+                            1,
+                        },
+                        {}, // depth_sampler
+                        { stuff.depth_pyramid, cast(u32) mip_level, 1 },
+                    }
                     gpu_push_descriptors(cmd, &gpu, &descriptor_heap, &frame_descriptor, updates[:])
                     
                     depth_globals_cpu, depth_globals_gpu := bump_allocate_type(bump, Depth_Globals)
@@ -769,16 +767,11 @@ main :: proc () {
                     
                     gpu_dispatch(cmd, &frame_descriptor, depth_globals_gpu, get_group_count(depth_reduce_shader, **mip_size))
                     
-                    if mip_level == 0 {
-                        // only the first time is an image access transition, afterwards the compute barrier is enough
-                        gpu_image_barrier_from_last_transition(cmd, &stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL, flags = { .BY_REGION })
-                    }
                     gpu_barrier(cmd, { .COMPUTE_SHADER }, { .COMPUTE_SHADER })
                 }
-                ////////////////////////////////////////////////
-                
-                gpu_image_barrier_from_last_transition(cmd, &stuff.depth_buffer, {.EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL, flags = { .BY_REGION })
-                
+            
+            gpu_barrier(cmd, { .COMPUTE_SHADER }, { .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS })
+            
             gpu_labeled_region_end(cmd)
             gpu_profile_zone_end()
         }
@@ -833,7 +826,7 @@ main :: proc () {
                 
                 ////////////////////////////////////////////////
                 
-                gpu_barrier(cmd, { .DRAW_INDIRECT, .MESH_SHADER_EXT, .TASK_SHADER_EXT }, { .ALL_TRANSFER })
+                gpu_barrier(cmd, { .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }, { .ALL_TRANSFER })
                 
                 {
                     count, offset := gpu_reflect_get_buffer(draw_command_count_gpu.p)
@@ -847,7 +840,7 @@ main :: proc () {
                 
                 gpu_set_pipeline(cmd, late_cull_pipeline)
                     
-                    updates := [?] DescriptorUpdateData {
+                    updates := [?] ImageUpdateData {
                         { stuff.depth_pyramid, 0, vk.REMAINING_MIP_LEVELS },
                         { }, // depth_sampler
                     }
@@ -866,15 +859,15 @@ main :: proc () {
             
                 gpu_barrier(cmd, 
                     { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS, .COMPUTE_SHADER }, 
-                    { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS, .DRAW_INDIRECT, .MESH_SHADER_EXT, .TASK_SHADER_EXT }
+                    { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }
                 )
                 
                 ////////////////////////////////////////////////
             
-                begin_meshlet_rendering(&gpu, cmd, stuff.color_buffer, stuff.depth_buffer, {}, early = false)
+                begin_meshlet_rendering(&gpu, cmd, &stuff, {}, early = false)
                 
                     gpu_set_pipeline(cmd, meshlet_pipeline)
-                        updates2 := [] DescriptorUpdateData {
+                        updates2 := [] ImageUpdateData {
                             {}, // texture_sampler
                             { textures[0], 0, vk.REMAINING_MIP_LEVELS },
                             { textures[1], 0, vk.REMAINING_MIP_LEVELS },
@@ -899,38 +892,35 @@ main :: proc () {
         
         gpu_profile_zone_begin("copy to swapchain")
             
-            source_image := &stuff.color_buffer
+            source_image    := &stuff.color_buffer
+            swapchain_image := &gpu.swapchain_images[gpu.image_index]
+            
             if debug.display_pyramid {
                 source_image = &stuff.depth_pyramid
             }
-            gpu_image_barriers(cmd,  { .BY_REGION },
-                create_image_barrier(&gpu.swapchain_images[gpu.image_index], { .COLOR_ATTACHMENT_OUTPUT }, {}, .UNDEFINED, { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .TRANSFER_DST_OPTIMAL),
-                create_image_barrier_from_last(source_image, { .ALL_TRANSFER }, { .TRANSFER_READ }, .TRANSFER_SRC_OPTIMAL),
+            
+            gpu_barrier(cmd, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }, { .ALL_TRANSFER })
+            gpu_image_barriers(cmd, { .BY_REGION },
+                create_image_barrier_from_undefined(swapchain_image, { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .GENERAL, src_stage = { .COLOR_ATTACHMENT_OUTPUT }),
             )
             
-            destination := gpu.swapchain_images[gpu.image_index]
             if !debug.display_pyramid {
-                vk.CmdCopyImage(cmd, stuff.color_buffer.image, stuff.color_buffer.last_layout, destination.image, destination.last_layout, 1, &vk.ImageCopy {
+                vk.CmdCopyImage(cmd, source_image.image, .GENERAL, swapchain_image.image, .GENERAL, 1, &vk.ImageCopy {
                     srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
-                    extent         = { **destination.size },
+                    extent         = { **swapchain_image.size },
                 })
             } else {
-                source := stuff.depth_pyramid
-                
                 mip_size  := cast(iv2) stuff.depth_pyramid_mip_sizes[debug.display_pyramid_mip_level]
-                dest_size := cast(iv3) destination.size
-                
-                vk.CmdBlitImage(cmd, source.image, source.last_layout, destination.image, destination.last_layout, 1, &vk.ImageBlit {
+                vk.CmdBlitImage(cmd, source_image.image, .GENERAL, swapchain_image.image, .GENERAL, 1, &vk.ImageBlit {
                     srcSubresource = { aspectMask = { .COLOR }, layerCount = 1, mipLevel = cast(u32) debug.display_pyramid_mip_level },
                     dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     srcOffsets = { {0, 0, 0}, { mip_size.x, mip_size.y, 1 }},
-                    dstOffsets = { {0, 0, 0}, { **dest_size }},
+                    dstOffsets = { {0, 0, 0}, { **(cast(iv3) swapchain_image.size) }},
                 }, .NEAREST)
             }
             
-            
-            gpu_image_barrier_from_last_transition(cmd, &gpu.swapchain_images[gpu.image_index], {}, {}, .PRESENT_SRC_KHR, flags = { .BY_REGION })
+            gpu_image_barriers(cmd, { .BY_REGION }, create_image_barrier(swapchain_image, { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .GENERAL, {}, {}, .PRESENT_SRC_KHR))
             
         gpu_profile_zone_end()
         
@@ -951,20 +941,20 @@ main :: proc () {
             
             gpu_profile_collate_times(&gpu, gpu.device, print_profile_and_stats)
             
-            gpu_delta        := gpu_profile_get_zone("frame").total_time_with_children
+            gpu_delta             := gpu_profile_get_zone("frame").total_time_with_children
             early_rendering_delta := gpu_profile_get_zone("early rendering pass").total_time_with_children
             late_rendering_delta  := gpu_profile_get_zone("late rendering pass").total_time_with_children
-            early_cull_delta := gpu_profile_get_zone("early culling").total_time_with_children
-            late_cull_delta  := gpu_profile_get_zone("late culling").total_time_with_children
+            early_cull_delta      := gpu_profile_get_zone("early culling").total_time_with_children
+            late_cull_delta       := gpu_profile_get_zone("late culling").total_time_with_children
             
-            debug.cpu_time  = time_smoothed_blend(delta_time_64, debug.cpu_time, delta_time_64)
-            debug.early_cull_time = time_smoothed_blend(delta_time_64, debug.early_cull_time, early_cull_delta)
-            debug.late_cull_time  = time_smoothed_blend(delta_time_64, debug.late_cull_time, late_cull_delta)
-            debug.early_rendering_time = time_smoothed_blend(delta_time_64, debug.early_rendering_time, early_rendering_delta)
-            debug.late_rendering_time  = time_smoothed_blend(delta_time_64, debug.late_rendering_time, late_rendering_delta)
+            debug.cpu_time             = time_smoothed_blend(cpu_delta, debug.cpu_time,             cpu_delta)
+            debug.early_cull_time      = time_smoothed_blend(cpu_delta, debug.early_cull_time,      early_cull_delta)
+            debug.late_cull_time       = time_smoothed_blend(cpu_delta, debug.late_cull_time,       late_cull_delta)
+            debug.early_rendering_time = time_smoothed_blend(cpu_delta, debug.early_rendering_time, early_rendering_delta)
+            debug.late_rendering_time  = time_smoothed_blend(cpu_delta, debug.late_rendering_time,  late_rendering_delta)
             // this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
             if gpu_delta >= 0 {
-                debug.gpu_time = time_smoothed_blend(delta_time_64, debug.gpu_time, gpu_delta)
+                debug.gpu_time = time_smoothed_blend(cpu_delta, debug.gpu_time, gpu_delta)
             }
             
             view :: proc (seconds: f64) -> time.Duration {
@@ -1070,12 +1060,14 @@ get_next_image :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, frame_index: u64) ->
     return true
 }
 
-begin_meshlet_rendering :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, color_buffer, depth_buffer: Image, clear_color: v4, early: bool) {
+begin_meshlet_rendering :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain, clear_color: v4, early: bool) {
     desc := Render_Pass_Desc {
         // :ReversedZ: 0 is the maximal value
-        depth_target  = { texture = depth_buffer, load_op = early ? .CLEAR : .LOAD, store_op = early ? .STORE : .DONT_CARE, clear_depth = 0 }, 
+        depth_target  = { 
+            texture = stuff.depth_buffer, view = stuff.depth_view, load_op = early ? .CLEAR : .LOAD, store_op = early ? .STORE : .DONT_CARE, clear_depth = 0 
+        }, 
         color_targets = {
-            { texture = color_buffer, load_op = early ? .CLEAR : .LOAD, store_op = .STORE, clear_color = clear_color },
+            { texture = stuff.color_buffer, view = stuff.color_view, load_op = early ? .CLEAR : .LOAD, store_op = .STORE, clear_color = clear_color },
         }, 
         
     }
@@ -1104,8 +1096,8 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_S
         append(&stuff.depth_pyramid_mip_sizes, mip_size)
     }
     
-    stuff.depth_buffer.view  = gpu_create_image_view(gpu, stuff.depth_buffer, 0, 1)
-    stuff.color_buffer.view  = gpu_create_image_view(gpu, stuff.color_buffer, 0, 1)
+    stuff.depth_view  = gpu_create_image_view(gpu, stuff.depth_buffer, 0, 1)
+    stuff.color_view  = gpu_create_image_view(gpu, stuff.color_buffer, 0, 1)
 }
 
 destroy_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain) {
@@ -1113,8 +1105,8 @@ destroy_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Sw
     
     gpu_free_image(gpu, stuff.depth_buffer)
     gpu_free_image(gpu, stuff.color_buffer)
-    gpu_destroy_texture_view(gpu, stuff.depth_buffer.view)
-    gpu_destroy_texture_view(gpu, stuff.color_buffer.view)
+    gpu_destroy_texture_view(gpu, stuff.depth_view)
+    gpu_destroy_texture_view(gpu, stuff.color_view)
     
     clear(&stuff.depth_pyramid_mip_sizes)
     

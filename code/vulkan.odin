@@ -34,13 +34,8 @@ Shader_Resource_Mask :: bit_set[cast(u32) 0..<32; u32]
 Image :: struct {
     image:  vk.Image,
     format: vk.Format,
-    view:   vk.ImageView, // only required by gpu_begin_render_pass
     memory: vk.DeviceMemory,
     size:   uv3,
-    
-    last_stage:  vk.PipelineStageFlags2,
-    last_access: vk.AccessFlags2,
-    last_layout: vk.ImageLayout,
 }
 
 ////////////////////////////////////////////////
@@ -153,7 +148,6 @@ gpu_destroy_swapchain :: proc (gpu: ^Gpu) {
 
 ////////////////////////////////////////////////
 
-// @api image aspect mask should be derivable from the image itself. @study is it fixed per image?
 create_image_barrier :: proc (image: ^Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout) -> vk.ImageMemoryBarrier2 {
     aspect_mask := get_image_aspect_mask(image.format)
     
@@ -168,28 +162,13 @@ create_image_barrier :: proc (image: ^Image, src_stage: vk.PipelineStageFlags2, 
         image = image.image,
         subresourceRange = { aspectMask = aspect_mask, levelCount = vk.REMAINING_MIP_LEVELS, layerCount = vk.REMAINING_ARRAY_LAYERS },
     }
-    image.last_stage  = dst_stage
-    image.last_access = dst_access
-    image.last_layout = new_layout
     
     return result
 }
 
-create_image_barrier_from_last :: proc (image: ^Image, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout) -> vk.ImageMemoryBarrier2 {
-    result := create_image_barrier(image, image.last_stage, image.last_access, image.last_layout, dst_stage, dst_access, new_layout)
+create_image_barrier_from_undefined :: proc (image: ^Image, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, src_stage: vk.PipelineStageFlags2 = {}) -> vk.ImageMemoryBarrier2 {
+    result := create_image_barrier(image, src_stage, {}, .UNDEFINED, dst_stage, dst_access, new_layout)
     return result
-}
-
-gpu_image_barrier_from_last_transition :: proc (cmd: vk.CommandBuffer, image: ^Image, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, flags := vk.DependencyFlags {}) {
-    barrier := create_image_barrier_from_last(image, dst_stage, dst_access, new_layout)
-    
-    gpu_image_barriers(cmd, flags, barrier)
-}
-
-gpu_image_barrier :: proc (cmd: vk.CommandBuffer, image: ^Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, flags := vk.DependencyFlags {}) {
-    barrier := create_image_barrier(image, src_stage, src_access, old_layout, dst_stage, dst_access, new_layout)
-    
-    gpu_image_barriers(cmd, flags, barrier)
 }
 
 gpu_image_barriers :: proc (cmd: vk.CommandBuffer, flags: vk.DependencyFlags, barriers: ..vk.ImageMemoryBarrier2) {
