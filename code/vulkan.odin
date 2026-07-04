@@ -12,25 +12,6 @@ Pipeline :: struct {
     resource_mask:  Shader_Resource_Mask,
 }
 
-Shader :: struct {
-    input:  string, 
-    
-    stage: vk.ShaderStageFlag,
-    bytes: [] u8,
-    
-    parsed: struct {
-        resource_mask:      Shader_Resource_Mask,
-        resource_types:     [32] vk.DescriptorType,
-        use_push_constants: bool,
-        local_size:         uv3,
-    },
-        
-    source_watcher: Watcher_Id,
-    common_watcher: Watcher_Id,
-}
-
-Shader_Resource_Mask :: bit_set[cast(u32) 0..<32; u32]
-
 Image :: struct {
     image:  vk.Image,
     format: vk.Format,
@@ -144,40 +125,6 @@ gpu_destroy_swapchain :: proc (gpu: ^Gpu) {
     clear(&gpu.render_completes)
     clear(&gpu.swapchain_images) // The swapchain's images are allocated for us, so we can just drop the handles.
     vk.DestroySwapchainKHR(gpu.device, gpu.swapchain, nil)
-}
-
-////////////////////////////////////////////////
-
-create_image_barrier :: proc (image: ^Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout) -> vk.ImageMemoryBarrier2 {
-    aspect_mask := get_image_aspect_mask(image.format)
-    
-    result := vk.ImageMemoryBarrier2 {
-        sType = .IMAGE_MEMORY_BARRIER_2,
-        srcAccessMask = src_access,
-        dstAccessMask = dst_access,
-        srcStageMask  = src_stage,
-        dstStageMask  = dst_stage,
-        oldLayout = old_layout,
-        newLayout = new_layout,
-        image = image.image,
-        subresourceRange = { aspectMask = aspect_mask, levelCount = vk.REMAINING_MIP_LEVELS, layerCount = vk.REMAINING_ARRAY_LAYERS },
-    }
-    
-    return result
-}
-
-create_image_barrier_from_undefined :: proc (image: ^Image, stage: vk.PipelineStageFlags2, access: vk.AccessFlags2, layout: vk.ImageLayout) -> vk.ImageMemoryBarrier2 {
-    result := create_image_barrier(image, { .ALL_COMMANDS }, {}, .UNDEFINED, stage, access, layout)
-    return result
-}
-
-gpu_image_barriers :: proc (cmd: vk.CommandBuffer, flags: vk.DependencyFlags, barriers: ..vk.ImageMemoryBarrier2) {
-    vk.CmdPipelineBarrier2(cmd, &vk.DependencyInfo {
-        sType = .DEPENDENCY_INFO,
-        dependencyFlags          = flags, 
-        imageMemoryBarrierCount  = cast(u32) len(barriers),
-        pImageMemoryBarriers     = raw_data(barriers),
-    })
 }
 
 ////////////////////////////////////////////////

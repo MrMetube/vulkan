@@ -9,6 +9,25 @@ import "core:strings"
 
 import vk "../lib/vulkan"
 
+Shader :: struct {
+    input:  string, 
+    
+    stage: vk.ShaderStageFlag,
+    bytes: [] u8,
+    
+    parsed: struct {
+        resource_mask:      Shader_Resource_Mask,
+        resource_types:     [32] vk.DescriptorType,
+        use_push_constants: bool,
+        local_size:         uv3,
+    },
+        
+    source_watcher: Watcher_Id,
+    common_watcher: Watcher_Id,
+}
+
+Shader_Resource_Mask :: bit_set[cast(u32) 0..<32; u32]
+
 /*
     simple struct: 
         A type that is used inside buffers, or as a value.

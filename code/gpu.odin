@@ -1171,6 +1171,38 @@ gpu_barrier :: proc (command_buffer: vk.CommandBuffer, before, after: vk.Pipelin
     vk.CmdPipelineBarrier2(command_buffer, &info)
 }
 
+create_image_barrier :: proc (image: ^Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout) -> vk.ImageMemoryBarrier2 {
+    aspect_mask := get_image_aspect_mask(image.format)
+    
+    result := vk.ImageMemoryBarrier2 {
+        sType = .IMAGE_MEMORY_BARRIER_2,
+        srcAccessMask = src_access,
+        dstAccessMask = dst_access,
+        srcStageMask  = src_stage,
+        dstStageMask  = dst_stage,
+        oldLayout = old_layout,
+        newLayout = new_layout,
+        image = image.image,
+        subresourceRange = { aspectMask = aspect_mask, levelCount = vk.REMAINING_MIP_LEVELS, layerCount = vk.REMAINING_ARRAY_LAYERS },
+    }
+    
+    return result
+}
+
+create_image_barrier_from_undefined :: proc (image: ^Image, stage: vk.PipelineStageFlags2, access: vk.AccessFlags2, layout: vk.ImageLayout) -> vk.ImageMemoryBarrier2 {
+    result := create_image_barrier(image, { .ALL_COMMANDS }, {}, .UNDEFINED, stage, access, layout)
+    return result
+}
+
+gpu_image_barriers :: proc (cmd: vk.CommandBuffer, flags: vk.DependencyFlags, barriers: ..vk.ImageMemoryBarrier2) {
+    vk.CmdPipelineBarrier2(cmd, &vk.DependencyInfo {
+        sType = .DEPENDENCY_INFO,
+        dependencyFlags          = flags, 
+        imageMemoryBarrierCount  = cast(u32) len(barriers),
+        pImageMemoryBarriers     = raw_data(barriers),
+    })
+}
+
 // @todo
 // void gpuSignalAfter(GpuCommandBuffer cb, STAGE before, void *ptrGpu, uint64 value, SIGNAL signal);
 // void gpuWaitBefore(GpuCommandBuffer cb, STAGE after, void *ptrGpu, uint64 value, OP op, HAZARD_FLAGS hazards = 0, uint64 mask = ~0);
