@@ -166,8 +166,8 @@ create_image_barrier :: proc (image: ^Image, src_stage: vk.PipelineStageFlags2, 
     return result
 }
 
-create_image_barrier_from_undefined :: proc (image: ^Image, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout, src_stage: vk.PipelineStageFlags2 = {}) -> vk.ImageMemoryBarrier2 {
-    result := create_image_barrier(image, src_stage, {}, .UNDEFINED, dst_stage, dst_access, new_layout)
+create_image_barrier_from_undefined :: proc (image: ^Image, stage: vk.PipelineStageFlags2, access: vk.AccessFlags2, layout: vk.ImageLayout) -> vk.ImageMemoryBarrier2 {
+    result := create_image_barrier(image, { .ALL_COMMANDS }, {}, .UNDEFINED, stage, access, layout)
     return result
 }
 

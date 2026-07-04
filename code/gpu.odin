@@ -436,14 +436,6 @@ Memory_Kind :: enum u32 {
     Readback, // cpu cached
 }
 
-Hazard_Flags :: bit_set[Hazard_Flag; u32]
-Hazard_Flag :: enum u32 {
-    draw_arguments, // Indirect Draw Commands modify possibly prefetched data
-    descriptors,    // If you write to the texture descriptor heap @todo make gpu_barrier respect this
-    depth_stencil,  
-}
-
-
 ////////////////////////////////////////////////
 
 Topology :: vk.PrimitiveTopology
@@ -1157,7 +1149,7 @@ gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: vk
     vk.CmdCopyImageToBuffer(cmd, source.image, layout, alloc.buffer, 1, &region)
 }
 
-gpu_barrier :: proc (command_buffer: vk.CommandBuffer, before, after: vk.PipelineStageFlags2, hazard := Hazard_Flags {}, loc := #caller_location) {
+gpu_barrier :: proc (command_buffer: vk.CommandBuffer, before, after: vk.PipelineStageFlags2, loc := #caller_location) {
     assert(before != {}, loc = loc)
     assert(after  != {}, loc = loc)
     
@@ -1171,15 +1163,10 @@ gpu_barrier :: proc (command_buffer: vk.CommandBuffer, before, after: vk.Pipelin
             srcStageMask = before,
             dstStageMask = after,
             
-            // @todo(viktor): set based on hazards
             srcAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
             dstAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
         },
     }
-    
-    // @todo tell the gpu to flush any descriptor caches in texture samplers, or whereever
-    // if .descriptors in hazard {
-    // }
     
     vk.CmdPipelineBarrier2(command_buffer, &info)
 }

@@ -33,7 +33,7 @@ Geometry :: struct {
     meshes: [dynamic] Mesh,
 }
 
-Stuff_With_The_Same_Lifetime_As_The_Swapchain :: struct {
+Render_Targets_And_Stuff :: struct {
     color_buffer: Image,
     depth_buffer: Image,
     color_view: vk.ImageView,
@@ -175,7 +175,7 @@ main :: proc () {
     
     gpu := gpu_init(window)
     
-    stuff: Stuff_With_The_Same_Lifetime_As_The_Swapchain
+    stuff: Render_Targets_And_Stuff
     
     // :Stencil: Switch to .D32_SFLOAT_S8_UINT if we actually make use of the stencil buffer.
     stuff.depth_buffer.format = .D32_SFLOAT
@@ -463,11 +463,9 @@ main :: proc () {
         }
         
         // @cleanup this signals that we need to transition all images in stuff from .UNDEFINED to .GENERAL image layout
-        recreated_stuff_this_frame := false
         if gpu.swapchain_state == .Was_Resized {
             gpu.swapchain_state = .Ok
             recreate_stuff(&gpu, &stuff)
-            recreated_stuff_this_frame = true
         }
         
         assert(gpu.swapchain_state != .Dirty)
@@ -690,13 +688,12 @@ main :: proc () {
             ////////////////////////////////////////////////
             
             gpu_barrier(cmd, { .BOTTOM_OF_PIPE, .COMPUTE_SHADER }, { .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS })
-            if recreated_stuff_this_frame {
-                gpu_image_barriers(cmd,  { .BY_REGION },
-                    create_image_barrier_from_undefined(&stuff.color_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .GENERAL),
-                    create_image_barrier_from_undefined(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE, .MEMORY_READ }, .GENERAL), 
-                    create_image_barrier_from_undefined(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .MEMORY_READ, .MEMORY_WRITE }, .GENERAL),
-                )
-            }
+            gpu_image_barriers(cmd, { .BY_REGION },
+                create_image_barrier_from_undefined(&stuff.color_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .GENERAL),
+                create_image_barrier_from_undefined(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE, .MEMORY_READ }, .GENERAL), 
+                create_image_barrier_from_undefined(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .MEMORY_READ, .MEMORY_WRITE }, .GENERAL),
+                create_image_barrier_from_undefined(&gpu.swapchain_images[gpu.image_index], { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .GENERAL),
+            )
             
             ////////////////////////////////////////////////
             // early render - render objects that were visible last frame
@@ -900,9 +897,6 @@ main :: proc () {
             }
             
             gpu_barrier(cmd, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }, { .ALL_TRANSFER })
-            gpu_image_barriers(cmd, { .BY_REGION },
-                create_image_barrier_from_undefined(swapchain_image, { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .GENERAL, src_stage = { .COLOR_ATTACHMENT_OUTPUT }),
-            )
             
             if !debug.display_pyramid {
                 vk.CmdCopyImage(cmd, source_image.image, .GENERAL, swapchain_image.image, .GENERAL, 1, &vk.ImageCopy {
@@ -1060,7 +1054,7 @@ get_next_image :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, frame_index: u64) ->
     return true
 }
 
-begin_meshlet_rendering :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain, clear_color: v4, early: bool) {
+begin_meshlet_rendering :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stuff: ^Render_Targets_And_Stuff, clear_color: v4, early: bool) {
     desc := Render_Pass_Desc {
         // :ReversedZ: 0 is the maximal value
         depth_target  = { 
@@ -1076,7 +1070,7 @@ begin_meshlet_rendering :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stuff: ^Stuff
 
 ////////////////////////////////////////////////
 
-recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain) {
+recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Render_Targets_And_Stuff) {
     destroy_stuff(gpu, stuff)
     
     // Ensures that all reductions are at most 2x2 which makes sure they are conservative.
@@ -1100,7 +1094,7 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_S
     stuff.color_view  = gpu_create_image_view(gpu, stuff.color_buffer, 0, 1)
 }
 
-destroy_stuff :: proc (gpu: ^Gpu, stuff: ^Stuff_With_The_Same_Lifetime_As_The_Swapchain) {
+destroy_stuff :: proc (gpu: ^Gpu, stuff: ^Render_Targets_And_Stuff) {
     gpu_free_image(gpu, stuff.depth_pyramid)
     
     gpu_free_image(gpu, stuff.depth_buffer)
