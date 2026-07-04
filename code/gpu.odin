@@ -231,6 +231,7 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             vk.EXT_MESH_SHADER_EXTENSION_NAME,
             vk.KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME,
             vk.EXT_DESCRIPTOR_HEAP_EXTENSION_NAME,
+            vk.KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME,
         }
         
         f_heap := vk.PhysicalDeviceDescriptorHeapFeaturesEXT {
@@ -1158,19 +1159,21 @@ gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: vk
 
 gpu_barrier :: proc (command_buffer: vk.CommandBuffer, before, after: vk.PipelineStageFlags2, hazard := Hazard_Flags {}, loc := #caller_location) {
     assert(before != {}, loc = loc)
-    assert(after != {},  loc = loc)
+    assert(after  != {}, loc = loc)
     
     info := vk.DependencyInfo {
         sType = .DEPENDENCY_INFO,
         
-        dependencyFlags = {},
-        
         memoryBarrierCount = 1,
         pMemoryBarriers    = &vk.MemoryBarrier2 {
             sType = .MEMORY_BARRIER_2,
-            // @todo(viktor): set based on hazards
+            
             srcStageMask = before,
             dstStageMask = after,
+            
+            // @todo(viktor): set based on hazards
+            srcAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
+            dstAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
         },
     }
     

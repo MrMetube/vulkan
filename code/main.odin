@@ -585,21 +585,6 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        check(vk.ResetCommandPool(gpu.device, gpu.command_pools[frame_index], {}))
-        // @api expecting the user to pass the frame index is a source for mistakes
-        cmd := gpu_begin_command_recording(&gpu, gpu.command_pools[frame_index], gpu.general_queue)
-        
-        gpu_profile_frame_begin(gpu.device, cmd)
-        
-        ////////////////////////////////////////////////
-        // Setting these dynamic states outside of rendering-passes means they persist across all passes.
-        gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
-        gpu_set_scissor(cmd,  size = gpu.swapchain_size)
-        
-        gpu_set_active_heap(cmd, &descriptor_heap)
-        
-        ////////////////////////////////////////////////
-        
         cull_data_flags: u32 
         if debug.culling_enabled   { cull_data_flags |= DebugFlag_FrustumCulling   }
         if debug.lod_enabled       { cull_data_flags |= DebugFlag_LevelOfDetail    }
@@ -620,6 +605,22 @@ main :: proc () {
         
         draw_data.screen_from_view = screen_from_view
         draw_data.view_from_world  = view_from_world
+        
+        ////////////////////////////////////////////////
+        ////////////////////////////////////////////////
+        ////////////////////////////////////////////////
+        
+        check(vk.ResetCommandPool(gpu.device, gpu.command_pools[frame_index], {}))
+        // @api expecting the user to pass the frame index is a source for mistakes
+        cmd := gpu_begin_command_recording(&gpu, gpu.command_pools[frame_index], gpu.general_queue)
+        
+        gpu_profile_frame_begin(gpu.device, cmd)
+        
+        // Setting these dynamic states outside of rendering-passes means they persist across all passes.
+        gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
+        gpu_set_scissor(cmd,  size = gpu.swapchain_size)
+        
+        gpu_set_active_heap(cmd, &descriptor_heap)
         
         ////////////////////////////////////////////////
         // early cull - frustum cull & fill objects that *were* visible last frame
@@ -676,8 +677,6 @@ main :: proc () {
                 
                 ////////////////////////////////////////////////
                 
-                gpu_image_barrier(cmd, &stuff.depth_pyramid, {}, {}, .UNDEFINED, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
-                
                 gpu_set_pipeline(cmd, early_cull_pipeline)
                     gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(early_cull_shader, auto_cast len(draws)))
                 
@@ -687,7 +686,7 @@ main :: proc () {
             ////////////////////////////////////////////////
             
             // this apparently needs to happend before we do anything related to rendering
-            gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
+            gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT, .MESH_SHADER_EXT, .TASK_SHADER_EXT })
             gpu_image_barriers(cmd,  { .BY_REGION },
                 create_image_barrier(&stuff.color_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL),
                 create_image_barrier(&stuff.depth_buffer, { .BOTTOM_OF_PIPE }, {}, .UNDEFINED, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL), 
@@ -746,7 +745,8 @@ main :: proc () {
             
             gpu_image_barriers(cmd, { .BY_REGION },
                 create_image_barrier_from_last(&stuff.depth_buffer,  { .COMPUTE_SHADER }, { .SHADER_READ  }, .SHADER_READ_ONLY_OPTIMAL),
-                create_image_barrier_from_last(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL),
+                create_image_barrier(&stuff.depth_pyramid, {}, {}, .UNDEFINED, { .COMPUTE_SHADER }, { .SHADER_WRITE }, .GENERAL),
+                
             )
             
             gpu_set_pipeline(cmd, depth_pipeline)
@@ -769,7 +769,11 @@ main :: proc () {
                     
                     gpu_dispatch(cmd, &frame_descriptor, depth_globals_gpu, get_group_count(depth_reduce_shader, **mip_size))
                     
-                    gpu_image_barrier_from_last_transition(cmd, &stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL, flags = { .BY_REGION })
+                    if mip_level == 0 {
+                        // only the first time is an image access transition, afterwards the compute barrier is enough
+                        gpu_image_barrier_from_last_transition(cmd, &stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL, flags = { .BY_REGION })
+                    }
+                    gpu_barrier(cmd, { .COMPUTE_SHADER }, { .COMPUTE_SHADER })
                 }
                 ////////////////////////////////////////////////
                 
@@ -829,18 +833,17 @@ main :: proc () {
                 
                 ////////////////////////////////////////////////
                 
-                gpu_barrier(cmd, { .DRAW_INDIRECT }, { .ALL_TRANSFER })
+                gpu_barrier(cmd, { .DRAW_INDIRECT, .MESH_SHADER_EXT, .TASK_SHADER_EXT }, { .ALL_TRANSFER })
                 
                 {
                     count, offset := gpu_reflect_get_buffer(draw_command_count_gpu.p)
                     vk.CmdFillBuffer(cmd, count, offset, gpu_size_of(draw_command_count_gpu), 0)
                 }
                 
-                gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
+                // depth pyramid = compute + draw command count = transfer
+                gpu_barrier(cmd, { .ALL_TRANSFER, .COMPUTE_SHADER }, { .COMPUTE_SHADER })
                 
                 ////////////////////////////////////////////////
-                
-                gpu_image_barrier_from_last_transition(cmd, &stuff.depth_pyramid, { .COMPUTE_SHADER }, { .SHADER_READ }, .GENERAL)
                 
                 gpu_set_pipeline(cmd, late_cull_pipeline)
                     
@@ -861,11 +864,9 @@ main :: proc () {
             gpu_profile_zone_begin("late rendering pass")
             gpu_labeled_region_begin(cmd, "late rendering pass", {0.6, 0.1, 07, 1.0})
             
-                // this apparently needs to happend before we do anything related to rendering
-                gpu_barrier(cmd, { .COMPUTE_SHADER }, { .DRAW_INDIRECT })
-                gpu_image_barriers(cmd, { .BY_REGION },
-                    create_image_barrier_from_last(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE }, .ATTACHMENT_OPTIMAL), 
-                    create_image_barrier_from_last(&stuff.color_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .ATTACHMENT_OPTIMAL),
+                gpu_barrier(cmd, 
+                    { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS, .COMPUTE_SHADER }, 
+                    { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS, .DRAW_INDIRECT, .MESH_SHADER_EXT, .TASK_SHADER_EXT }
                 )
                 
                 ////////////////////////////////////////////////
