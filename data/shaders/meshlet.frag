@@ -3,7 +3,7 @@
 #extension GL_EXT_nonuniform_qualifier: require
 #extension GL_EXT_descriptor_heap : require
 
-#include "common.glslh"
+#include "common.glsl"
 
 ////////////////////////////////////////////////
 

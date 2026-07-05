@@ -14,7 +14,7 @@ main :: proc () {
     parse_run_and_debug_arguments()
     
     // @copypasta from code.main: shader setup code
-    code.generate_shader_api("data/shaders/api.generated.glslh")
+    code.generate_shader_api("data/shaders/api.generated.glsl")
     
     shaders: [dynamic] string
     code.get_all_files_with_extension(&shaders, "data/shaders", context.temp_allocator, ".frag", ".mesh", ".task", ".comp")
@@ -26,8 +26,10 @@ main :: proc () {
         input_directory, input_file := os.split_path(shader)
         
         output_path, _ := os.join_path({input_directory, output_directory, input_file}, context.temp_allocator)
+        output_extension := ".spv"
+        shader_output := fmt.tprintf("%v%v", output_path, output_extension)
         
-        code.compile_shader_begin(cmd, output_path)
+        code.compile_shader_begin(cmd, shader_output)
         
         ok := code.compile_shader_end(cmd, shader)
         if !ok { any_shader_had_errors = true }

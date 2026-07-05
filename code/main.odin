@@ -239,7 +239,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    generate_shader_api("shaders/api.generated.glslh")
+    generate_shader_api("shaders/api.generated.glsl")
     
     shader_allocator := context.allocator
     
@@ -253,14 +253,14 @@ main :: proc () {
     meshlet_shaders: [dynamic] Shader
     for file in shader_files {
         // @speed we duplicate this watcher per shader, so that each shader can keep track of the header being changed and be recompiled independently from other shaders, without effecting their modification test.
-        common_watcher_id := watchers_make(&watchers, "shaders/common.glslh")
+        common_watcher_id := watchers_make(&watchers, "shaders/common.glsl")
         shader := init_shader_and_watchers(&watchers, common_watcher_id, file, shader_allocator)
         append(&meshlet_shaders, shader)
     }
     
-    early_cull_shader   := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/cull_early.comp",   shader_allocator)
-    late_cull_shader    := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/cull_late.comp",    shader_allocator)
-    depth_reduce_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glslh"), "shaders/depth_reduce.comp", shader_allocator)
+    early_cull_shader   := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/cull_early.comp",   shader_allocator)
+    late_cull_shader    := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/cull_late.comp",    shader_allocator)
+    depth_reduce_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/depth_reduce.comp", shader_allocator)
     
     ////////////////////////////////////////////////
     
