@@ -177,10 +177,7 @@ main :: proc () {
     gpu := gpu_init(window)
     
     stuff: Render_Targets_And_Stuff
-    
-    // :Stencil: Switch to .D32_SFLOAT_S8_UINT if we actually make use of the stencil buffer.
     stuff.depth_buffer.format = .D32_SFLOAT
-    
     recreate_stuff(&gpu, &stuff)
     
     ////////////////////////////////////////////////
@@ -190,13 +187,13 @@ main :: proc () {
     
     // @todo(viktor): draws change per frame and could also be placed in the per frame bump allocator, as we just need a gpu address
     // All the geometry data can just live in the gpu
-    vb_view,  vertex_buffer         := gpu_allocate(&gpu,      [] Vertex,       256 * Megabyte / size_of(Vertex),       memory = memory)
-    mlb_view, meshlet_buffer        := gpu_allocate(&gpu,      [] Meshlet,      256 * Megabyte / size_of(Meshlet),      memory = memory)
-    mdb_view, meshlet_data_buffer   := gpu_allocate(&gpu,      [] u32,          256 * Megabyte / size_of(u32),          memory = memory)
-    mb_view,  mesh_buffer           := gpu_allocate(&gpu,      [] Mesh,         256 * Megabyte / size_of(Mesh),         memory = memory)
+    vb_view,  vertex_buffer          := gpu_allocate(&gpu, [] Vertex,  256 * Megabyte / size_of(Vertex),  memory = memory)
+    mlb_view, meshlet_buffer         := gpu_allocate(&gpu, [] Meshlet, 256 * Megabyte / size_of(Meshlet), memory = memory)
+    mdb_view, meshlet_data_buffer    := gpu_allocate(&gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = memory)
+    mb_view,  mesh_buffer            := gpu_allocate(&gpu, [] Mesh,    256 * Megabyte / size_of(Mesh),    memory = memory)
     
-    db_view,  draw_buffer           := gpu_allocate(&gpu,      [] Draw,         256 * Megabyte / size_of(Draw),         memory = memory)
-    dvb_view, draw_visibilty_buffer := gpu_allocate(&gpu,      [] u32,          256 * Megabyte / size_of(u32),          memory = memory, usage = vk.BufferUsageFlags { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
+    db_view,  draw_buffer            := gpu_allocate(&gpu, [] Draw,    256 * Megabyte / size_of(Draw),    memory = memory)
+    dvb_view, draw_visibility_buffer := gpu_allocate(&gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = memory, usage = vk.BufferUsageFlags { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
     
     dvb_cleared := false
     
@@ -280,10 +277,10 @@ main :: proc () {
             copy(cpu_data, loaded_texture.data)
             
             gpu_image_barriers(cmd, {},
-                create_image_barrier_from_undefined(&texture, { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .GENERAL)
+                create_image_barrier_from_undefined(&texture, { .ALL_TRANSFER }, { .MEMORY_READ, .MEMORY_WRITE }, .GENERAL)
             )
             
-            gpu_copy_to_texture(&gpu, cmd, texture, gpu_data)
+            gpu_copy_to_texture(cmd, texture, gpu_data)
         }
             
         gpu_barrier(cmd, { .ALL_TRANSFER }, { .ALL_GRAPHICS })
@@ -530,7 +527,7 @@ main :: proc () {
         entropy := seed_random_series(545114)
         when true {
             draws := db_view[:50_000]
-            global_rotation := la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX)
+            global_rotation := la.quaternion_from_euler_angles_f32(**(object_rotation * random_unilateral(&entropy, v3)), .XYX)
             for &draw in draws {
                 p := random_bilateral(&entropy, v3) * {10, 10, 10} + {0, 0, -10}
                 
@@ -548,7 +545,7 @@ main :: proc () {
             }
         } else {
             draws := db_view[:200_000]
-            global_rotation := la.quaternion_from_euler_angles_f32(expand_values(object_rotation * random_unilateral(&entropy, v3)), .XYX)
+            global_rotation := la.quaternion_from_euler_angles_f32(**(object_rotation * random_unilateral(&entropy, v3)), .XYX)
             for &draw, draw_index in draws {
                 p := v3{0, 0, -3} + {0, 0, -10 / cast(f32) (draw_index+1)} * cast(f32) (draw_index)
                 
@@ -628,6 +625,15 @@ main :: proc () {
         gpu_set_active_heap(cmd, &descriptor_heap)
         
         ////////////////////////////////////////////////
+        
+        gpu_image_barriers(cmd, { .BY_REGION },
+            create_image_barrier_from_undefined(&stuff.color_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .GENERAL),
+            create_image_barrier_from_undefined(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE, .MEMORY_READ }, .GENERAL), 
+            create_image_barrier_from_undefined(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .MEMORY_READ, .MEMORY_WRITE }, .GENERAL),
+            create_image_barrier_from_undefined(&gpu.swapchain_images[gpu.image_index], { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .GENERAL),
+        )
+        
+        ////////////////////////////////////////////////
         // early cull - frustum cull & fill objects that *were* visible last frame
         
         {
@@ -638,7 +644,7 @@ main :: proc () {
             cull_globals_cpu^ = Cull_Globals {
                 draw_buffer            = draw_buffer.p,
                 mesh_buffer            = mesh_buffer.p,
-                draw_visibility_buffer = draw_visibilty_buffer.p,
+                draw_visibility_buffer = draw_visibility_buffer.p,
                 draw_command_buffer    = draw_command_gpu.p,
                 draw_command_count     = draw_command_count_gpu.p,
                 
@@ -664,16 +670,11 @@ main :: proc () {
                 
                 gpu_barrier(cmd, { .DRAW_INDIRECT }, { .ALL_TRANSFER })
                 
-                {
-                    count, offset := gpu_reflect_get_buffer(draw_command_count_gpu.p)
-                    vk.CmdFillBuffer(cmd, count, offset, gpu_size_of(draw_command_count_gpu), 0)
-                }
+                gpu_fill_memory(cmd, draw_command_count_gpu, 0)
                 
                 if !dvb_cleared {
                     dvb_cleared = true
-                    
-                    visibility_buffer, offset := gpu_reflect_get_buffer(draw_visibilty_buffer.p)
-                    vk.CmdFillBuffer(cmd, visibility_buffer, offset, cast(vk.DeviceSize) len(draws) * size_of(dvb_view[0]), 1)
+                    gpu_fill_memory(cmd, draw_visibility_buffer, cast(u32) len(draws), 1)
                 }
                 
                 ////////////////////////////////////////////////
@@ -689,12 +690,6 @@ main :: proc () {
             ////////////////////////////////////////////////
             
             gpu_barrier(cmd, { .BOTTOM_OF_PIPE, .COMPUTE_SHADER }, { .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS })
-            gpu_image_barriers(cmd, { .BY_REGION },
-                create_image_barrier_from_undefined(&stuff.color_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .GENERAL),
-                create_image_barrier_from_undefined(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE, .MEMORY_READ }, .GENERAL), 
-                create_image_barrier_from_undefined(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .MEMORY_READ, .MEMORY_WRITE }, .GENERAL),
-                create_image_barrier_from_undefined(&gpu.swapchain_images[gpu.image_index], { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .GENERAL),
-            )
             
             ////////////////////////////////////////////////
             // early render - render objects that were visible last frame
@@ -713,7 +708,7 @@ main :: proc () {
                     
                     gpu_set_pipeline(cmd, meshlet_pipeline)
                         updates := [] ImageUpdateData {
-                            {},
+                            {}, // texture_sampler
                             { textures[0], 0, vk.REMAINING_MIP_LEVELS },
                             { textures[1], 0, vk.REMAINING_MIP_LEVELS },
                             { textures[2], 0, vk.REMAINING_MIP_LEVELS },
@@ -745,7 +740,7 @@ main :: proc () {
             gpu_profile_zone_begin("depth pyramid building")
             gpu_labeled_region_begin(cmd, "depth pyramid building", {0.4, 0.8, 0, 1.0})
             
-            gpu_barrier(cmd, { .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS }, { .COMPUTE_SHADER })
+            gpu_barrier(cmd, { .LATE_FRAGMENT_TESTS }, { .COMPUTE_SHADER })
             
             gpu_set_pipeline(cmd, depth_pipeline)
                 for mip_size, mip_level in stuff.depth_pyramid_mip_sizes {
@@ -768,7 +763,7 @@ main :: proc () {
                     gpu_barrier(cmd, { .COMPUTE_SHADER }, { .COMPUTE_SHADER })
                 }
             
-            gpu_barrier(cmd, { .COMPUTE_SHADER }, { .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS })
+            gpu_barrier(cmd, { .COMPUTE_SHADER }, { .EARLY_FRAGMENT_TESTS })
             
             gpu_labeled_region_end(cmd)
             gpu_profile_zone_end()
@@ -800,7 +795,7 @@ main :: proc () {
             cull_globals_cpu^ = Cull_Globals {
                 draw_buffer            = draw_buffer.p,
                 mesh_buffer            = mesh_buffer.p,
-                draw_visibility_buffer = draw_visibilty_buffer.p,
+                draw_visibility_buffer = draw_visibility_buffer.p,
                 draw_command_buffer    = draw_command_gpu.p,
                 draw_command_count     = draw_command_count_gpu.p,
                 
@@ -826,10 +821,7 @@ main :: proc () {
                 
                 gpu_barrier(cmd, { .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }, { .ALL_TRANSFER })
                 
-                {
-                    count, offset := gpu_reflect_get_buffer(draw_command_count_gpu.p)
-                    vk.CmdFillBuffer(cmd, count, offset, gpu_size_of(draw_command_count_gpu), 0)
-                }
+                gpu_fill_memory(cmd, draw_command_count_gpu, 0)
                 
                 // depth pyramid = compute + draw command count = transfer
                 gpu_barrier(cmd, { .ALL_TRANSFER, .COMPUTE_SHADER }, { .COMPUTE_SHADER })
@@ -856,8 +848,8 @@ main :: proc () {
             gpu_labeled_region_begin(cmd, "late rendering pass", {0.6, 0.1, 07, 1.0})
             
                 gpu_barrier(cmd, 
-                    { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS, .COMPUTE_SHADER }, 
-                    { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }
+                    { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS, .COMPUTE_SHADER }, 
+                    { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }
                 )
                 
                 ////////////////////////////////////////////////
@@ -897,7 +889,7 @@ main :: proc () {
                 source_image = &stuff.depth_pyramid
             }
             
-            gpu_barrier(cmd, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }, { .ALL_TRANSFER })
+            gpu_barrier(cmd, { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }, { .ALL_TRANSFER })
             
             if !debug.display_pyramid {
                 vk.CmdCopyImage(cmd, source_image.image, .GENERAL, swapchain_image.image, .GENERAL, 1, &vk.ImageCopy {
@@ -1012,7 +1004,7 @@ main :: proc () {
     gpu_free(&gpu, meshlet_data_buffer)
     gpu_free(&gpu, mesh_buffer)
     gpu_free(&gpu, draw_buffer)
-    gpu_free(&gpu, draw_visibilty_buffer)
+    gpu_free(&gpu, draw_visibility_buffer)
     
     for &bump in frame_bump_allocators {
         bump_allocator_delete(&gpu, &bump)
@@ -1079,9 +1071,9 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Render_Targets_And_Stuff) {
     // Each mip level is a quarter of the size of the previous, as we half both dimensions each time.
     mip_count := 1 + max(integer_log2(pyramid_size.x), integer_log2(pyramid_size.y))
     
-    stuff.depth_pyramid = gpu_allocate_texture(gpu, default_texture_desc(size = {pyramid_size.x, pyramid_size.y, 1}, format = .R32_SFLOAT, mip_count = mip_count, usage = { .SAMPLED, .STORAGE, .TRANSFER_SRC }))
-    stuff.depth_buffer = gpu_allocate_texture(gpu, default_texture_desc(size = {gpu.swapchain_size.x, gpu.swapchain_size.y, 1}, format = stuff.depth_buffer.format, usage = { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED }))
-    stuff.color_buffer = gpu_allocate_texture(gpu, default_texture_desc(size = {gpu.swapchain_size.x, gpu.swapchain_size.y, 1}, format = gpu.swapchain_format,      usage = { .COLOR_ATTACHMENT, .TRANSFER_SRC }))
+    stuff.depth_pyramid = gpu_allocate_texture(gpu, default_texture_desc(size = {pyramid_size.x,       pyramid_size.y,       1}, format = .R32_SFLOAT,               usage = { .SAMPLED, .STORAGE, .TRANSFER_SRC },   mip_count = mip_count))
+    stuff.depth_buffer  = gpu_allocate_texture(gpu, default_texture_desc(size = {gpu.swapchain_size.x, gpu.swapchain_size.y, 1}, format = stuff.depth_buffer.format, usage = { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED }))
+    stuff.color_buffer  = gpu_allocate_texture(gpu, default_texture_desc(size = {gpu.swapchain_size.x, gpu.swapchain_size.y, 1}, format = gpu.swapchain_format,      usage = { .COLOR_ATTACHMENT, .TRANSFER_SRC }))
     
     for i in 0..<mip_count {
         mip_size := pyramid_size

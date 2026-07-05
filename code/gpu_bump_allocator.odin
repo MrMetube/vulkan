@@ -51,10 +51,6 @@ bump_allocate :: proc (bump: ^Bump_Allocator, size: u32, alignment: u32 = 16) ->
     return cpu, gpu
 }
 
-gpu_size_of :: proc (x: $G / GpuAddress($T)) -> vk.DeviceSize {
-    return size_of(T)
-}
-
 bump_allocate_type :: proc (bump: ^Bump_Allocator, $T: typeid) -> (cpu: ^T, gpu: GpuAddress(T)) {
     cpu_bytes, gpu_bytes := bump_allocate(bump, size_of(T), align_of(T))
     cpu = cast(^T) &cpu_bytes[0]

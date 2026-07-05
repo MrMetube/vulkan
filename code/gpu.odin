@@ -1123,11 +1123,11 @@ gpu_destroy_semaphore :: proc (gpu: ^Gpu, semaphore: vk.Semaphore) {
 
 // void gpuMemCpy(GpuCommandBuffer cb, void* destGpu, void* srcGpu,);
 
-gpu_copy :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: any, source: pmm) {
+gpu_copy :: proc (cmd: vk.CommandBuffer, destination: any, source: pmm) {
     unimplemented()
 }
 
-    gpu_copy_to_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: Image, source: vk.DeviceAddress, layout := vk.ImageLayout.GENERAL) {
+gpu_copy_to_texture :: proc (cmd: vk.CommandBuffer, destination: Image, source: vk.DeviceAddress, layout := vk.ImageLayout.GENERAL) {
     alloc := gpu_reflect_get_allocation(source)
     
     region := vk.BufferImageCopy {
@@ -1139,7 +1139,7 @@ gpu_copy :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: any, source: pm
     vk.CmdCopyBufferToImage(cmd, alloc.buffer, destination.image, layout, 1, &region)
 }
 
-gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: vk.DeviceAddress, source: Image, size: uv3, layout := vk.ImageLayout.GENERAL) {
+gpu_copy_from_texture :: proc (cmd: vk.CommandBuffer, destination: vk.DeviceAddress, source: Image, size: uv3, layout := vk.ImageLayout.GENERAL) {
     alloc := gpu_reflect_get_allocation(destination)
     
     region := vk.BufferImageCopy {
@@ -1151,10 +1151,20 @@ gpu_copy_from_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, destination: vk
     vk.CmdCopyImageToBuffer(cmd, source.image, layout, alloc.buffer, 1, &region)
 }
 
-gpu_barrier :: proc (command_buffer: vk.CommandBuffer, before, after: vk.PipelineStageFlags2, loc := #caller_location) {
-    assert(before != {}, loc = loc)
-    assert(after  != {}, loc = loc)
-    
+gpu_fill_memory :: proc { gpu_fill_memory_address, gpu_fill_memory_slice, gpu_fill_memory_buffer }
+gpu_fill_memory_address :: proc (cmd: vk.CommandBuffer, destination: GpuAddress($T), value: T) {
+    buffer, offset := gpu_reflect_get_buffer(destination.p)
+    gpu_fill_memory_buffer(cmd, buffer, offset, size_of(T), value)
+}
+gpu_fill_memory_slice   :: proc (cmd: vk.CommandBuffer, destination: GpuSlice($T), count: u32, value: T) {
+    buffer, offset := gpu_reflect_get_buffer(destination.p)
+    gpu_fill_memory_buffer(cmd, buffer, offset, size_of(T) * cast(vk.DeviceSize) count, value)
+}
+gpu_fill_memory_buffer  :: proc (cmd: vk.CommandBuffer, buffer: vk.Buffer, offset: vk.DeviceSize, size: vk.DeviceSize, value: u32) {
+    vk.CmdFillBuffer(cmd, buffer, offset, size, value)
+}
+
+gpu_barrier :: proc (cmd: vk.CommandBuffer, before, after: vk.PipelineStageFlags2) {
     info := vk.DependencyInfo {
         sType = .DEPENDENCY_INFO,
         
@@ -1170,7 +1180,7 @@ gpu_barrier :: proc (command_buffer: vk.CommandBuffer, before, after: vk.Pipelin
         },
     }
     
-    vk.CmdPipelineBarrier2(command_buffer, &info)
+    vk.CmdPipelineBarrier2(cmd, &info)
 }
 
 create_image_barrier :: proc (image: ^Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout) -> vk.ImageMemoryBarrier2 {
