@@ -21,12 +21,9 @@ void main() {
     uvec2 pixel = gl_GlobalInvocationID.xy;
     
     vec2 uv = (vec2(pixel)+0.5) / globals.size;
-    #ifdef HEAP
-    vec4 depth4 = textureGather(sampler2D(textures_heap[nonuniformEXT(globals.texture_index)], global_sampler), uv);
-    #else
-    vec4 depth4 = textureGather(sampler2D(Input, depth_sampler), uv);
-    #endif
-    float depth = min( min(depth4.x, depth4.y), min(depth4.z, depth4.w) );
+    
+    // depth_sampler is set up to do min reduction
+    float depth = texture(sampler2D(Input, depth_sampler), uv).x;
     
     imageStore(Output, ivec2(pixel), vec4(depth));
 }

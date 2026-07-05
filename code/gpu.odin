@@ -89,7 +89,7 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             
             append(&instance_extensions, ..instance_extensions_raw[:instance_extension_count])
             
-            when !Optimized {
+            when Validation {
                 append(&instance_extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
             }
             
@@ -105,7 +105,7 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             }
             
             _ :: runtime
-            when !Optimized {
+            when Validation {
                 validation_layers := [] cstring { "VK_LAYER_KHRONOS_validation" }
                 instance_create_info.enabledLayerCount   = auto_cast len(validation_layers)
                 instance_create_info.ppEnabledLayerNames = raw_data(validation_layers)
@@ -224,6 +224,7 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
     }
     
     ////////////////////////////////////////////////
+    // Extensions
     
     {
         device_extensions := [] cstring { 
@@ -234,24 +235,8 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             vk.KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME,
         }
         
-        f_heap := vk.PhysicalDeviceDescriptorHeapFeaturesEXT {
-            sType = .PHYSICAL_DEVICE_DESCRIPTOR_HEAP_FEATURES_EXT,
-            descriptorHeap = true,
-        }
-        
-        // @correctness These features are still extensions, and we should query their availability.
-        f_mesh := vk.PhysicalDeviceMeshShaderFeaturesEXT {
-            sType = .PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
-            pNext = &f_heap,
-            
-            meshShader = true, // 57.18% (vulkan.gpuinfo.org for "1.4 and up" on 18.06.2026)
-            taskShader = true,
-            meshShaderQueries = true,
-        }
-        
         f11 := vk.PhysicalDeviceVulkan11Features {
             sType = .PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-            pNext = &f_mesh,
             
             storageBuffer16BitAccess           = true,
             uniformAndStorageBuffer16BitAccess = true,
@@ -260,7 +245,6 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
         
         f12 := vk.PhysicalDeviceVulkan12Features {
             sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-            pNext = &f11,
             
             descriptorIndexing                        = true,
             shaderSampledImageArrayNonUniformIndexing = true,
@@ -284,20 +268,17 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             
             hostQueryReset = true,
         }
-        
+                
         f13 := vk.PhysicalDeviceVulkan13Features {
             sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-            pNext = &f12,
             
             synchronization2 = true,
             dynamicRendering = true, // remove the need for RenderPass and FrameBuffer objects
             maintenance4     = true, // needed to use layout(local_size...)
         }
         
-        // These features are guaranteed to be supported, if the device suppports vulkan 1.4
         f14 := vk.PhysicalDeviceVulkan14Features {
             sType = .PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
-            pNext = &f13,
             
             maintenance5   = true, // deprecates ShaderModule
             pushDescriptor = true, // remove the need for CmdBindVertexBuffers
@@ -306,7 +287,6 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
         
         f2 := vk.PhysicalDeviceFeatures2 {
             sType = .PHYSICAL_DEVICE_FEATURES_2,
-            pNext = &f14,
             
             // @correctness These are technically optional device features, and should be queried for availablity before using them.
             features = { 
@@ -324,8 +304,6 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
         device_create_info := vk.DeviceCreateInfo {
             sType = .DEVICE_CREATE_INFO,
             
-            pNext = &f2,
-            
             queueCreateInfoCount = 1,
             pQueueCreateInfos    = &vk.DeviceQueueCreateInfo {
                 sType = .DEVICE_QUEUE_CREATE_INFO,
@@ -337,6 +315,30 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             enabledExtensionCount   = auto_cast len(device_extensions),
             ppEnabledExtensionNames = raw_data(device_extensions),
         }
+        
+        ppNext := &device_create_info.pNext
+        ppNext^ = &f11; ppNext = &f11.pNext
+        ppNext^ = &f12; ppNext = &f12.pNext
+        ppNext^ = &f13; ppNext = &f13.pNext
+        ppNext^ = &f14; ppNext = &f14.pNext
+        ppNext^ = &f2;  ppNext = &f2.pNext
+        
+        f_heap := vk.PhysicalDeviceDescriptorHeapFeaturesEXT {
+            sType = .PHYSICAL_DEVICE_DESCRIPTOR_HEAP_FEATURES_EXT,
+            descriptorHeap = true,
+        }
+        
+        // @correctness These features are still extensions, and we should query their availability.
+        f_mesh := vk.PhysicalDeviceMeshShaderFeaturesEXT {
+            sType = .PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
+            
+            meshShader = true, // 57.18% (vulkan.gpuinfo.org for "1.4 and up" on 18.06.2026)
+            taskShader = true,
+            meshShaderQueries = true,
+        }
+        
+        ppNext^ = &f_mesh; ppNext = &f_mesh.pNext
+        ppNext^ = &f_heap; ppNext = &f_heap.pNext
         
         check(vk.CreateDevice(result.physical_device, &device_create_info, nil, &result.device))
         
@@ -1464,7 +1466,7 @@ create_descriptor_heap :: proc (gpu: ^Gpu) -> Descriptor_Heap {
     result.resource_size = cast(u32) resource_size
     result.sampler_size  = cast(u32) sampler_size
     
-    // :SamplerHack: fill samplers[0] with texture sampler and samplers[1] with depth sampler
+    // :SamplerHack: fill samplers[0] with texture sampler and samplers[2] with depth sampler
     sampler_descriptor_size := resource_size // :SamplerHack:
     get_descriptor_sampler(gpu, .LINEAR, .LINEAR,  .REPEAT,        .WEIGHTED_AVERAGE, auto_cast &result.samplers_cpu[0 * sampler_descriptor_size], cast(u32) sampler_size)
     get_descriptor_sampler(gpu, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .WEIGHTED_AVERAGE, auto_cast &result.samplers_cpu[1 * sampler_descriptor_size], cast(u32) sampler_size)

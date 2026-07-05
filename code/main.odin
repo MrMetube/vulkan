@@ -17,7 +17,8 @@ Optimized :: ODIN_OPTIMIZATION_MODE == .Speed
 
 // @todo make this runtime changeable
 // @todo disabling VSync produces a validation error, that we wont see if optimizations are enabled, as those disable validation
-VSync :: false when Optimized else true
+VSync      :: false when Optimized else true
+Validation :: false when Optimized else true
 
 ////////////////////////////////////////////////
 
@@ -956,7 +957,7 @@ main :: proc () {
             }
             
             sb := strings.builder_make(context.temp_allocator)
-            fmt.sbprintf(&sb, "cpu: %.3v, gpu: %.3v, culling: %.3v early / %.3v late, rendering: %.3v early / %.3v late", 
+            fmt.sbprintf(&sb, "cpu: %.3v, gpu: %.3v, culling: early %.3v / late %.3v, rendering: early %.3v / late %.3v", 
                 view(debug.cpu_time), view(debug.gpu_time), 
                 view(debug.early_cull_time), view(debug.late_cull_time),
                 view(debug.early_rendering_time), view(debug.late_rendering_time),
