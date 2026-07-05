@@ -115,11 +115,11 @@ Draw_Data :: struct {
 }
 
 
-// @shader @todo switching the order causes the size to not be read correctly in the shader and leads to bugs in the depth pyramid construction
-Depth_Globals :: struct {
+// @shader
+Depth_Data :: struct {
+    size: v2,
     input_index:  Texture_Index,
     output_index: Texture_Index,
-    size: v2,
 }
 
 // @shader
@@ -199,7 +199,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     // @speed most of these buffer could be move the GPU local memory
-    // 200.000 suzannes: Defaul = 42.2 ms | GPU = 40.8 ms
+    // 200.000 suzannes: Default = 38.3 ms | GPU = 35.5 ms
     memory := Memory_Kind.Default
     
     // @todo(viktor): draws change per frame and could also be placed in the per frame bump allocator, as we just need a gpu address
@@ -794,8 +794,8 @@ main :: proc () {
             
             gpu_set_pipeline(cmd, depth_pipeline)
                 for mip, mip_level in stuff.depth_pyramid_mips {
-                    depth_globals_cpu, depth_globals_gpu := bump_allocate_type(bump, Depth_Globals)
-                    depth_globals_cpu^ = Depth_Globals { 
+                    depth_globals_cpu, depth_globals_gpu := bump_allocate_type(bump, Depth_Data)
+                    depth_globals_cpu^ = Depth_Data { 
                         size = cast(v2) mip.size,
                     }
                     if mip_level == 0 {
@@ -1088,6 +1088,63 @@ get_next_image :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, frame_index: u64) ->
     check(result)
     
     return true
+}
+
+end_of_frame_submit :: proc (gpu: ^Gpu, queue: vk.Queue, timeline_semaphore: vk.Semaphore, signal_value: u64, frame_index: u64, command_buffer: ^vk.CommandBuffer) {
+    // we handed out the command buffer and now ask for it to be returned. After this point it has no use, therefore we destroy the users value.
+    defer command_buffer^ = nil
+    
+    semaphore_info := [?] vk.SemaphoreSubmitInfo {
+        {
+            sType = .SEMAPHORE_SUBMIT_INFO,
+            semaphore = gpu.render_completes[gpu.image_index],
+            stageMask = { .ALL_COMMANDS },
+        },
+        {
+            sType = .SEMAPHORE_SUBMIT_INFO,
+            semaphore = timeline_semaphore,
+            value     = signal_value,
+            stageMask = { .ALL_COMMANDS },
+        },
+    }
+    
+    submit_info := vk.SubmitInfo2 {
+        sType = .SUBMIT_INFO_2,
+        waitSemaphoreInfoCount = 1,
+        pWaitSemaphoreInfos = &vk.SemaphoreSubmitInfo {
+            sType = .SEMAPHORE_SUBMIT_INFO,
+         
+            semaphore = gpu.image_aquired_semaphores[frame_index],
+            stageMask = { .TRANSFER },
+        },
+        commandBufferInfoCount = 1,
+        pCommandBufferInfos = &vk.CommandBufferSubmitInfo {
+            sType = .COMMAND_BUFFER_SUBMIT_INFO,
+            commandBuffer = command_buffer^,
+        },
+        signalSemaphoreInfoCount = len(semaphore_info),
+        pSignalSemaphoreInfos    = raw_data(&semaphore_info),
+    }
+    
+    check(vk.QueueSubmit2(queue, 1, &submit_info, 0))
+}
+
+present_the_queue :: proc (gpu: ^Gpu, queue: vk.Queue) {
+    present_info := vk.PresentInfoKHR {
+        sType = .PRESENT_INFO_KHR,
+        waitSemaphoreCount = 1,
+        pWaitSemaphores    = &gpu.render_completes[gpu.image_index],
+        swapchainCount     = 1,
+        pSwapchains        = &gpu.swapchain,
+        pImageIndices      = &gpu.image_index,
+    }
+    
+    result := vk.QueuePresentKHR(queue, &present_info)
+    if result == .ERROR_OUT_OF_DATE_KHR {
+        gpu.swapchain_state = .Dirty
+    } else {
+        check(result)
+    }
 }
 
 begin_meshlet_rendering :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stuff: ^Render_Targets_And_Stuff, clear_color: v4, early: bool) {

@@ -61,7 +61,7 @@ generate_shader_api :: proc (output_file: string) {
     // structs used in push constants
     collect_types(&simple_types, &reference_types, Cull_Globals)
     collect_types(&simple_types, &reference_types, Draw_Globals)
-    collect_types(&simple_types, &reference_types, Depth_Globals)
+    collect_types(&simple_types, &reference_types, Depth_Data)
     append_reference_types(&builder, reference_types)
     
     // nested structs
@@ -72,7 +72,7 @@ generate_shader_api :: proc (output_file: string) {
     // push constants again
     append_buffer_reference_struct(&builder, Cull_Globals)
     append_buffer_reference_struct(&builder, Draw_Globals)
-    append_buffer_reference_struct(&builder, Depth_Globals)
+    append_buffer_reference_struct(&builder, Depth_Data)
     
     ////////////////////////////////////////////////
     // implementation

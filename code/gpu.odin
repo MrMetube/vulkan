@@ -73,6 +73,11 @@ Memory_Kind :: enum u32 {
     Readback, // cpu cached
 }
 
+Pipeline :: struct {
+    pipeline:   vk.Pipeline,
+    bind_point: vk.PipelineBindPoint,
+}
+
 ////////////////////////////////////////////////
 
 GpuAddress :: struct ($T: typeid) {
@@ -592,6 +597,92 @@ check :: proc (result: vk.Result, loc := #caller_location) {
     }
 }
 
+gpu_recreate_swapchain_if_needed :: proc (gpu: ^Gpu) -> (can_render: bool) {
+    if gpu.swapchain_state != .Dirty && gpu.swapchain_state != .Window_Is_Minimized {
+        return true
+    }
+    
+    check(vk.DeviceWaitIdle(gpu.device))
+    
+    surface_capabilities: vk.SurfaceCapabilitiesKHR
+    check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(gpu.physical_device, gpu.surface, &surface_capabilities))
+    
+    // :Linux: Wayland had a special value for surface_capabilities.currentExtent.width
+    swapchain_extent := surface_capabilities.currentExtent
+    if swapchain_extent.width == 0 || swapchain_extent.height == 0 {
+        gpu.swapchain_state = .Window_Is_Minimized
+        return false
+    }
+    
+    old_swapchain := gpu.swapchain
+    swapchain_create_info := vk.SwapchainCreateInfoKHR {
+        sType = .SWAPCHAIN_CREATE_INFO_KHR,
+        surface          = gpu.surface,
+        minImageCount    = surface_capabilities.minImageCount,
+        imageFormat      = gpu.swapchain_format,
+        imageColorSpace  = .SRGB_NONLINEAR,
+        imageExtent      = swapchain_extent,
+        imageArrayLayers = 1,
+        imageUsage       = { .TRANSFER_DST },
+        preTransform     = { .IDENTITY },
+        compositeAlpha   = { .OPAQUE },
+        presentMode      = VSync ? .FIFO : .IMMEDIATE,
+        
+        oldSwapchain = old_swapchain,
+    }
+    gpu.swapchain_size = { swapchain_extent.width, swapchain_extent.height }
+    
+    previous_image_count := cast(u32) len(gpu.swapchain_images)
+    
+    check(vk.CreateSwapchainKHR(gpu.device, &swapchain_create_info, nil, &gpu.swapchain))
+    
+    image_count: u32
+    check(vk.GetSwapchainImagesKHR(gpu.device, gpu.swapchain, &image_count, nil))
+    
+    if old_swapchain != 0 {
+        // @copypasta a bit redundant with destroy_swapchain, but combining both leads to a mess
+        if previous_image_count != image_count {
+            for &it in gpu.render_completes {
+                vk.DestroySemaphore(gpu.device, it, nil)
+            }
+            clear(&gpu.render_completes)
+            clear(&gpu.swapchain_images) // The swapchain's images are allocated for us, so we can just drop the handles.
+        }
+        
+        vk.DestroySwapchainKHR(gpu.device, old_swapchain, nil)
+    }
+    
+    if previous_image_count != image_count {
+        resize(&gpu.swapchain_images, image_count)
+        resize(&gpu.render_completes, image_count)
+        
+        for &it in gpu.render_completes {
+            it = gpu_create_semaphore(gpu)
+        }
+    }
+    
+    images: [dynamic; 16] vk.Image
+    assert(image_count <= cap(images))
+    resize(&images, image_count)
+    check(vk.GetSwapchainImagesKHR(gpu.device, gpu.swapchain, &image_count, &images[0]))
+    for image, index in images {
+        gpu.swapchain_images[index].image = image
+        gpu.swapchain_images[index].size  = { gpu.swapchain_size.x, gpu.swapchain_size.y, 1 }
+    }
+    
+    gpu.swapchain_state = .Was_Resized
+    return true
+}
+
+gpu_destroy_swapchain :: proc (gpu: ^Gpu) { 
+    for &it in gpu.render_completes {
+        vk.DestroySemaphore(gpu.device, it, nil)
+    }
+    clear(&gpu.render_completes)
+    clear(&gpu.swapchain_images) // The swapchain's images are allocated for us, so we can just drop the handles.
+    vk.DestroySwapchainKHR(gpu.device, gpu.swapchain, nil)
+}
+
 
 
 
@@ -615,6 +706,30 @@ gpu_allocate :: proc { gpu_allocate_size, gpu_allocate_slice, gpu_allocate_type 
 gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (cpu_result: pmm, gpu_result: vk.DeviceAddress) {
     usage := usage
     usage += { .SHADER_DEVICE_ADDRESS }
+    
+    /* 
+    
+               DEVICE_LOCAL               - static data, compute only buffers
+    .GPU     = DEVICE_LOCAL, HOST_VISIBLE - AMD specific, 256 Mb - dynamic per frame data, uniform data
+    .Default = HOST_VISIBLE HOST_COHERENT - over PCIe bus - dynamic data and staging buffers for copys to DEVICE_LOCAL only memory
+    
+    */
+    
+    /* 
+    
+    dynamic multicore by default
+    
+    split a regular call over all idle thread/cores
+    join on return
+    
+    make the main thread just do the regular call and let the other cores seamlessly "join" the workforce on the function
+    
+    
+    
+    Explore vkCmdSetEvent and vkCmdWaitEvents as an alternative for full barriers 
+    should only be used when a large distance in the command buffer between set and wait is possible
+    
+    */
     
     flags := vk.MemoryPropertyFlags {}
     switch memory {
@@ -1049,6 +1164,113 @@ destroy_pipeline :: proc (gpu: ^Gpu, pipeline: Pipeline) {
         check(vk.DeviceWaitIdle(gpu.device))
         vk.DestroyPipeline(gpu.device, pipeline.pipeline, nil)
     }
+}
+
+gather_descriptor_resources :: proc (shaders: ..Shader) -> ([32] vk.DescriptorType, Shader_Resource_Mask) {
+    resource_types: [32] vk.DescriptorType
+    resource_mask: Shader_Resource_Mask
+    
+    for shader in shaders {
+        for i in shader.parsed.resource_mask {
+            if i in resource_mask {
+                assert(resource_types[i] == shader.parsed.resource_types[i], "Mismatching binding types in shaders")
+            } else {
+                resource_types[i] = shader.parsed.resource_types[i]
+                resource_mask += { i }
+            }
+        }
+    }
+    
+    return resource_types, resource_mask
+}
+
+generate_heap_mappings :: proc (resource_mask: Shader_Resource_Mask, resource_types: [32] vk.DescriptorType, resource_names: [] string, push_constant_size: u32, descriptor_size, sampler_size: u32, mappings: ^[32] vk.DescriptorSetAndBindingMappingEXT) -> vk.ShaderDescriptorSetAndBindingMappingInfoEXT {
+    mapping_offset: u32
+    descriptor_offset: u32
+    // :SamplerHack: we define name->id correspondence here for now; this will move to shader code when descriptor heaps conquer the world
+	sampler_names := [] string {
+		"texture_sampler",
+		"filter_sampler",
+		"depth_sampler",
+	}
+    
+    // push descriptors
+    for i in cast(u32) 0..<32 {
+        if i in resource_mask {
+            mapping := &mappings[mapping_offset]
+            mapping_offset += 1
+            
+             mapping^ = {
+                sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
+                
+                descriptorSet = 0,
+                firstBinding  = i,
+                bindingCount  = 1,
+                resourceMask  = vk.SpirvResourceTypeFlagsEXT_ALL,
+            }
+            
+            if resource_types[i] == .SAMPLER {
+                mapping.source = .HEAP_WITH_CONSTANT_OFFSET
+                
+                // :SamplerHack: for now we map samplers by name to avoid having to bind them via push path
+				// in the future we will change the shader code to carry the name->binding correspondence statically
+                
+                for name, name_index in sampler_names {
+                    if resource_names[i] == name {
+                        mapping.sourceData.constantOffset.heapOffset = cast(u32) name_index * descriptor_size
+                    }
+                }
+            } else {
+                mapping.source = .HEAP_WITH_PUSH_INDEX
+                mapping.sourceData.pushIndex = {
+                    heapOffset = descriptor_offset * descriptor_size,
+                    pushOffset = push_constant_size,
+                    heapIndexStride = descriptor_size,
+                    heapArrayStride = descriptor_size,
+                }
+                
+                descriptor_offset += 1
+            }
+        }
+    }
+    
+	{ // texture array descriptor
+		mapping := &mappings[mapping_offset]
+        mapping_offset += 1
+        
+		mapping^ = {
+            sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
+            descriptorSet = 1,
+            firstBinding = 0,
+            bindingCount = 1,
+            resourceMask =  vk.SpirvResourceTypeFlagsEXT_ALL,
+            source = .HEAP_WITH_CONSTANT_OFFSET,
+        }
+		mapping.sourceData.constantOffset.heapArrayStride = descriptor_size
+	}
+	
+	{ // sampler descriptors
+		mapping := &mappings[mapping_offset]
+        mapping_offset += 1
+        
+        mapping^ = {
+            sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
+            descriptorSet = 2,
+            firstBinding = 0,
+            bindingCount = DescriptorSamplerLimit,
+            resourceMask = vk.SpirvResourceTypeFlagsEXT_ALL,
+            source = .HEAP_WITH_CONSTANT_OFFSET,
+        }
+		mapping.sourceData.constantOffset.heapArrayStride = descriptor_size
+	}
+    
+	result := vk.ShaderDescriptorSetAndBindingMappingInfoEXT { 
+        sType = .SHADER_DESCRIPTOR_SET_AND_BINDING_MAPPING_INFO_EXT,
+        mappingCount = mapping_offset,
+        pMappings    = &mappings[0],
+    }
+    
+    return result
 }
 
 

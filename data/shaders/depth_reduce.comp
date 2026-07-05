@@ -2,7 +2,7 @@
 
 #extension GL_EXT_shader_explicit_arithmetic_types_int64: require
 #extension GL_EXT_nonuniform_qualifier: require
-#extension GL_EXT_descriptor_heap : require
+#extension GL_EXT_descriptor_heap: require
 
 #include "common.glsl"
 
@@ -11,7 +11,7 @@ layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
 
 // @volatile
 layout(push_constant) uniform Push_Data {
-    Depth_Globals data;
+    Depth_Data data;
 };
 
 layout(descriptor_heap) uniform texture2D Textures[];
