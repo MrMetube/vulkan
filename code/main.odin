@@ -164,12 +164,12 @@ Vertex :: struct {
 ////////////////////////////////////////////////
 
 main :: proc () {
-    check_sdl(sdl.InitSubSystem({ .VIDEO }))
+    if !sdl.InitSubSystem({ .VIDEO }) { print_sdl_error_and_exit() }
     defer sdl.Quit()
     defer sdl.QuitSubSystem({ .VIDEO })
     
     window := sdl.CreateWindow("Vulkan Renderer", 1280, 720, sdl.WINDOW_VULKAN | sdl.WINDOW_RESIZABLE)
-    check_sdl(window != nil)
+    if window == nil { print_sdl_error_and_exit () }
     defer sdl.DestroyWindow(window)
     
     ////////////////////////////////////////////////
@@ -313,7 +313,6 @@ main :: proc () {
             queryCount         = stats_count,
         }
         check(vk.CreateQueryPool(gpu.device, &create_info, nil, &stats_pool))
-        defer_destroy(vk.DestroyQueryPool, stats_pool)
     }
     
     ////////////////////////////////////////////////
@@ -326,9 +325,8 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     absolute_frame_index: u64
-    next_frame: u64 = MaxFramesInFlight+1
+    next_frame := cast(u64) MaxFramesInFlight+1
     frame_semaphore := gpu_create_timeline_semaphore(&gpu, MaxFramesInFlight)
-    defer_destroy(vk.DestroySemaphore, frame_semaphore)
     
     ////////////////////////////////////////////////
     
@@ -716,8 +714,8 @@ main :: proc () {
                         
                         gpu_push_descriptors(cmd, &gpu, &descriptor_heap, &frame_descriptor, updates)
                         gpu_draw_meshlets_indirect_count(cmd, &frame_descriptor,
-                            draw_command_gpu.p, draw_command_count_gpu, 
-                            auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command),
+                            draw_command_gpu, draw_command_count_gpu, 
+                            auto_cast len(draws), offset_of(Draw_Command, command),
                             draw_globals_gpu,
                         )
                     
@@ -848,8 +846,8 @@ main :: proc () {
             gpu_labeled_region_begin(cmd, "late rendering pass", {0.6, 0.1, 07, 1.0})
             
                 gpu_barrier(cmd, 
-                    { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS, .COMPUTE_SHADER }, 
-                    { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }
+                    { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS,  .COMPUTE_SHADER }, 
+                    { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }
                 )
                 
                 ////////////////////////////////////////////////
@@ -867,8 +865,8 @@ main :: proc () {
                         gpu_push_descriptors(cmd, &gpu, &descriptor_heap, &frame_descriptor, updates2)
                         
                         gpu_draw_meshlets_indirect_count(cmd, &frame_descriptor,
-                            draw_command_gpu.p, draw_command_count_gpu, 
-                            auto_cast len(draws), size_of(Draw_Command), offset_of(Draw_Command, command),
+                            draw_command_gpu, draw_command_count_gpu, 
+                            auto_cast len(draws), offset_of(Draw_Command, command),
                             draw_globals_gpu,
                         )
                     
@@ -1023,6 +1021,10 @@ main :: proc () {
     
     destroy_stuff(&gpu, &stuff)
     
+    vk.DestroySemaphore(gpu.device, frame_semaphore, nil)
+    vk.DestroyQueryPool(gpu.device, stats_pool, nil)
+    vk.DestroyQueryPool(gpu.device, gpu_profiler.pool, nil)
+    
     gpu_deinit(&gpu)
 }
 
@@ -1101,17 +1103,7 @@ destroy_stuff :: proc (gpu: ^Gpu, stuff: ^Render_Targets_And_Stuff) {
 
 ////////////////////////////////////////////////
 
-check :: proc (result: vk.Result, loc := #caller_location) {
-    if result != .SUCCESS {
-        fmt.printf("%v:%v:%v: Vulkan call returned %v", loc.file_path, loc.line, loc.column, result)
-        intrinsics.debug_trap()
-    }
-}
-
-check_sdl :: proc (result: bool, loc := #caller_location) {
-    if !result {
-        fmt.printf("%v:%v:%v: SDL call returned %v", loc.file_path, loc.line, loc.column, sdl.GetError())
-        intrinsics.debug_trap()
-        os.exit(1)
-    }
+print_sdl_error_and_exit :: proc (loc := #caller_location) -> ! {
+    fmt.printf("%v:%v:%v: SDL call returned %v", loc.file_path, loc.line, loc.column, sdl.GetError())
+    os.exit(1)
 }

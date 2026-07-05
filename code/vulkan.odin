@@ -21,26 +21,6 @@ Image :: struct {
 
 ////////////////////////////////////////////////
 
-to_be_destroyed_handles: [dynamic] Destroy_Info
-
-Destroy_Info :: struct { 
-    handle: vk.NonDispatchableHandle, 
-    fn: proc (device: vk.Device, handle: vk.NonDispatchableHandle, pAllocator: ^vk.AllocationCallbacks),
-}
-
-defer_destroy :: proc (fn: $F, handle: $T/ vk.NonDispatchableHandle, loc := #caller_location) {
-    assert(handle != 0, loc = loc)
-    append(&to_be_destroyed_handles, Destroy_Info { handle = auto_cast handle, fn = auto_cast fn })
-}
-
-destroy_all_handles :: proc (device: vk.Device) {
-    #reverse for item in to_be_destroyed_handles {
-        item.fn(device, item.handle, nil)
-    }
-}
-
-////////////////////////////////////////////////
-
 gpu_recreate_swapchain_if_needed :: proc (gpu: ^Gpu) -> (can_render: bool) {
     if gpu.swapchain_state != .Dirty && gpu.swapchain_state != .Window_Is_Minimized {
         return true

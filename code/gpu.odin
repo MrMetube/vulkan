@@ -12,6 +12,7 @@ package main
    // based on: https://www.sebastianaaltonen.com/blog/no-graphics-api //
   //////////////////////////////////////////////////////////////////////
 
+import "base:intrinsics"
 import "base:runtime"
 
 import "core:fmt"
@@ -37,10 +38,6 @@ Gpu :: struct {
     // @incomplete this is never initialized. It may help performance if we need to create/recreate many pipelines.
     pipeline_cache: vk.PipelineCache,
     
-    // @study as all command buffers are one time submits, do we even need to ensure they are not reused between frames/free at end of the frame
-    // Can this just be a single command pool for per frame command buffers, and if there is a second queue then we need another command pool,
-    // Or do we actually never need to reset it anyways?
-    
     ////////////////////////////////////////////////
     
     general_queue: vk.Queue,
@@ -55,12 +52,11 @@ Gpu :: struct {
     image_index: u32, 
     
     ////////////////////////////////////////////////
-    // these all have the same lifetime as the swapchain
     
     swapchain_size: uv2,
     
     swapchain: vk.SwapchainKHR,
-    swapchain_images: [dynamic] Image, // this is only an image to make use of the last stage access and layout
+    swapchain_images: [dynamic] Image, // technically only the vk.Image and size: uv2 are used
     render_completes: [dynamic] vk.Semaphore,
 }
 
@@ -220,7 +216,9 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
         
         ////////////////////////////////////////////////
         
-        check_sdl(sdl.Vulkan_CreateSurface(window, auto_cast result.instance, nil, auto_cast &result.surface))
+        if !sdl.Vulkan_CreateSurface(window, auto_cast result.instance, nil, auto_cast &result.surface) {
+            print_sdl_error_and_exit()
+        }
     }
     
     ////////////////////////////////////////////////
@@ -362,7 +360,6 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
                 }
                 
                 check(vk.CreateCommandPool(result.device, &command_pool_create_info, nil, &pool))
-                defer_destroy(vk.DestroyCommandPool, pool)
             }
             
             command_pool_create_info := vk.CommandPoolCreateInfo {
@@ -372,13 +369,12 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             }
             
             check(vk.CreateCommandPool(result.device, &command_pool_create_info, nil, &result.transfer_command_pool))
-            defer_destroy(vk.DestroyCommandPool, result.transfer_command_pool)
         }
+        
         ////////////////////////////////////////////////
         
         for &sema in result.image_aquired_semaphores {
             sema = gpu_create_semaphore(&result)
-            defer_destroy(vk.DestroySemaphore, sema)
         }
     }
     
@@ -398,15 +394,14 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             break get_swapchain_format
         }
         
-        for format in formats {
-            if format.format == .R8G8B8A8_SRGB || format.format == .B8G8R8A8_SRGB {
-                result.swapchain_format = format.format
+        for it in formats {
+            if it.format == .R8G8B8A8_SRGB || it.format == .B8G8R8A8_SRGB {
+                result.swapchain_format = it.format
                 break get_swapchain_format
             }
         }
         
         result.swapchain_format = formats[0].format
-        break get_swapchain_format
     }
     
     ok := gpu_recreate_swapchain_if_needed(&result)
@@ -418,7 +413,15 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
 gpu_deinit :: proc (gpu: ^Gpu) {
     defer gpu^ = {}
     
-    destroy_all_handles(gpu.device)
+    for &pool in gpu.command_pools {
+        vk.DestroyCommandPool(gpu.device, pool, nil)
+    }
+        
+    vk.DestroyCommandPool(gpu.device, gpu.transfer_command_pool, nil)
+    for sema in gpu.image_aquired_semaphores {
+        vk.DestroySemaphore(gpu.device, sema, nil)
+    }
+    
     gpu_destroy_swapchain(gpu)
     
     vk.DestroyDevice(gpu.device, nil)
@@ -427,6 +430,12 @@ gpu_deinit :: proc (gpu: ^Gpu) {
     vk.DestroyInstance(gpu.instance, nil)
 }
 
+check :: proc (result: vk.Result, loc := #caller_location) {
+    if result != .SUCCESS {
+        fmt.printf("%v:%v:%v: Vulkan call returned %v", loc.file_path, loc.line, loc.column, result)
+        intrinsics.debug_trap()
+    }
+}
 
 
 
@@ -550,8 +559,8 @@ gpu_reflect_get_buffer :: proc (address: vk.DeviceAddress) -> (vk.Buffer, vk.Dev
     alloc := gpu_reflect_get_allocation(address)
     return alloc.buffer, alloc.offset
 }
-gpu_reflect_set_allocation :: proc (address: vk.DeviceAddress, buffer: GpuAllocation, offset: u32 = 0) {
-    _the_gpu_allocations[address] = { buffer.buffer, buffer.memory, buffer.address, buffer.offset + cast(vk.DeviceSize) offset }
+gpu_reflect_set_allocation :: proc (address: vk.DeviceAddress, alloc: GpuAllocation, offset: u32 = 0) {
+    _the_gpu_allocations[address] = { alloc.buffer, alloc.memory, alloc.address, alloc.offset + cast(vk.DeviceSize) offset }
 }
 
 gpu_allocate :: proc { gpu_allocate_size, gpu_allocate_slice, gpu_allocate_type }
@@ -1067,10 +1076,8 @@ gpu_submit :: proc (queue: vk.Queue, semaphore: vk.Semaphore, signal_value: u64,
 MaxTimeout :: max(u64)
 
 gpu_create_semaphore :: proc (gpu: ^Gpu) -> vk.Semaphore {
-    info := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO }
-    
     result: vk.Semaphore
-    check(vk.CreateSemaphore(gpu.device, &info, nil, &result))
+    check(vk.CreateSemaphore(gpu.device, &{ sType = .SEMAPHORE_CREATE_INFO }, nil, &result))
     
     return result
 }
@@ -1408,13 +1415,13 @@ gpu_dispatch :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor
     vk.CmdDispatch(cmd, **group_size)
 }
 
-gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, commands: vk.DeviceAddress, count: GpuAddress(u32), max_count: u32, stride: u32, command_offset: umm, push_constant: GpuAddress($T)) {
+gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, commands: GpuSlice($C), count: GpuAddress(u32), max_count: u32, command_offset: umm, push_constant: GpuAddress($T)) {
     // @speed 
-    commands, commands_base_offset := gpu_reflect_get_buffer(commands)
+    commands, commands_base_offset := gpu_reflect_get_buffer(commands.p)
     count,    count_offset         := gpu_reflect_get_buffer(count.p)
     
     gpu_push_constants(cmd, frame_descriptor, push_constant)
-    vk.CmdDrawMeshTasksIndirectCountEXT(cmd, commands, commands_base_offset + cast(vk.DeviceSize) command_offset, count, count_offset, max_count, stride)
+    vk.CmdDrawMeshTasksIndirectCountEXT(cmd, commands, commands_base_offset + cast(vk.DeviceSize) command_offset, count, count_offset, max_count, size_of(C))
 }
 
 

@@ -36,7 +36,6 @@ gpu_profile_make_query_pool :: proc (device: vk.Device) {
         queryCount = QueryPoolSize,
     }
     check(vk.CreateQueryPool(device, &create_info, nil, &gpu_profiler.pool))
-    defer_destroy(vk.DestroyQueryPool, gpu_profiler.pool)
 }
 
 gpu_profile_frame_begin :: proc (device: vk.Device, cb: vk.CommandBuffer) {
