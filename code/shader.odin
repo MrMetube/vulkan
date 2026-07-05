@@ -84,6 +84,8 @@ generate_shader_api :: proc (output_file: string) {
         switch info.id {
         case f32: type_name = "float"
         
+        case Texture_Index: type_name = "uint"
+        
         case u32: type_name = "uint"
         case i8:  type_name = "int8_t"
         case u8:  type_name = "uint8_t"

@@ -67,6 +67,154 @@ Swapchain_State :: enum {
     Window_Is_Minimized,
 }
 
+Memory_Kind :: enum u32 {
+    Default,  // cpu_mapped_gpu_memory, for fast gpu read, and direct cpu copying into
+    GPU,      // gpu only memory for texture data, or big gpu-only buffers
+    Readback, // cpu cached
+}
+
+////////////////////////////////////////////////
+
+GpuAddress :: struct ($T: typeid) {
+    p: vk.DeviceAddress,
+}
+
+GpuSlice :: struct ($T: typeid) {
+    p:         vk.DeviceAddress,
+    byte_size: int,
+}
+
+// @todo(viktor): can we find a way not or a better place to store this metadata per allocation?
+_the_gpu_allocations: map[vk.DeviceAddress] GpuAllocation
+GpuAllocation :: struct {
+    buffer:  vk.Buffer,
+    memory:  vk.DeviceMemory,
+    address: vk.DeviceAddress,
+    offset:  vk.DeviceSize,
+}
+
+Topology :: vk.PrimitiveTopology
+Cull     :: enum { None, CCW, CW, All }
+Blend    :: vk.BlendOp
+Factor   :: vk.BlendFactor
+
+Format :: vk.Format
+
+Raster_Desc :: struct {
+    topology:                     Topology,
+    cull:                         Cull,
+    alpha_to_coverage:            bool,
+    // support_dual_source_blending: bool,
+    sample_count:                 u8,
+    depth_format:                 Format,
+    stencil_format:               Format,
+    color_targets:                [] Color_Target,
+    blendstate:                   ^Blend_Desc, // optional embedded blend state
+}
+
+DefaultRasterDesc :: Raster_Desc {
+    topology = .TRIANGLE_LIST,
+    sample_count = 1,
+}
+
+Color_Target :: struct {
+    format:     Format,
+    write_mask: Color_Mask, // should default to { .R, .G, .B, .A }
+}
+
+Blend_Desc :: struct {
+    color_op: Blend,
+    src_color_factor: Factor,
+    dst_color_factor: Factor,
+    alpha_op: Blend,
+    src_alpha_factor: Factor,
+    dst_alpha_factor: Factor,
+    color_write_mask: Color_Mask,
+}
+
+DefaultBlendDesc :: Blend_Desc {
+    src_color_factor = .ONE,
+    src_alpha_factor = .ONE,
+    color_write_mask = DefaulColorMask,
+}
+
+DefaulColorMask :: Color_Mask { .R, .G, .B, .A }
+
+Color_Mask :: vk.ColorComponentFlags
+
+Texture_Desc :: struct {
+    kind:         vk.ImageType,
+    size:         uv3,
+    format:       Format,
+    mip_count:    u32,
+    sample_count: u32,
+    usage:        vk.ImageUsageFlags,
+}
+
+default_texture_desc :: proc (
+    kind:         vk.ImageType = .D2,
+    size:         uv3 = 1,
+    format:       Format = .UNDEFINED,
+    mip_count:    u32 = 1,
+    sample_count: u32 = 1,
+    usage:        vk.ImageUsageFlags = {},
+) -> Texture_Desc {
+    result := Texture_Desc {
+        kind = kind,
+        size = size,
+        format = format,
+        mip_count = mip_count,
+        sample_count = sample_count,
+        usage = usage,
+    }
+    return result
+}
+
+Render_Target :: struct {
+    texture: Image,
+    view:    vk.ImageView,
+    
+    load_op:  vk.AttachmentLoadOp,
+    store_op: vk.AttachmentStoreOp,
+    
+    clear_depth:   f32,
+    clear_stencil: u32,
+    clear_color:   v4,
+}
+
+Render_Pass_Desc :: struct {
+    depth_target:   Render_Target,
+    stencil_target: Render_Target,
+    color_targets:  [] Render_Target,
+}
+
+DescriptorStaticLimit   :: 65536 // static resource descriptors
+DescriptorPerFrameLimit :: 1024  // submitted per frame via push
+DescriptorSamplerLimit  :: 16    // just sampler descriptors
+
+Descriptor_Heap :: struct {
+    resources_cpu: [] u8,
+    resources_gpu: GpuSlice(u8),
+    samplers_cpu: [] u8,
+    samplers_gpu: GpuSlice(u8),
+    
+    resource_size: u32,
+    sampler_size:  u32,
+    
+    resource_reserved_offset: vk.DeviceSize,
+    resource_reserved_size:   vk.DeviceSize,
+    
+    sampler_reserved_offset: vk.DeviceSize,
+    sampler_reserved_size:   vk.DeviceSize,
+}
+
+Frame_Descriptor :: struct {
+    descriptor_offset: Texture_Index,
+    descriptor_end:    Texture_Index,
+}
+
+Descriptor :: distinct [128] u8
+
 ////////////////////////////////////////////////
 
 gpu_init :: proc (window: ^sdl.Window) -> Gpu {
@@ -231,6 +379,7 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             vk.KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME,
             vk.EXT_DESCRIPTOR_HEAP_EXTENSION_NAME,
             vk.KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME,
+            vk.KHR_SHADER_UNTYPED_POINTERS_EXTENSION_NAME,
         }
         
         f11 := vk.PhysicalDeviceVulkan11Features {
@@ -296,6 +445,25 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
                 pipelineStatisticsQuery = true,
             },
         }
+                
+        f_heap := vk.PhysicalDeviceDescriptorHeapFeaturesEXT {
+            sType = .PHYSICAL_DEVICE_DESCRIPTOR_HEAP_FEATURES_EXT,
+            descriptorHeap = true,
+        }
+        
+        // @correctness These features are still extensions, and we should query their availability.
+        f_mesh := vk.PhysicalDeviceMeshShaderFeaturesEXT {
+            sType = .PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
+            
+            meshShader = true, // 57.18% (vulkan.gpuinfo.org for "1.4 and up" on 18.06.2026)
+            taskShader = true,
+            meshShaderQueries = true,
+        }
+        
+        f_pointer := vk.PhysicalDeviceShaderUntypedPointersFeaturesKHR {
+            sType = .PHYSICAL_DEVICE_SHADER_UNTYPED_POINTERS_FEATURES_KHR,
+            shaderUntypedPointers = true,
+        }
         
         queue_family_index: u32
         
@@ -321,22 +489,9 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
         ppNext^ = &f14; ppNext = &f14.pNext
         ppNext^ = &f2;  ppNext = &f2.pNext
         
-        f_heap := vk.PhysicalDeviceDescriptorHeapFeaturesEXT {
-            sType = .PHYSICAL_DEVICE_DESCRIPTOR_HEAP_FEATURES_EXT,
-            descriptorHeap = true,
-        }
-        
-        // @correctness These features are still extensions, and we should query their availability.
-        f_mesh := vk.PhysicalDeviceMeshShaderFeaturesEXT {
-            sType = .PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
-            
-            meshShader = true, // 57.18% (vulkan.gpuinfo.org for "1.4 and up" on 18.06.2026)
-            taskShader = true,
-            meshShaderQueries = true,
-        }
-        
         ppNext^ = &f_mesh; ppNext = &f_mesh.pNext
         ppNext^ = &f_heap; ppNext = &f_heap.pNext
+        ppNext^ = &f_pointer; ppNext = &f_pointer.pNext
         
         check(vk.CreateDevice(result.physical_device, &device_create_info, nil, &result.device))
         
@@ -439,116 +594,9 @@ check :: proc (result: vk.Result, loc := #caller_location) {
 
 
 
-////////////////////////////////////////////////
-
-Memory_Kind :: enum u32 {
-    Default,  // cpu_mapped_gpu_memory, for fast gpu read, and direct cpu copying into
-    GPU,      // gpu only memory for texture data, or big gpu-only buffers
-    Readback, // cpu cached
-}
-
-////////////////////////////////////////////////
-
-Topology :: vk.PrimitiveTopology
-Cull     :: enum { None, CCW, CW, All }
-Blend    :: vk.BlendOp
-Factor   :: vk.BlendFactor
-
-Format :: vk.Format
-
-Raster_Desc :: struct {
-    topology:                     Topology,
-    cull:                         Cull,
-    alpha_to_coverage:            bool,
-    // support_dual_source_blending: bool,
-    sample_count:                 u8,
-    depth_format:                 Format,
-    stencil_format:               Format,
-    color_targets:                [] Color_Target,
-    blendstate:                   ^Blend_Desc, // optional embedded blend state
-}
-
-DefaultRasterDesc :: Raster_Desc {
-    topology = .TRIANGLE_LIST,
-    sample_count = 1,
-}
-
-Color_Target :: struct {
-    format:     Format,
-    write_mask: Color_Mask, // should default to { .R, .G, .B, .A }
-}
-
-Blend_Desc :: struct {
-    color_op: Blend,
-    src_color_factor: Factor,
-    dst_color_factor: Factor,
-    alpha_op: Blend,
-    src_alpha_factor: Factor,
-    dst_alpha_factor: Factor,
-    color_write_mask: Color_Mask,
-}
-
-DefaultBlendDesc :: Blend_Desc {
-    src_color_factor = .ONE,
-    src_alpha_factor = .ONE,
-    color_write_mask = DefaulColorMask,
-}
-
-DefaulColorMask :: Color_Mask { .R, .G, .B, .A }
-
-Color_Mask :: vk.ColorComponentFlags
-
-Texture_Desc :: struct {
-    kind:         vk.ImageType,
-    size:         uv3,
-    format:       Format,
-    mip_count:    u32,
-    sample_count: u32,
-    usage:        vk.ImageUsageFlags,
-}
-
-default_texture_desc :: proc (
-    kind:         vk.ImageType = .D2,
-    size:         uv3 = 1,
-    format:       Format = .UNDEFINED,
-    mip_count:    u32 = 1,
-    sample_count: u32 = 1,
-    usage:        vk.ImageUsageFlags = {},
-) -> Texture_Desc {
-    result := Texture_Desc {
-        kind = kind,
-        size = size,
-        format = format,
-        mip_count = mip_count,
-        sample_count = sample_count,
-        usage = usage,
-    }
-    return result
-}
-
-
-
 
 ////////////////////////////////////////////////
 // Memory
-
-GpuAddress :: struct ($T: typeid) {
-    p: vk.DeviceAddress,
-}
-
-GpuSlice :: struct ($T: typeid) {
-    p:         vk.DeviceAddress,
-    byte_size: int,
-}
-
-// @todo(viktor): can we find a way not or a better place to store this metadata per allocation?
-_the_gpu_allocations: map[vk.DeviceAddress] GpuAllocation
-GpuAllocation :: struct {
-    buffer:  vk.Buffer,
-    memory:  vk.DeviceMemory,
-    address: vk.DeviceAddress,
-    offset:  vk.DeviceSize,
-}
 
 gpu_reflect_get_allocation :: proc (address: vk.DeviceAddress) -> GpuAllocation {
     alloc, ok := _the_gpu_allocations[address]
@@ -767,12 +815,12 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, descriptor_size
     result: Pipeline
     result.bind_point = .COMPUTE
     
-    result.resource_mask  = compute.parsed.resource_mask
-    result.resource_types = compute.parsed.resource_types
+    resource_mask  := compute.parsed.resource_mask
+    resource_types := compute.parsed.resource_types
     
     mappings := [32] vk.DescriptorSetAndBindingMappingEXT {}
     heap_mapping: vk.ShaderDescriptorSetAndBindingMappingInfoEXT
-    heap_mapping = generate_heap_mappings(result.resource_mask, result.resource_types, sampler_hack_names, size_of(vk.DeviceAddress), descriptor_size, sampler_size, &mappings)
+    heap_mapping = generate_heap_mappings(resource_mask, resource_types, sampler_hack_names, size_of(vk.DeviceAddress), descriptor_size, sampler_size, &mappings)
     
     create_info := vk.ComputePipelineCreateInfo {
         sType = .COMPUTE_PIPELINE_CREATE_INFO,
@@ -835,11 +883,13 @@ gpu_create_graphics_meshlet_pipeline_mp :: proc (gpu: ^Gpu, mesh, frag: Shader, 
 }
 
 gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info: Raster_Desc, descriptor_size, sampler_size: u32, shaders: ..Shader, sampler_hack_names := [] string {}) {
-    result.resource_types, result.resource_mask = gather_descriptor_resources(..shaders)
+    resource_types, resource_mask := gather_descriptor_resources(..shaders)
+    
+    result.bind_point = .GRAPHICS
     
     mappings := [32] vk.DescriptorSetAndBindingMappingEXT {}
     heap_mapping: vk.ShaderDescriptorSetAndBindingMappingInfoEXT
-    heap_mapping = generate_heap_mappings(result.resource_mask, result.resource_types, sampler_hack_names, size_of(vk.DeviceAddress), descriptor_size, sampler_size, &mappings)
+    heap_mapping = generate_heap_mappings(resource_mask, resource_types, sampler_hack_names, size_of(vk.DeviceAddress), descriptor_size, sampler_size, &mappings)
     
     shader_stages: [dynamic; 8] vk.PipelineShaderStageCreateInfo
     module_infos:  [dynamic; 8] vk.ShaderModuleCreateInfo
@@ -1124,7 +1174,6 @@ gpu_destroy_semaphore :: proc (gpu: ^Gpu, semaphore: vk.Semaphore) {
 
 
 
-
 ////////////////////////////////////////////////
 // Commands
 
@@ -1253,24 +1302,6 @@ gpu_set_scissor :: proc (cmd: vk.CommandBuffer, offset: iv2 = 0, size: uv2) {
 // void gpuSetDepthStencilState(GpuCommandBuffer cb, GpuDepthStencilState state);
 // void gpuSetBlendState(GpuCommandBuffer cb, GpuBlendState state); 
 
-Render_Target :: struct {
-    texture: Image,
-    view:    vk.ImageView,
-    
-    load_op:  vk.AttachmentLoadOp,
-    store_op: vk.AttachmentStoreOp,
-    
-    clear_depth:   f32,
-    clear_stencil: u32,
-    clear_color:   v4,
-}
-
-Render_Pass_Desc :: struct {
-    depth_target:   Render_Target,
-    stencil_target: Render_Target,
-    color_targets:  [] Render_Target,
-}
-
 gpu_begin_render_pass :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, desc: Render_Pass_Desc) {
     // @api this should maybe be a parameter
     render_size := gpu.swapchain_size
@@ -1336,55 +1367,11 @@ gpu_end_render_pass :: proc (cmd: vk.CommandBuffer) {
 // void gpuDrawMeshlets(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, uvec3 dim);
 // void gpuDrawMeshletsIndirect(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, void *dimGpu);
 
-push_descriptor_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, frame_descriptor: ^Frame_Descriptor, updates: [] ImageUpdateData) -> u32 {
-    resource_types, resource_mask := the_bound_pipeline.resource_types, the_bound_pipeline.resource_mask
-    
-    descriptor_count := card(resource_mask)
-    
-    assert(frame_descriptor.descriptor_offset + auto_cast descriptor_count <= frame_descriptor.descriptor_end)
+write_texture_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: Texture_Index, image: Image, image_type: vk.DescriptorType, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) {
     descriptor_size := heap.resource_size
-    
-    result := frame_descriptor.descriptor_offset
-    for index in cast(u32) 0..<32 {
-        if index in resource_mask {
-            info := &updates[index]
-            
-            descriptor: Descriptor
-            type := resource_types[index]
-            
-            #partial switch type {
-            case .SAMPLER: continue // mapped via constant offsets (statically)
-            
-            case .SAMPLED_IMAGE, .STORAGE_IMAGE:
-                image := info.image
-                
-                get_descriptor_image(gpu, image.image, image.format, info.mip_base, info.mip_count, type, &descriptor, descriptor_size)
-            
-            case .UNIFORM_BUFFER, .STORAGE_BUFFER:
-                unimplemented()
-                /* 
-                const Buffer* buffer = static_cast<const Buffer*>(info.resource);
-				getDescriptor(framedesc.device, buffer->address, buffer->size, program.resourceTypes[i], descriptor, framedesc.descriptorSize);
-                 */
-                
-            case .ACCELERATION_STRUCTURE_KHR: 
-                unimplemented()
-                /* 
-                VkAccelerationStructureDeviceAddressInfoKHR addressInfo = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR };
-				addressInfo.accelerationStructure = info.accelerationStructure;
-				VkDeviceAddress address = vkGetAccelerationStructureDeviceAddressKHR(framedesc.device, &addressInfo);
-				getDescriptor(framedesc.device, address, 0, program.resourceTypes[i], descriptor, framedesc.descriptorSize);
-                */
-            case:
-                unreachable()
-            }
-            
-            copy(heap.resources_cpu[frame_descriptor.descriptor_offset * descriptor_size:], descriptor[:descriptor_size])
-            frame_descriptor.descriptor_offset += 1
-        }
-    }
-    
-    return result
+    descriptor: Descriptor
+    get_descriptor_image(gpu, image.image, image.format, mip_base, mip_count, image_type, &descriptor, descriptor_size)
+    copy(heap.resources_cpu[cast(u32) index * descriptor_size:], descriptor[:descriptor_size])
 }
 
 // @api we may want to allow the pipeline to have a push constant per stage. For that we need the shaders to each declare the push data to be N pointers to their respective data. Then the pipeline layout and this command both need to declare the correct size of 3 pointers and their offsets in the push data.
@@ -1393,19 +1380,6 @@ gpu_push_constants :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Desc
     info := vk.PushDataInfoEXT {
         sType = .PUSH_DATA_INFO_EXT,
         data  = { address = &push_constant.p, size = size_of(push_constant.p) },
-    }
-    vk.CmdPushDataEXT(cmd, &info)
-}
-
-// @cleanup
-gpu_push_descriptors :: proc (cmd: vk.CommandBuffer, gpu: ^Gpu, heap: ^Descriptor_Heap, frame_descriptor: ^Frame_Descriptor, updates: [] ImageUpdateData) {
-    descriptor_offset := push_descriptor_heap(gpu, heap, frame_descriptor, updates)
-    
-    info := vk.PushDataInfoEXT {
-        sType = .PUSH_DATA_INFO_EXT,
-        
-        offset = size_of(vk.DeviceAddress), // size of the push_constant
-        data = { address = &descriptor_offset, size = size_of(descriptor_offset) },
     }
     vk.CmdPushDataEXT(cmd, &info)
 }
@@ -1428,33 +1402,6 @@ gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, frame_descripto
 
 ////////////////////////////////////////////////
 // Descriptor Heap
-
-DescriptorStaticLimit   :: 65536 // static resource descriptors
-DescriptorPerFrameLimit :: 1024  // submitted per frame via push
-DescriptorSamplerLimit  :: 16    // just sampler descriptors
-
-Descriptor_Heap :: struct {
-    resources_cpu: [] u8,
-    resources_gpu: GpuSlice(u8),
-    samplers_cpu: [] u8,
-    samplers_gpu: GpuSlice(u8),
-    
-    resource_size: u32,
-    sampler_size:  u32,
-    
-    resource_reserved_offset: vk.DeviceSize,
-    resource_reserved_size:   vk.DeviceSize,
-    
-    sampler_reserved_offset: vk.DeviceSize,
-    sampler_reserved_size:   vk.DeviceSize,
-}
-
-Frame_Descriptor :: struct {
-    descriptor_offset: u32,
-    descriptor_end:    u32,
-}
-
-Descriptor :: distinct [128] u8
 
 create_descriptor_heap :: proc (gpu: ^Gpu) -> Descriptor_Heap {
     resource_count      := cast(vk.DeviceSize) DescriptorStaticLimit + MaxFramesInFlight * DescriptorPerFrameLimit

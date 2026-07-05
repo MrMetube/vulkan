@@ -1,29 +1,31 @@
 #version 460
 
-#extension GL_EXT_nonuniform_qualifier: require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64: require
+#extension GL_EXT_nonuniform_qualifier: require
+#extension GL_EXT_descriptor_heap : require
 
 #include "common.glslh"
 
 layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
 
-layout(binding = 0)       uniform           texture2D Input;
-layout(binding = 1)       uniform           sampler   depth_sampler;
-layout(binding = 2, r32f) uniform writeonly image2D   Output;
 
 // @volatile
 layout(push_constant) uniform Push_Data {
-    Depth_Globals globals;
+    Depth_Globals data;
 };
+
+layout(descriptor_heap) uniform texture2D Textures[];
+layout(descriptor_heap) uniform sampler   Samplers[];
+layout(descriptor_heap, r32f) uniform writeonly image2D Images[];
 
 
 void main() {
     uvec2 pixel = gl_GlobalInvocationID.xy;
     
-    vec2 uv = (vec2(pixel)+0.5) / globals.size;
+    vec2 uv = (vec2(pixel)+0.5) / data.size;
     
     // depth_sampler is set up to do min reduction
-    float depth = texture(sampler2D(Input, depth_sampler), uv).x;
+    float depth = texture(sampler2D(Textures[data.input_index], Samplers[Sampler_Depth]), uv).x;
     
-    imageStore(Output, ivec2(pixel), vec4(depth));
+    imageStore(Images[data.output_index], ivec2(pixel), vec4(depth));
 }

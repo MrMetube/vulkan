@@ -16,6 +16,11 @@
 #define Flag_LevelOfDetail    (1 << 1)
 #define Flag_OcclusionCulling (1 << 2)
 
+// @volatile :SamplerHack:
+#define Sampler_Texture 0
+#define Sampler_Filter  1
+#define Sampler_Depth   2
+
 struct Task_Result {
     uint indices[TaskWidth];
     uint draw_index;

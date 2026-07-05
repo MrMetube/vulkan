@@ -1,6 +1,7 @@
 #version 460
 
 #extension GL_EXT_nonuniform_qualifier: require
+#extension GL_EXT_descriptor_heap : require
 
 #include "common.glslh"
 
@@ -9,10 +10,8 @@
 layout(location = 0) flat   in Mesh_Result_Flat   mesh_result_flat;
 layout(location = 1) smooth in Mesh_Result_Smooth mesh_result_smooth;
 
-layout(binding = 0) uniform sampler texture_sampler;
-layout(binding = 1) uniform texture2D texture_1;
-layout(binding = 2) uniform texture2D texture_2;
-layout(binding = 3) uniform texture2D texture_3;
+layout(descriptor_heap) uniform texture2D Textures[];
+layout(descriptor_heap) uniform sampler   Samplers[];
 
 layout(location = 0) out vec4 pixel_result;
 
@@ -33,15 +32,7 @@ void main() {
     uint texture_index = mesh_result_flat.texture_index;
     vec2 uv = mesh_result_smooth.uv;
     
-    // vec3 albedo = texture(sampler2D(texture_heap[nonuniformEXT(texture_index)], texture_sampler), uv).rgb;
-    vec3 albedo;
-    if (texture_index == 0) {
-        albedo = texture(sampler2D(texture_1, texture_sampler), uv).rgb;
-    } else if (texture_index == 1) {
-        albedo = texture(sampler2D(texture_2, texture_sampler), uv).rgb;
-    } else if (texture_index == 2) {
-        albedo = texture(sampler2D(texture_3, texture_sampler), uv).rgb;
-    }
+    vec3 albedo = texture(sampler2D(Textures[texture_index], Samplers[Sampler_Texture]), uv).rgb;
     
     vec3 color = diffuse * albedo + specular;
     

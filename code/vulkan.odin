@@ -4,19 +4,8 @@ package main
 import vk "../lib/vulkan"
 
 Pipeline :: struct {
-    pipeline: vk.Pipeline,
-    
-    bind_point:    vk.PipelineBindPoint,
-    
-    resource_types: [32] vk.DescriptorType,
-    resource_mask:  Shader_Resource_Mask,
-}
-
-Image :: struct {
-    image:  vk.Image,
-    format: vk.Format,
-    memory: vk.DeviceMemory,
-    size:   uv3,
+    pipeline:   vk.Pipeline,
+    bind_point: vk.PipelineBindPoint,
 }
 
 ////////////////////////////////////////////////

@@ -22,9 +22,6 @@ Validation :: false when Optimized else true
 
 ////////////////////////////////////////////////
 
-// @cleanup
-ImageUpdateData :: struct { image: Image, mip_base, mip_count: u32 }
-
 Geometry :: struct {
     // @todo(viktor): all this data is not needed on the cpu, we could just directly upload it to the gpu buffers
     vertices:     [dynamic] Vertex,
@@ -41,7 +38,24 @@ Render_Targets_And_Stuff :: struct {
     depth_view: vk.ImageView,
     
     depth_pyramid: Image,
-    depth_pyramid_mip_sizes: [dynamic; 16] uv2,
+    depth_pyramid_mips: [dynamic; 16] Depth_Mip,
+}
+
+Image :: struct {
+    image:  vk.Image,
+    format: vk.Format,
+    memory: vk.DeviceMemory,
+    size:   uv3,
+    sampled_index: Texture_Index,
+    storage_index: Texture_Index,
+}
+
+Texture_Index :: distinct u32
+
+Depth_Mip :: struct {
+    size: uv2,
+    sampled_index: Texture_Index,
+    storage_index: Texture_Index,
 }
 
 ////////////////////////////////////////////////
@@ -59,6 +73,8 @@ Cull_Globals :: struct #all_or_none {
     draw_visibility_buffer: vk.DeviceAddress "uint",
     draw_command_buffer:    vk.DeviceAddress "Draw_Command",
     draw_command_count:     vk.DeviceAddress "uint",
+    
+    depth_pyramid_index: Texture_Index,
 }
 
 // @shader
@@ -101,7 +117,8 @@ Draw_Data :: struct {
 
 // @shader @todo switching the order causes the size to not be read correctly in the shader and leads to bugs in the depth pyramid construction
 Depth_Globals :: struct {
-    texture_index: u32,
+    input_index:  Texture_Index,
+    output_index: Texture_Index,
     size: v2,
 }
 
@@ -113,7 +130,7 @@ Draw :: struct {
     
     mesh_index:    u32,
     vertex_offset: u32,
-    texture_index: u32,
+    texture_index: Texture_Index,
 }
 
 // @shader
@@ -277,7 +294,7 @@ main :: proc () {
             copy(cpu_data, loaded_texture.data)
             
             gpu_image_barriers(cmd, {},
-                create_image_barrier_from_undefined(&texture, { .ALL_TRANSFER }, { .MEMORY_READ, .MEMORY_WRITE }, .GENERAL)
+                create_image_barrier_from_undefined(&texture, { .ALL_TRANSFER }, { .MEMORY_READ, .MEMORY_WRITE }, .GENERAL),
             )
             
             gpu_copy_to_texture(cmd, texture, gpu_data)
@@ -406,8 +423,8 @@ main :: proc () {
                 
                 case sdl.K_I:     print_profile_and_stats = true
                 
-                case sdl.K_PLUS:  debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level+1, 0, cast(i32) len(stuff.depth_pyramid_mip_sizes)-1)
-                case sdl.K_MINUS: debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level-1, 0, cast(i32) len(stuff.depth_pyramid_mip_sizes)-1)
+                case sdl.K_PLUS:  debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level+1, 0, cast(i32) len(stuff.depth_pyramid_mips)-1)
+                case sdl.K_MINUS: debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level-1, 0, cast(i32) len(stuff.depth_pyramid_mips)-1)
                 
                 case sdl.K_ESCAPE: quit = true
                 }
@@ -471,10 +488,6 @@ main :: proc () {
         bump := &frame_bump_allocators[frame_index]
         bump_free_all(bump)
         
-        frame_descriptor: Frame_Descriptor
-        frame_descriptor.descriptor_offset = DescriptorStaticLimit              + cast(u32) frame_index * DescriptorPerFrameLimit
-        frame_descriptor.descriptor_end    = frame_descriptor.descriptor_offset +                     1 * DescriptorPerFrameLimit
-        
         ////////////////////////////////////////////////
         
         watchers_check_for_modification(watchers)
@@ -522,6 +535,51 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
+        frame_descriptor: Frame_Descriptor
+        frame_descriptor.descriptor_offset = DescriptorStaticLimit              + auto_cast frame_index * DescriptorPerFrameLimit
+        frame_descriptor.descriptor_end    = frame_descriptor.descriptor_offset +                     1 * DescriptorPerFrameLimit
+        
+        {
+            frame_descriptor.descriptor_offset = 0
+            {
+                // @todo add a null texture, which is a bright debug color so that uninitialized indices(0) are easy to find
+                write_texture_to_heap(&gpu, &descriptor_heap, frame_descriptor.descriptor_offset, textures[0], .SAMPLED_IMAGE)
+                textures[0].sampled_index = frame_descriptor.descriptor_offset
+                frame_descriptor.descriptor_offset += 1
+                
+                write_texture_to_heap(&gpu, &descriptor_heap, frame_descriptor.descriptor_offset, textures[1], .SAMPLED_IMAGE)
+                textures[1].sampled_index = frame_descriptor.descriptor_offset
+                frame_descriptor.descriptor_offset += 1
+                
+                write_texture_to_heap(&gpu, &descriptor_heap, frame_descriptor.descriptor_offset, textures[2], .SAMPLED_IMAGE)
+                textures[2].sampled_index = frame_descriptor.descriptor_offset
+                frame_descriptor.descriptor_offset += 1
+                
+                write_texture_to_heap(&gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_buffer, .SAMPLED_IMAGE)
+                stuff.depth_buffer.sampled_index = frame_descriptor.descriptor_offset
+                frame_descriptor.descriptor_offset += 1
+                
+                write_texture_to_heap(&gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_pyramid, .SAMPLED_IMAGE)
+                stuff.depth_pyramid.sampled_index = frame_descriptor.descriptor_offset
+                frame_descriptor.descriptor_offset += 1
+                
+                write_texture_to_heap(&gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_pyramid, .STORAGE_IMAGE)
+                stuff.depth_pyramid.storage_index = frame_descriptor.descriptor_offset
+                frame_descriptor.descriptor_offset += 1
+                
+                
+                for &mip, mip_level in stuff.depth_pyramid_mips {
+                    write_texture_to_heap(&gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_pyramid, .SAMPLED_IMAGE, cast(u32) mip_level, 1)
+                    mip.sampled_index = frame_descriptor.descriptor_offset
+                    frame_descriptor.descriptor_offset += 1
+                    
+                    write_texture_to_heap(&gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_pyramid, .STORAGE_IMAGE, cast(u32) mip_level, 1)
+                    mip.storage_index = frame_descriptor.descriptor_offset
+                    frame_descriptor.descriptor_offset += 1
+                }
+            }
+        }
+        
         entropy := seed_random_series(545114)
         when true {
             draws := db_view[:50_000]
@@ -534,7 +592,7 @@ main :: proc () {
                 rotation        := la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
                 draw.orientation = rotation * global_rotation
                 
-                draw.texture_index = random_between_u32(&entropy, 0, texture_count-1)
+                draw.texture_index = textures[random_between_u32(&entropy, 0, texture_count-1)].sampled_index
                 
                 mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
                 
@@ -551,7 +609,7 @@ main :: proc () {
                 draw.scale       = 1 / cast(f32) (draw_index+1)
                 draw.orientation = global_rotation
                 
-                draw.texture_index = auto_cast (draw_index+1) % texture_count
+                draw.texture_index = textures[auto_cast (draw_index+1) % texture_count].sampled_index
                 
                 mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
                 
@@ -646,6 +704,8 @@ main :: proc () {
                 draw_command_buffer    = draw_command_gpu.p,
                 draw_command_count     = draw_command_count_gpu.p,
                 
+                depth_pyramid_index = stuff.depth_pyramid.sampled_index,
+                
                 data = cull_data,
             }
             
@@ -705,14 +765,6 @@ main :: proc () {
                     gpu_profile_zone_begin("meshlets")
                     
                     gpu_set_pipeline(cmd, meshlet_pipeline)
-                        updates := [] ImageUpdateData {
-                            {}, // texture_sampler
-                            { textures[0], 0, vk.REMAINING_MIP_LEVELS },
-                            { textures[1], 0, vk.REMAINING_MIP_LEVELS },
-                            { textures[2], 0, vk.REMAINING_MIP_LEVELS },
-                        }
-                        
-                        gpu_push_descriptors(cmd, &gpu, &descriptor_heap, &frame_descriptor, updates)
                         gpu_draw_meshlets_indirect_count(cmd, &frame_descriptor,
                             draw_command_gpu, draw_command_count_gpu, 
                             auto_cast len(draws), offset_of(Draw_Command, command),
@@ -741,22 +793,25 @@ main :: proc () {
             gpu_barrier(cmd, { .LATE_FRAGMENT_TESTS }, { .COMPUTE_SHADER })
             
             gpu_set_pipeline(cmd, depth_pipeline)
-                for mip_size, mip_level in stuff.depth_pyramid_mip_sizes {
-                    updates := [] ImageUpdateData {
-                        {
-                            mip_level == 0 ? stuff.depth_buffer : stuff.depth_pyramid,
-                            mip_level == 0 ? 0 : cast(u32) mip_level-1, 
-                            1,
-                        },
-                        {}, // depth_sampler
-                        { stuff.depth_pyramid, cast(u32) mip_level, 1 },
-                    }
-                    gpu_push_descriptors(cmd, &gpu, &descriptor_heap, &frame_descriptor, updates[:])
-                    
+                for mip, mip_level in stuff.depth_pyramid_mips {
                     depth_globals_cpu, depth_globals_gpu := bump_allocate_type(bump, Depth_Globals)
-                    depth_globals_cpu^ = Depth_Globals { size = cast(v2) mip_size }
+                    depth_globals_cpu^ = Depth_Globals { 
+                        size = cast(v2) mip.size,
+                    }
+                    if mip_level == 0 {
+                        depth_globals_cpu.input_index = stuff.depth_buffer.sampled_index
+                    } else if mip_level == 1 {
+                        depth_globals_cpu.input_index = stuff.depth_pyramid.sampled_index
+                    } else {
+                        depth_globals_cpu.input_index = stuff.depth_pyramid_mips[mip_level-1].sampled_index
+                    }
+                    if mip_level == 0 {
+                        depth_globals_cpu.output_index = stuff.depth_pyramid.storage_index
+                    } else {
+                        depth_globals_cpu.output_index = mip.storage_index
+                    }
                     
-                    gpu_dispatch(cmd, &frame_descriptor, depth_globals_gpu, get_group_count(depth_reduce_shader, **mip_size))
+                    gpu_dispatch(cmd, &frame_descriptor, depth_globals_gpu, get_group_count(depth_reduce_shader, **mip.size))
                     
                     gpu_barrier(cmd, { .COMPUTE_SHADER }, { .COMPUTE_SHADER })
                 }
@@ -797,6 +852,8 @@ main :: proc () {
                 draw_command_buffer    = draw_command_gpu.p,
                 draw_command_count     = draw_command_count_gpu.p,
                 
+                depth_pyramid_index = stuff.depth_pyramid.sampled_index,
+                
                 data = cull_data,
             }
             
@@ -827,13 +884,6 @@ main :: proc () {
                 ////////////////////////////////////////////////
                 
                 gpu_set_pipeline(cmd, late_cull_pipeline)
-                    
-                    updates := [?] ImageUpdateData {
-                        { stuff.depth_pyramid, 0, vk.REMAINING_MIP_LEVELS },
-                        { }, // depth_sampler
-                    }
-                    push_descriptor_heap(&gpu, &descriptor_heap, &frame_descriptor, updates[:])
-                    
                     gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)))
                     
             gpu_profile_zone_end()
@@ -847,7 +897,7 @@ main :: proc () {
             
                 gpu_barrier(cmd, 
                     { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS,  .COMPUTE_SHADER }, 
-                    { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }
+                    { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS },
                 )
                 
                 ////////////////////////////////////////////////
@@ -855,15 +905,6 @@ main :: proc () {
                 begin_meshlet_rendering(&gpu, cmd, &stuff, {}, early = false)
                 
                     gpu_set_pipeline(cmd, meshlet_pipeline)
-                        updates2 := [] ImageUpdateData {
-                            {}, // texture_sampler
-                            { textures[0], 0, vk.REMAINING_MIP_LEVELS },
-                            { textures[1], 0, vk.REMAINING_MIP_LEVELS },
-                            { textures[2], 0, vk.REMAINING_MIP_LEVELS },
-                        }
-                        
-                        gpu_push_descriptors(cmd, &gpu, &descriptor_heap, &frame_descriptor, updates2)
-                        
                         gpu_draw_meshlets_indirect_count(cmd, &frame_descriptor,
                             draw_command_gpu, draw_command_count_gpu, 
                             auto_cast len(draws), offset_of(Draw_Command, command),
@@ -896,7 +937,7 @@ main :: proc () {
                     extent         = { **swapchain_image.size },
                 })
             } else {
-                mip_size  := cast(iv2) stuff.depth_pyramid_mip_sizes[debug.display_pyramid_mip_level]
+                mip_size  := cast(iv2) stuff.depth_pyramid_mips[debug.display_pyramid_mip_level].size
                 vk.CmdBlitImage(cmd, source_image.image, .GENERAL, swapchain_image.image, .GENERAL, 1, &vk.ImageBlit {
                     srcSubresource = { aspectMask = { .COLOR }, layerCount = 1, mipLevel = cast(u32) debug.display_pyramid_mip_level },
                     dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
@@ -1053,7 +1094,7 @@ begin_meshlet_rendering :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stuff: ^Rende
     desc := Render_Pass_Desc {
         // :ReversedZ: 0 is the maximal value
         depth_target  = { 
-            texture = stuff.depth_buffer, view = stuff.depth_view, load_op = early ? .CLEAR : .LOAD, store_op = early ? .STORE : .DONT_CARE, clear_depth = 0 
+            texture = stuff.depth_buffer, view = stuff.depth_view, load_op = early ? .CLEAR : .LOAD, store_op = early ? .STORE : .DONT_CARE, clear_depth = 0, 
         }, 
         color_targets = {
             { texture = stuff.color_buffer, view = stuff.color_view, load_op = early ? .CLEAR : .LOAD, store_op = .STORE, clear_color = clear_color },
@@ -1082,7 +1123,7 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Render_Targets_And_Stuff) {
         mip_size.x >>= i
         mip_size.y >>= i
         mip_size = vec_max(mip_size, 1)
-        append(&stuff.depth_pyramid_mip_sizes, mip_size)
+        append(&stuff.depth_pyramid_mips, Depth_Mip { mip_size, 0, 0})
     }
     
     stuff.depth_view  = gpu_create_image_view(gpu, stuff.depth_buffer, 0, 1)
@@ -1097,8 +1138,7 @@ destroy_stuff :: proc (gpu: ^Gpu, stuff: ^Render_Targets_And_Stuff) {
     gpu_destroy_texture_view(gpu, stuff.depth_view)
     gpu_destroy_texture_view(gpu, stuff.color_view)
     
-    clear(&stuff.depth_pyramid_mip_sizes)
-    
+    clear(&stuff.depth_pyramid_mips)
 }
 
 ////////////////////////////////////////////////
