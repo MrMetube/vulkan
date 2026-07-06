@@ -243,21 +243,14 @@ main :: proc () {
     
     shader_allocator := context.allocator
     
-    shader_files := make([dynamic] string, context.temp_allocator)
-    get_all_files_with_extension(&shader_files, "shaders", shader_allocator, ".frag", ".mesh", ".task")
-    
     watcher_allocator := context.allocator
     watchers := make([dynamic] Watcher, watcher_allocator)
     
     
-    meshlet_shaders: [dynamic] Shader
-    for file in shader_files {
-        // @speed we duplicate this watcher per shader, so that each shader can keep track of the header being changed and be recompiled independently from other shaders, without effecting their modification test.
-        common_watcher_id := watchers_make(&watchers, "shaders/common.glsl")
-        shader := init_shader_and_watchers(&watchers, common_watcher_id, file, shader_allocator)
-        append(&meshlet_shaders, shader)
-    }
-    
+    // @speed we duplicate this watcher per shader, so that each shader can keep track of the header being changed and be recompiled independently from other shaders, without effecting their modification test.
+    meshlet_task_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.task",   shader_allocator)
+    meshlet_mesh_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.mesh",   shader_allocator)
+    meshlet_frag_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.frag",   shader_allocator)
     early_cull_shader   := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/cull_early.comp",   shader_allocator)
     late_cull_shader    := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/cull_late.comp",    shader_allocator)
     depth_reduce_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/depth_reduce.comp", shader_allocator)
@@ -510,7 +503,7 @@ main :: proc () {
             fmt.printfln("Recreated depth_pipeline.")
         }
         
-        if reload_shaders_if_needed(watchers, shader_allocator, meshlet_shaders[:]) || !pipeline_is_valid(meshlet_pipeline) {
+        if reload_shaders_if_needed(watchers, shader_allocator, &meshlet_task_shader, &meshlet_mesh_shader, &meshlet_frag_shader) || !pipeline_is_valid(meshlet_pipeline) {
             raster_description := DefaultRasterDesc
             raster_description.depth_format = stuff.depth_buffer.format
             raster_description.color_targets = {
@@ -520,13 +513,7 @@ main :: proc () {
             // raster_description.blendstate.dst_color_factor = .ONE
             // :Stencil: 
             
-            // @cleanup
-            task, mesh, frag: Shader
-            for it in meshlet_shaders do #partial switch it.stage {
-            case .TASK_EXT: task = it
-            case .MESH_EXT: mesh = it
-            case .FRAGMENT: frag = it
-            }
+            task, mesh, frag := meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader
             
             destroy_pipeline(&gpu, meshlet_pipeline)
             meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, task, mesh, frag, raster_description, descriptor_heap.resource_size, descriptor_heap.sampler_size, sampler_hack_names = {"texture_sampler", "", "", ""})

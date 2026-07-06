@@ -12,10 +12,10 @@ import vk "../lib/vulkan"
 Shader :: struct {
     input:  string, 
     
-    stage: vk.ShaderStageFlag,
     bytes: [] u8,
     
     parsed: struct {
+        stage: vk.ShaderStageFlag,
         resource_mask:      Shader_Resource_Mask,
         resource_types:     [32] vk.DescriptorType,
         use_push_constants: bool,
@@ -197,29 +197,21 @@ init_shader_and_watchers :: proc (watchers: ^[dynamic] Watcher, common_watcher: 
     return result
 }
 
-reload_shaders_if_needed :: proc { reload_shaders_if_needed_one, reload_shaders_if_needed_slice }
-reload_shaders_if_needed_one :: proc (watchers: [dynamic] Watcher, shader_allocator: Allocator, shader: ^Shader) -> bool {
+reload_shaders_if_needed :: proc (watchers: [dynamic] Watcher, shader_allocator: Allocator, shaders: ..^Shader) -> bool {
     was_changed: bool
     
-    if watcher_modified(watchers, shader.source_watcher, shader.common_watcher) {
-        watcher_set_up_to_date(watchers, shader.source_watcher, shader.common_watcher)
-        result, ok := compile_and_load_shader(shader.input, shader_allocator, old = shader)
-        if ok {
-            shader^ = result
-            was_changed = true
+    for shader in shaders {
+        if watcher_modified(watchers, shader.source_watcher, shader.common_watcher) {
+            watcher_set_up_to_date(watchers, shader.source_watcher, shader.common_watcher)
+            result, ok := compile_and_load_shader(shader.input, shader_allocator, old = shader)
+            if ok {
+                shader^ = result
+                was_changed = true
+            }
         }
     }
     
     return was_changed
-}
-reload_shaders_if_needed_slice :: proc (watchers: [dynamic] Watcher, shader_allocator: Allocator, shaders: [] Shader) -> bool {
-    any_shader_was_changed: bool
-    
-    for &shader in shaders {
-        any_shader_was_changed ||= reload_shaders_if_needed(watchers, shader_allocator, &shader)
-    }
-    
-    return any_shader_was_changed
 }
 
 compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator, output_directory := "build", output_extension := ".spv", old: ^Shader = nil) -> (Shader, bool) {
@@ -296,11 +288,11 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
                 execution_model := cast(SpvExecutionModel) code[1]
                 
                 #partial switch execution_model {
-                case .Vertex:     result.stage = .VERTEX
-                case .Fragment:   result.stage = .FRAGMENT
-                case .MeshEXT:    result.stage = .MESH_EXT
-                case .TaskEXT:    result.stage = .TASK_EXT
-                case .GLCompute:  result.stage = .COMPUTE
+                case .Vertex:     result.parsed.stage = .VERTEX
+                case .Fragment:   result.parsed.stage = .FRAGMENT
+                case .MeshEXT:    result.parsed.stage = .MESH_EXT
+                case .TaskEXT:    result.parsed.stage = .TASK_EXT
+                case .GLCompute:  result.parsed.stage = .COMPUTE
                 }
             
             case .ExecutionMode:
@@ -406,7 +398,7 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
             }
         }
         
-        if result.stage == .COMPUTE {
+        if result.parsed.stage == .COMPUTE {
             for it in 0..<3 {
                 if local_size[it] >= 0 {
                     assert(ids[local_size[it]].opcode == .Constant)
@@ -452,6 +444,90 @@ get_group_count :: proc (shader: Shader, count_x: u32 = 1, count_y: u32 = 1, cou
     total_count := uv3{ count_x, count_y, count_z }
     result := (total_count + shader.parsed.local_size-1) / shader.parsed.local_size
     return result
+}
+
+////////////////////////////////////////////////
+// @copypasta from build utility procs
+
+Procs :: [dynamic] os.Process
+Cmd   :: [dynamic] string
+
+Command_Console :: union {
+    ^string,
+    ^os.File,
+}
+
+run_command :: proc (cmd: ^Cmd, or_exit := true, keep := false, stdout: Command_Console = nil, stderr: Command_Console = nil, async: ^Procs = nil) -> (success: bool) {
+    fmt.printf("CMD: %v\n", strings.join(cmd[:], " ", context.temp_allocator))
+    
+    process_description := os.Process_Desc { command = cmd[:] }
+    process: os.Process
+    state:   os.Process_State
+	output:  [] byte
+	error:   [] byte
+    err2:    os.Error
+    
+    if async == nil {
+        state, output, error, err2 = os.process_exec(process_description, context.allocator)
+    } else {
+        if err, ok := stderr.(^os.File); ok do process_description.stderr = err
+        if out, ok := stdout.(^os.File); ok do process_description.stdout = out
+        process, err2 = os.process_start(process_description)
+        append(async, process)
+    }
+    
+    if err2 != nil {
+        fmt.printf("ERROR: Failed to run command: %v\n", err2)
+        return false
+    }
+    
+    if async == nil {
+        if output != nil {
+            switch &out in stdout {
+            case nil: 
+                fmt.println(cast(string) output)
+            case ^string: 
+                out^ = cast(string) output
+            case ^os.File: // nothing, already passed on exec
+            }
+        }
+        
+        if error != nil {
+            switch &out in stderr {
+            case nil: 
+                fmt.eprintln(cast(string) error)
+            case ^string: 
+                out^ = cast(string) error
+            case ^os.File: // nothing, already passed on exec
+            }
+        }
+        
+        if or_exit && (!state.success || state.exit_code != 0) do os.exit(state.exit_code)
+        
+        success = state.success
+    } else {
+        success = true
+    }
+    
+    if !keep do clear(cmd)
+    
+    return success
+}
+
+procs_flush :: proc (procs: ^Procs) {
+    for &p in procs {
+        _, _ = os.process_wait(p)
+    }
+    
+    clear(procs)
+}
+
+procs_close :: proc (procs: ^Procs) {
+    for &p in procs {
+        _ = os.process_terminate(p)
+    }
+    
+    clear(procs)
 }
 
 ////////////////////////////////////////////////

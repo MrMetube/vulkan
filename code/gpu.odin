@@ -1,7 +1,7 @@
 #+vet explicit-allocators !unused-procedures
 package main
 
-    //////////////////////////////////////////////////////////////////////
+   //////////////////////////////////////////////////////////////////////
    //                                                                  //
    //                                                                  //
    //                       No graphics api                            //
@@ -10,12 +10,13 @@ package main
    //                                                                  // 
    //                                                                  //
    // based on: https://www.sebastianaaltonen.com/blog/no-graphics-api //
-  //////////////////////////////////////////////////////////////////////
+   //////////////////////////////////////////////////////////////////////
 
 import "base:intrinsics"
 import "base:runtime"
 
 import "core:fmt"
+import "core:os"
 
 import vk  "../lib/vulkan"
 import sdl "vendor:sdl3"
@@ -198,10 +199,13 @@ DescriptorPerFrameLimit :: 1024  // submitted per frame via push
 DescriptorSamplerLimit  :: 16    // just sampler descriptors
 
 Descriptor_Heap :: struct {
+    // Both resources and samplers have a stride of resource_size, which is the larger or buffer and image descriptor size for the current gpu.
+    // Therefore indexing needs to be done manually with [index * resource_size], whilst the written to/read from bytes of descriptors is either
+    // the resource size or the sampler size, based on the resource itself.
     resources_cpu: [] u8,
+    samplers_cpu:  [] u8,
     resources_gpu: GpuSlice(u8),
-    samplers_cpu: [] u8,
-    samplers_gpu: GpuSlice(u8),
+    samplers_gpu:  GpuSlice(u8),
     
     resource_size: u32,
     sampler_size:  u32,
@@ -217,8 +221,6 @@ Frame_Descriptor :: struct {
     descriptor_offset: Texture_Index,
     descriptor_end:    Texture_Index,
 }
-
-Descriptor :: distinct [128] u8
 
 ////////////////////////////////////////////////
 
@@ -370,7 +372,9 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
         ////////////////////////////////////////////////
         
         if !sdl.Vulkan_CreateSurface(window, auto_cast result.instance, nil, auto_cast &result.surface) {
-            print_sdl_error_and_exit()
+            loc := #location()
+            fmt.printf("%v:%v:%v: SDL call returned %v", loc.file_path, loc.line, loc.column, sdl.GetError())
+            os.exit(1)
         }
     }
     
@@ -924,7 +928,7 @@ gpu_destroy_texture_view :: proc (gpu: ^Gpu, view: vk.ImageView) {
 // @cleanup
 gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, descriptor_size, sampler_size: u32, set_layout: ..vk.DescriptorSetLayout, sampler_hack_names: [] string = {}) -> Pipeline {
     // @todo(viktor): allow for optional shader constant, i.e. vulkan specialization constants
-    assert(compute.stage == .COMPUTE)
+    assert(compute.parsed.stage == .COMPUTE)
     compute := compute
     
     result: Pipeline
@@ -947,7 +951,7 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, descriptor_size
         
         stage  = { 
             sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
-            stage = { compute.stage }, 
+            stage = { compute.parsed.stage }, 
             pName = "main", 
             pNext = &vk.ShaderModuleCreateInfo {
                 sType    = .SHADER_MODULE_CREATE_INFO,
@@ -965,8 +969,8 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, descriptor_size
 }
 
 gpu_create_graphics_pipeline :: proc (gpu: ^Gpu, vertex, fragment: Shader, info: Raster_Desc, descriptor_size, sampler_size: u32) -> Pipeline {
-    assert(vertex.stage   == .VERTEX)
-    assert(fragment.stage == .FRAGMENT)
+    assert(vertex.parsed.stage   == .VERTEX)
+    assert(fragment.parsed.stage == .FRAGMENT)
     
     result: Pipeline
     gpu_create_graphics_pipeline_common(gpu, &result, info, descriptor_size, sampler_size, vertex, fragment)
@@ -977,9 +981,9 @@ gpu_create_graphics_pipeline :: proc (gpu: ^Gpu, vertex, fragment: Shader, info:
 gpu_create_graphics_meshlet_pipeline :: proc { gpu_create_graphics_meshlet_pipeline_tmp, gpu_create_graphics_meshlet_pipeline_mp }
 
 gpu_create_graphics_meshlet_pipeline_tmp :: proc (gpu: ^Gpu, task, mesh, frag: Shader, info: Raster_Desc, descriptor_size, sampler_size: u32, sampler_hack_names := [] string {}) -> Pipeline {
-    assert(task.stage == .TASK_EXT)
-    assert(mesh.stage == .MESH_EXT)
-    assert(frag.stage == .FRAGMENT)
+    assert(task.parsed.stage == .TASK_EXT)
+    assert(mesh.parsed.stage == .MESH_EXT)
+    assert(frag.parsed.stage == .FRAGMENT)
     
     result: Pipeline
     gpu_create_graphics_pipeline_common(gpu, &result, info, descriptor_size, sampler_size, task, mesh, frag, sampler_hack_names = sampler_hack_names)
@@ -988,8 +992,8 @@ gpu_create_graphics_meshlet_pipeline_tmp :: proc (gpu: ^Gpu, task, mesh, frag: S
 }
 
 gpu_create_graphics_meshlet_pipeline_mp :: proc (gpu: ^Gpu, mesh, frag: Shader, info: Raster_Desc, descriptor_size, sampler_size: u32) -> Pipeline {
-    assert(mesh.stage == .MESH_EXT)
-    assert(frag.stage == .FRAGMENT)
+    assert(mesh.parsed.stage == .MESH_EXT)
+    assert(frag.parsed.stage == .FRAGMENT)
     
     result: Pipeline
     gpu_create_graphics_pipeline_common(gpu, &result, info, descriptor_size, sampler_size, mesh, frag)
@@ -1019,7 +1023,7 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
         
         append(&shader_stages, vk.PipelineShaderStageCreateInfo{ 
             sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
-            stage = { shader.stage }, 
+            stage = { shader.parsed.stage }, 
             pName = "main", 
             pNext = last(&module_infos),
         })
@@ -1589,13 +1593,6 @@ gpu_end_render_pass :: proc (cmd: vk.CommandBuffer) {
 // void gpuDrawMeshlets(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, uvec3 dim);
 // void gpuDrawMeshletsIndirect(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, void *dimGpu);
 
-write_texture_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: Texture_Index, image: Image, image_type: vk.DescriptorType, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) {
-    descriptor_size := heap.resource_size
-    descriptor: Descriptor
-    get_descriptor_image(gpu, image.image, image.format, mip_base, mip_count, image_type, &descriptor, descriptor_size)
-    copy(heap.resources_cpu[cast(u32) index * descriptor_size:], descriptor[:descriptor_size])
-}
-
 // @api we may want to allow the pipeline to have a push constant per stage. For that we need the shaders to each declare the push data to be N pointers to their respective data. Then the pipeline layout and this command both need to declare the correct size of 3 pointers and their offsets in the push data.
 gpu_push_constants :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, push_constant: GpuAddress($T), heap := false) {
     push_constant := push_constant
@@ -1653,10 +1650,10 @@ create_descriptor_heap :: proc (gpu: ^Gpu) -> Descriptor_Heap {
     result.sampler_size  = cast(u32) sampler_size
     
     // :SamplerHack: fill samplers[0] with texture sampler and samplers[2] with depth sampler
-    sampler_descriptor_size := resource_size // :SamplerHack:
-    get_descriptor_sampler(gpu, .LINEAR, .LINEAR,  .REPEAT,        .WEIGHTED_AVERAGE, auto_cast &result.samplers_cpu[0 * sampler_descriptor_size], cast(u32) sampler_size)
-    get_descriptor_sampler(gpu, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .WEIGHTED_AVERAGE, auto_cast &result.samplers_cpu[1 * sampler_descriptor_size], cast(u32) sampler_size)
-    get_descriptor_sampler(gpu, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .MIN,              auto_cast &result.samplers_cpu[2 * sampler_descriptor_size], cast(u32) sampler_size)
+    descriptor_size := resource_size // :SamplerHack:
+    write_descriptor(gpu, .LINEAR, .LINEAR,  .REPEAT,        .WEIGHTED_AVERAGE, result.samplers_cpu[0 * descriptor_size:][:sampler_size])
+    write_descriptor(gpu, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .WEIGHTED_AVERAGE, result.samplers_cpu[1 * descriptor_size:][:sampler_size])
+    write_descriptor(gpu, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .MIN,              result.samplers_cpu[2 * descriptor_size:][:sampler_size])
     
     return result
 }
@@ -1692,8 +1689,14 @@ gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: ^Descriptor_Heap) {
     vk.CmdBindResourceHeapEXT(cmd, &resource_info)
 }
 
-get_descriptor :: proc { get_descriptor_image, get_descriptor_buffer, get_descriptor_sampler }
-get_descriptor_image :: proc (gpu: ^Gpu, image: vk.Image, format: vk.Format, mip_base: u32, mip_count: u32, type: vk.DescriptorType, descriptor: ^Descriptor, descriptor_size: u32) {
+write_texture_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: Texture_Index, image: Image, image_type: vk.DescriptorType, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) {
+    descriptor_size := heap.resource_size
+    descriptor_slot := heap.resources_cpu[cast(u32) index * descriptor_size:][:descriptor_size]
+    write_descriptor(gpu, image.image, image.format, mip_base, mip_count, image_type, descriptor_slot)
+}
+
+write_descriptor :: proc { write_descriptor_image, write_descriptor_buffer, write_descriptor_sampler }
+write_descriptor_image :: proc (gpu: ^Gpu, image: vk.Image, format: vk.Format, mip_base: u32, mip_count: u32, type: vk.DescriptorType, descriptor_heap_slot: [] u8) {
     aspect_mask := get_image_aspect_mask(format)
     
     image_info := vk.ImageDescriptorInfoEXT {
@@ -1714,11 +1717,11 @@ get_descriptor_image :: proc (gpu: ^Gpu, image: vk.Image, format: vk.Format, mip
         data = { pImage = &image_info },
     }
     
-    range := vk.HostAddressRangeEXT { address = raw_data(descriptor), size = cast(int) descriptor_size }
+    range := vk.HostAddressRangeEXT { address = raw_data(descriptor_heap_slot), size = len(descriptor_heap_slot) }
     check(vk.WriteResourceDescriptorsEXT(gpu.device, 1, &info, &range))
 }
 
-get_descriptor_buffer :: proc (gpu: ^Gpu, address: vk.DeviceAddress, size: vk.DeviceSize, type: vk.DescriptorType, descriptor: ^Descriptor, descriptor_size: u32) {
+write_descriptor_buffer :: proc (gpu: ^Gpu, address: vk.DeviceAddress, size: vk.DeviceSize, type: vk.DescriptorType, descriptor_heap_slot: [] u8) {
     buffer_info := vk.DeviceAddressRangeEXT { address = address, size = size }
     
     info := vk.ResourceDescriptorInfoEXT {
@@ -1727,11 +1730,11 @@ get_descriptor_buffer :: proc (gpu: ^Gpu, address: vk.DeviceAddress, size: vk.De
         data = { pAddressRange =  &buffer_info },
     }
     
-    range := vk.HostAddressRangeEXT { address = raw_data(descriptor), size = cast(int) descriptor_size }
+    range := vk.HostAddressRangeEXT { address = raw_data(descriptor_heap_slot), size = len(descriptor_heap_slot) }
     check(vk.WriteResourceDescriptorsEXT(gpu.device, 1, &info, &range))
 }
 
-get_descriptor_sampler :: proc (gpu: ^Gpu, filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, address_mode: vk.SamplerAddressMode, reduction_mode: vk.SamplerReductionMode, descriptor: ^Descriptor, descriptor_size: u32, anisotropy: b32 = false) {
+write_descriptor_sampler :: proc (gpu: ^Gpu, filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, address_mode: vk.SamplerAddressMode, reduction_mode: vk.SamplerReductionMode, descriptor_heap_slot: [] u8, anisotropy: b32 = false) {
     info := vk.SamplerCreateInfo {
         sType = .SAMPLER_CREATE_INFO,
         
@@ -1759,6 +1762,6 @@ get_descriptor_sampler :: proc (gpu: ^Gpu, filter: vk.Filter, mipmap_mode: vk.Sa
         info.pNext = &reduction_info
     }
     
-    range := vk.HostAddressRangeEXT { address = raw_data(descriptor), size = cast(int) descriptor_size }
+    range := vk.HostAddressRangeEXT { address = raw_data(descriptor_heap_slot), size = len(descriptor_heap_slot) }
     check(vk.WriteSamplerDescriptorsEXT(gpu.device, 1, &info, &range))
 }

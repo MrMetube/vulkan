@@ -17,7 +17,7 @@ main :: proc () {
     code.generate_shader_api("data/shaders/api.generated.glsl")
     
     shaders: [dynamic] string
-    code.get_all_files_with_extension(&shaders, "data/shaders", context.temp_allocator, ".frag", ".mesh", ".task", ".comp")
+    get_all_files_with_extension(&shaders, "data/shaders", context.temp_allocator, ".frag", ".mesh", ".task", ".comp")
     
     any_shader_had_errors: bool
     for shader in shaders {

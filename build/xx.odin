@@ -1,7 +1,8 @@
-#+vet !unused-procedures
+#+vet explicit-allocators !unused-procedures
 package build
 
 import "base:intrinsics"
+import "base:runtime"
 
 import "core:fmt"
 import "core:os"
@@ -73,7 +74,7 @@ init_build :: proc (run_from_data := false, wait := false) {
 
 deinit_build :: proc () {
     if len(cmd) != 0 {
-        fmt.printf("INFO: cmd was not cleared: `%v`\n", strings.join(cmd[:], " "))
+        fmt.printf("INFO: cmd was not cleared: `%v`\n", strings.join(cmd[:], " ", context.temp_allocator))
     }
     
     if the_state.wait_on_procs {
@@ -243,7 +244,7 @@ is_running :: proc (exe_name: string) -> (running: bool, pid: u32) {
     
     if win.Process32FirstW(snapshot, &process_entry) {
         for {
-            test_name, err := win.utf16_to_utf8(process_entry.szExeFile[:])
+            test_name, err := win.utf16_to_utf8(process_entry.szExeFile[:], context.temp_allocator)
             assert(err == nil)
             if exe_name == test_name {
                 return true, process_entry.th32ProcessID
@@ -300,7 +301,7 @@ Command_Console :: union {
     ^os.File,
 }
 run_command :: proc (cmd: ^Cmd, or_exit := true, keep := false, stdout: Command_Console = nil, stderr: Command_Console = nil, async: ^Procs = nil) -> (success: bool) {
-    fmt.printf("CMD: %v\n", strings.join(cmd[:], " "))
+    fmt.printf("CMD: %v\n", strings.join(cmd[:], " ", context.temp_allocator))
     
     process_description := os.Process_Desc { command = cmd[:] }
     process: os.Process
@@ -388,7 +389,7 @@ remove_if_exists :: proc (path: string) {
 }
 
 delete_all_like :: proc (path, pattern: string) {
-    files := all_like(path, pattern)
+    files := all_like(path, pattern, context.temp_allocator)
     for file in files {
         os.remove(file)
     }
@@ -396,17 +397,40 @@ delete_all_like :: proc (path, pattern: string) {
 
 all_like :: proc (path, pattern: string, allocator := context.temp_allocator) -> [] string {
     dir, _ := os.read_all_directory_by_path(path, allocator)
-    reg, _ := regex.create(pattern)
+    reg, _ := regex.create(pattern, permanent_allocator = context.temp_allocator, temporary_allocator = context.temp_allocator)
     
     result := make([dynamic] string, allocator)
     for file in dir {
-        _, ok := regex.match(reg, file.name)
+        _, ok := regex.match(reg, file.name, permanent_allocator = context.temp_allocator, temporary_allocator = context.temp_allocator)
         if ok {
             append(&result, file.fullpath)
         }
     }
     
     return result[:]
+}
+
+get_all_files_with_extension :: proc (files: ^[dynamic] string, directory: string, path_allocator: runtime.Allocator, extensions: ..string) {
+    infos, err := os.read_all_directory_by_path(directory, path_allocator)
+    defer os.file_info_slice_delete(infos, path_allocator)
+    
+    assert(err == nil)
+    for info in infos {
+        matches: bool
+        check: for extension in extensions {
+            if strings.ends_with(info.fullpath, extension) {
+                matches = true
+                break check
+            }
+        }
+        
+        if matches {
+            path := strings.clone(info.fullpath, context.temp_allocator)
+            working_dir, _ := os.get_working_directory(context.temp_allocator)
+            path, _ = os.get_relative_path(working_dir, path, path_allocator)
+            append(files, path)
+        }
+    }
 }
 
 ////////////////////////////////////////////////

@@ -82,28 +82,3 @@ watcher_set_up_to_date_ids :: proc (watchers: [dynamic] Watcher, ids: ..Watcher_
         watcher.last_update_time = time.now()
     }
 }
-
-////////////////////////////////////////////////
-
-get_all_files_with_extension :: proc (files: ^[dynamic] string, directory: string, path_allocator: Allocator, extensions: ..string) {
-    infos, err := os.read_all_directory_by_path(directory, path_allocator)
-    defer os.file_info_slice_delete(infos, path_allocator)
-    
-    assert(err == nil)
-    for info in infos {
-        matches: bool
-        check: for extension in extensions {
-            if strings.ends_with(info.fullpath, extension) {
-                matches = true
-                break check
-            }
-        }
-        
-        if matches {
-            path := strings.clone(info.fullpath, context.temp_allocator)
-            working_dir, _ := os.get_working_directory(context.temp_allocator)
-            path, _ = os.get_relative_path(working_dir, path, path_allocator)
-            append(files, path)
-        }
-    }
-}
