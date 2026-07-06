@@ -1,114 +1,119 @@
 #+vet explicit-allocators
 package main
 
-MaxEventCount :: 500_000
+MaxEventCount :: #config(MaxProfileEventCount, 500_000)
 
-Event_Table :: struct {
+Profile_Event_Table :: struct {
     current_array_index: u32,
     record_increment:    u32,
     
-    state: Events_State,
-    events: [2] [MaxEventCount] Event,
+    state: Profile_Events_State,
+    events: [2] [MaxEventCount] Profile_Event,
 }
 
-Event_Table_With_Data :: struct ($Data: typeid) {
-    #subtype using 
-    base:       Event_Table,
+Profile_Event_Table_With_Data :: struct ($Data: typeid) {
+    using base: Profile_Event_Table,
     event_data: [2] [MaxEventCount] Data,
 }
 
 // @volatile is treated as a plain u32 for an atomic add later on
-Events_State :: bit_field u32 { 
+Profile_Events_State :: bit_field u32 { 
     event_index: u32 | 31,
     array_index: u32 | 1,
 }
 
-// @todo thread index? or is that user data
-Event :: struct {
-    name: string,
-    
-    timestamp:  i64,
-    user_index: u32,
-    user_kind:  u16,
-    kind:       Event_Kind,
+Profile_Event :: struct {
+    name:      string,
+    timestamp: i64,
+    kind:      Profile_Event_Kind,
 }
 
-// @todo FrameBegin
-Event_Kind :: enum u8 {
-    BeginFrame,
+Profile_Event_Kind :: enum u8 {
     BeginZone,
     EndZone,
     UserEvent,
 }
 
-Zone :: struct {
+Profile_Zone :: struct {
     name: string,
-    // tree of zones and user events contained in this zone
+    // tree of zones
     parent_zone_index:  u32,
-    next_sibling_index: u32,
     first_child_index:  u32,
     last_child_index:   u32,
+    next_sibling_index: u32,
+    // list of user events that happened inside this zone
     first_user_event:   u32,
+    
+    event_index_of_zone_begin: u32,
     
     parent_relative_timestamp: i64,
     duration:                  i64,
-    duration_of_children:      i64,
-    
-    // the additional user data attached to the BeginZone
-    user_index: u32,
-    user_kind:  u16,
+    duration_with_children:    i64,
 }
 
 Stored_User_Event :: struct {
     next_sibling: u32,
     
-    using event: Event,
+    using event: Profile_Event,
 }
 
-Open_Zone :: struct {
-    zone_index:  u32,
-    event_index: u32,
-    begin_timestamp: i64,
-}
+////////////////////////////////////////////////
 
-set_recording :: proc (table: ^Event_Table, active: bool) {
+set_recording :: proc (table: ^Profile_Event_Table, active: bool) {
     table.record_increment = active ? 1 : 0
 }
 
-swap_active_array_and_get_events :: proc (table: ^Event_Table) -> [] Event {
+record_event :: proc (table: ^Profile_Event_Table, timestamp: i64, kind: Profile_Event_Kind, name: string) {
+    if table == nil { return }
+    
+    state := transmute(Profile_Events_State) atomic_add(cast(^u32) &table.state, table.record_increment)
+    
+    table.events[state.array_index][state.event_index] = {
+        name       = name,
+        timestamp  = timestamp,
+        kind       = kind,
+    }
+}
+
+record_event_with_data :: proc (table: ^Profile_Event_Table_With_Data($Data), timestamp: i64, kind: Profile_Event_Kind, name: string, data: Data) {
+    if table == nil { return }
+    
+    state := transmute(Profile_Events_State) atomic_add(cast(^u32) &table.state, table.record_increment)
+    
+    table.events[state.array_index][state.event_index] = {
+        name       = name,
+        timestamp  = timestamp,
+        kind       = kind,
+    }
+    
+    table.event_data[state.array_index][state.event_index] = data
+}
+
+////////////////////////////////////////////////
+
+swap_active_array_and_get_events :: proc (table: ^Profile_Event_Table) -> [] Profile_Event {
     array_index := table.current_array_index == 0 ? cast(u32) 1 : 0
     state  := atomic_exchange(&table.state, { event_index = 0, array_index = array_index })
     events := table.events[state.array_index][:state.event_index]
     return events
 }
 
-record_event :: proc (table: ^Event_Table, timestamp: i64, event_kind: Event_Kind, name : string, user_kind: u16 = 0, user_index: u32 = 0) {
-    if table == nil { return }
-    state := transmute(Events_State) atomic_add(cast(^u32) &table.state, table.record_increment)
-    result := &table.events[state.array_index][state.event_index]
-    result^ = {
-        name = name,
-        
-        timestamp  = timestamp,
-        kind       = event_kind,
-        user_kind  = user_kind,
-        user_index = user_index,
-    }
+swap_active_array_and_get_events_with_data :: proc (table: ^Profile_Event_Table_With_Data($Data)) -> ([] Profile_Event, [] Data) {
+    array_index := table.current_array_index == 0 ? cast(u32) 1 : 0
+    state  := atomic_exchange(&table.state, { event_index = 0, array_index = array_index })
+    events := table.events[state.array_index][:state.event_index]
+    data   := table.event_data[state.array_index][:state.event_index]
+    return events, data
 }
 
-// @todo make a off toggle for the whole profiler
-
-profile_zone_begin :: proc (table: ^Event_Table, timestamp: i64, name: string, user_kind: u16 = 0, user_index: u32 = 0) {
-    record_event(table, timestamp, .BeginZone, name, user_kind, user_index)
-}
-
-profile_zone_end :: proc (table: ^Event_Table, timestamp: i64) {
-    record_event(table, timestamp, .EndZone, "")
-}
-
-collate_events :: proc (events: [] Event, zones: ^[dynamic] Zone, user_events: ^[dynamic] Stored_User_Event) {
+collate_events :: proc (events: [] Profile_Event, zones: ^[dynamic] Profile_Zone, user_events: ^[dynamic] Stored_User_Event) {
     clear(zones)
     clear(user_events)
+    
+    Open_Zone :: struct {
+        zone_index:  u32,
+        begin_timestamp: i64,
+    }
     
     open_zones := make([dynamic] Open_Zone, context.temp_allocator)
     
@@ -116,40 +121,33 @@ collate_events :: proc (events: [] Event, zones: ^[dynamic] Zone, user_events: ^
         begin_timestamp: i64
         end_timestamp:   i64
         
-        zone:  ^Zone
+        zone:  ^Profile_Zone
         parent_index: Maybe(u32)
         
         create_zone: bool
         timestamp_basis: i64
         
         switch event.kind {
-        case .BeginFrame:
-            append(&open_zones, Open_Zone { event_index = 0, begin_timestamp = event.timestamp })
-            
-            create_zone = true
-            begin_timestamp = event.timestamp
-            
         case .BeginZone:
-            if len(open_zones) == 0 {
-                append(&open_zones, Open_Zone { event_index = 0, begin_timestamp = 0 })
-                append(zones, Zone {})
+            if len(open_zones) > 0 {
+                open_parent := last(open_zones)
+                timestamp_basis = open_parent.begin_timestamp
+                parent_index    = open_parent.zone_index
             }
-            
-            open_parent := last(open_zones)
-            timestamp_basis = open_parent.begin_timestamp
-            parent_index    = open_parent.zone_index
             
             create_zone = true
             begin_timestamp = event.timestamp
             
         case .EndZone:
             open        := pop(&open_zones)
-            open_parent := last(open_zones)
             
             end_timestamp = event.timestamp
             zone = &zones[open.zone_index]
-            if open_parent.zone_index != open.zone_index {
-                parent_index = open_parent.zone_index
+            if len(open_zones) > 0 {
+                open_parent := last(open_zones)
+                if open_parent.zone_index != open.zone_index {
+                    parent_index = open_parent.zone_index
+                }
             }
             
         case .UserEvent:
@@ -169,21 +167,16 @@ collate_events :: proc (events: [] Event, zones: ^[dynamic] Zone, user_events: ^
             
             open := append_into(&open_zones)
             open^ = {
-                zone_index = zone_index,
-                
+                zone_index      = zone_index,
                 begin_timestamp = event.timestamp,
-                event_index     = cast(u32) event_index,
             }
             
             zone = append_into(zones)
             
             zone^ = {
                 name = event.name,
-                
+                event_index_of_zone_begin = cast(u32) event_index,
                 parent_relative_timestamp = event.timestamp - timestamp_basis,
-                
-                user_index = event.user_index,
-                user_kind  = event.user_kind,
             }
             
             if parent_index, ok := parent_index.?; ok {
@@ -198,15 +191,13 @@ collate_events :: proc (events: [] Event, zones: ^[dynamic] Zone, user_events: ^
         }
         
         if zone != nil {
-            zone.duration             += end_timestamp - begin_timestamp
-            zone.duration_of_children += end_timestamp - begin_timestamp
+            zone.duration               += end_timestamp - begin_timestamp
+            zone.duration_with_children += end_timestamp - begin_timestamp
         }
         
         if parent_index, ok := parent_index.?; ok {
             parent := &zones[parent_index]
-            
-            parent.duration             -= end_timestamp - begin_timestamp
-            parent.duration_of_children += end_timestamp - begin_timestamp
+            parent.duration -= end_timestamp - begin_timestamp
         }
     }
 }

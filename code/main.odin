@@ -378,8 +378,8 @@ main :: proc () {
         bump = bump_allocator_make_temporary(&gpu, 256 * Megabyte, usage = { .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER })
     }
     
-    the_cpu_profiler = new(Event_Table, context.allocator)
-    the_cpu_profile_zones := make([dynamic] Zone, context.allocator)
+    the_cpu_profiler = new(Profile_Event_Table, context.allocator)
+    the_cpu_profile_zones := make([dynamic] Profile_Zone, context.allocator)
     set_recording(the_cpu_profiler, true)
     
     for !quit {
@@ -388,7 +388,7 @@ main :: proc () {
         events := swap_active_array_and_get_events(the_cpu_profiler)
         collate_events(events, &the_cpu_profile_zones, nil)
         
-        cpu_begin_frame_profile("Frame")
+        cpu_begin_profile_zone("Frame")
         
         ////////////////////////////////////////////////
         
@@ -1057,7 +1057,7 @@ main :: proc () {
             
             fmt.printfln("---------------------\nCPU profile:")
             
-            dump_zone :: proc (zones: [dynamic] Zone, index: u32, depth := 0) {
+            dump_zone :: proc (zones: [dynamic] Profile_Zone, index: u32, depth := 0) {
                 cpu_procedure_profile_zone()
                 
                 if index == 0 && depth != 0 { return }
@@ -1067,8 +1067,8 @@ main :: proc () {
                 
                 for _ in 0..<depth { fmt.printf("    ") }
                 fmt.printf("%v: %v", node.name, xx(clocks_to_seconds(node.duration)))
-                if node.duration_of_children != node.duration {
-                    fmt.printf(" (with children %v)", xx(clocks_to_seconds(node.duration_of_children)))
+                if node.duration_with_children != node.duration {
+                    fmt.printf(" (with children %v)", xx(clocks_to_seconds(node.duration_with_children)))
                 }
                 fmt.printfln("")
                 
@@ -1121,32 +1121,29 @@ main :: proc () {
 
 ////////////////////////////////////////////////
 
-the_cpu_profiler: ^Event_Table
+the_cpu_profiler: ^Profile_Event_Table
 
-cpu_begin_frame_profile :: proc (name: string, user_kind: u16 = 0, user_index: u32 = 0) {
-    record_event(the_cpu_profiler, read_cycle_counter(), .BeginFrame, name, user_kind, user_index)
-}
-cpu_begin_profile_zone :: proc (name: string, user_kind: u16 = 0, user_index: u32 = 0) {
-    record_event(the_cpu_profiler, read_cycle_counter(), .BeginZone, name, user_kind, user_index)
+cpu_begin_profile_zone :: proc (name: string) {
+    record_event(the_cpu_profiler, read_cycle_counter(), .BeginZone, name)
 }
 cpu_end_profile_zone :: proc () {
     record_event(the_cpu_profiler, read_cycle_counter(), .EndZone, "")
 }
 
 @(deferred_in=cpu_end_scoped_profile_zone)
-cpu_scoped_profile_zone :: proc (name: string, user_kind: u16 = 0, user_index: u32 = 0) {
-    record_event(the_cpu_profiler, read_cycle_counter(), .BeginZone, name, user_kind, user_index)
+cpu_scoped_profile_zone :: proc (name: string) {
+    record_event(the_cpu_profiler, read_cycle_counter(), .BeginZone, name)
 }
 
-cpu_end_scoped_profile_zone :: proc (_: string, _: u16 = 0, _: u32 = 0) {
+cpu_end_scoped_profile_zone :: proc (_: string) {
     record_event(the_cpu_profiler, read_cycle_counter(), .EndZone, "")
 }
 
 @(deferred_in=cpu_end_procedure_profile_zone)
-cpu_procedure_profile_zone :: proc (user_kind: u16 = 0, user_index: u32 = 0, loc := #caller_location) {
-    record_event(the_cpu_profiler, read_cycle_counter(), .BeginZone, loc.procedure, user_kind, user_index)
+cpu_procedure_profile_zone :: proc (loc := #caller_location) {
+    record_event(the_cpu_profiler, read_cycle_counter(), .BeginZone, loc.procedure)
 }
-cpu_end_procedure_profile_zone :: proc (_: u16 = 0, _: u32 = 0, loc := #caller_location) {
+cpu_end_procedure_profile_zone :: proc (_ := #caller_location) {
     record_event(the_cpu_profiler, read_cycle_counter(), .EndZone, "")
 }
 

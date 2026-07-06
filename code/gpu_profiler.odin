@@ -11,15 +11,15 @@ QueryPoolSize :: 256
 the_gpu_profiler: struct {
     cb:          vk.CommandBuffer,
     pool:        vk.QueryPool,
-    zones:       [dynamic] Zone,
+    zones:       [dynamic] Profile_Zone,
     zone_labels: [dynamic; QueryPoolSize] string,
     open_zones:  [dynamic; QueryPoolSize] int,
     queries:     [dynamic; QueryPoolSize] Profile_Query,
     
-    event_table: ^Event_Table
+    event_table: ^Profile_Event_Table
 }
 
-Profile_Query :: struct { zone_index: int, kind: Event_Kind }
+Profile_Query :: struct { zone_index: int, kind: Profile_Event_Kind }
 
 gpu_profile_init :: proc (gpu: ^Gpu) {
     create_info := vk.QueryPoolCreateInfo {
@@ -31,7 +31,7 @@ gpu_profile_init :: proc (gpu: ^Gpu) {
     
     the_gpu_profiler.zones.allocator = context.allocator
     
-    the_gpu_profiler.event_table = new(Event_Table, context.allocator)
+    the_gpu_profiler.event_table = new(Profile_Event_Table, context.allocator)
     set_recording(the_gpu_profiler.event_table, true)
 }
 
@@ -46,7 +46,7 @@ gpu_profile_frame_begin :: proc (gpu: ^Gpu, cb: vk.CommandBuffer) {
     clear(&the_gpu_profiler.open_zones)
     clear(&the_gpu_profiler.queries)
     
-    gpu_profile_zone_begin("Frame", kind = .BeginFrame)
+    gpu_profile_zone_begin("Frame")
 }
 
 gpu_profile_frame_end :: proc () {
@@ -54,14 +54,14 @@ gpu_profile_frame_end :: proc () {
     gpu_profile_zone_end()
 }
 
-gpu_profile_zone_begin :: proc (label: string, kind := Event_Kind.BeginZone) {
+gpu_profile_zone_begin :: proc (label: string) {
     assert(the_gpu_profiler.cb != nil)
     
     zone_index := len(the_gpu_profiler.zone_labels)
     append(&the_gpu_profiler.open_zones,  zone_index)
     append(&the_gpu_profiler.zone_labels, label)
     
-    gpu_profile_write_timestamp(kind, zone_index)
+    gpu_profile_write_timestamp(.BeginZone, zone_index)
 }
 
 gpu_profile_zone_end   :: proc () {
@@ -70,14 +70,14 @@ gpu_profile_zone_end   :: proc () {
     gpu_profile_write_timestamp(.EndZone, zone_index)
 }
 
-gpu_profile_write_timestamp :: proc (kind: Event_Kind, zone_index: int) {
+gpu_profile_write_timestamp :: proc (kind: Profile_Event_Kind, zone_index: int) {
     query_index := cast(u32) len(the_gpu_profiler.queries)
     append(&the_gpu_profiler.queries, Profile_Query { zone_index, kind })
     
     stage: vk.PipelineStageFlags2
     switch kind {
-    case .BeginFrame, .BeginZone: stage = { .TOP_OF_PIPE }
-    case .EndZone:                stage = { .BOTTOM_OF_PIPE }
+    case .BeginZone: stage = { .TOP_OF_PIPE }
+    case .EndZone:   stage = { .BOTTOM_OF_PIPE }
     case .UserEvent: unreachable()
     }
     
@@ -117,7 +117,7 @@ gpu_profile_collate_times :: proc (gpu: ^Gpu, print: bool) {
         fmt.printfln("---------------------\nGPU profile:")
         to_seconds := cast(f64) gpu.device_properties.properties.limits.timestampPeriod * 1e-9
         
-        dump_zone :: proc (gpu: ^Gpu, zones: [dynamic] Zone, index: u32, depth := 0) {
+        dump_zone :: proc (gpu: ^Gpu, zones: [dynamic] Profile_Zone, index: u32, depth := 0) {
             if index == 0 && depth != 0 { return }
             
             node := zones[index]
@@ -125,8 +125,8 @@ gpu_profile_collate_times :: proc (gpu: ^Gpu, print: bool) {
             
             for _ in 0..<depth { fmt.printf("    ") }
             fmt.printf("%v: %v", node.name, xx(gpu_timestamp_to_seconds(gpu, node.duration)))
-            if node.duration_of_children != node.duration {
-                fmt.printf(" (with children %v)", xx(gpu_timestamp_to_seconds(gpu, node.duration_of_children)))
+            if node.duration_with_children != node.duration {
+                fmt.printf(" (with children %v)", xx(gpu_timestamp_to_seconds(gpu, node.duration_with_children)))
             }
             fmt.printfln("")
             
