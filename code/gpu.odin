@@ -1614,6 +1614,7 @@ gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, frame_descripto
     count,    count_offset         := gpu_reflect_get_buffer(count.p)
     
     gpu_push_constants(cmd, frame_descriptor, push_constant)
+    // @todo is vk.CmdDrawMeshTasksIndirectCount2EXT available? so we dont need to get the buffer objects
     vk.CmdDrawMeshTasksIndirectCountEXT(cmd, commands, commands_base_offset + cast(vk.DeviceSize) command_offset, count, count_offset, max_count, size_of(C))
 }
 

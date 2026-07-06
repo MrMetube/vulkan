@@ -954,11 +954,11 @@ main :: proc () {
             
             gpu_profile_collate_times(&gpu, gpu.device, print_profile_and_stats)
             
-            gpu_delta             := gpu_profile_get_zone("frame").total_time_with_children
-            early_rendering_delta := gpu_profile_get_zone("early rendering pass").total_time_with_children
-            late_rendering_delta  := gpu_profile_get_zone("late rendering pass").total_time_with_children
-            early_cull_delta      := gpu_profile_get_zone("early culling").total_time_with_children
-            late_cull_delta       := gpu_profile_get_zone("late culling").total_time_with_children
+            gpu_delta             := gpu_profile_get_zone_duration(&gpu, "frame")
+            early_rendering_delta := gpu_profile_get_zone_duration(&gpu, "early rendering pass")
+            late_rendering_delta  := gpu_profile_get_zone_duration(&gpu, "late rendering pass")
+            early_cull_delta      := gpu_profile_get_zone_duration(&gpu, "early culling")
+            late_cull_delta       := gpu_profile_get_zone_duration(&gpu, "late culling")
             
             debug.cpu_time             = time_smoothed_blend(cpu_delta, debug.cpu_time,             cpu_delta)
             debug.early_cull_time      = time_smoothed_blend(cpu_delta, debug.early_cull_time,      early_cull_delta)
@@ -1051,7 +1051,7 @@ main :: proc () {
     
     vk.DestroySemaphore(gpu.device, frame_semaphore, nil)
     vk.DestroyQueryPool(gpu.device, stats_pool, nil)
-    vk.DestroyQueryPool(gpu.device, gpu_profiler.pool, nil)
+    vk.DestroyQueryPool(gpu.device, the_gpu_profiler.pool, nil)
     
     gpu_deinit(&gpu)
 }
