@@ -118,6 +118,7 @@ Raster_Desc :: struct {
 DefaultRasterDesc :: Raster_Desc {
     topology = .TRIANGLE_LIST,
     sample_count = 1,
+    cull = .CW,
 }
 
 Color_Target :: struct {
