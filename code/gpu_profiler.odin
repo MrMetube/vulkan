@@ -85,18 +85,18 @@ gpu_profile_write_timestamp :: proc (kind: Event_Kind, zone_index: int) {
 }
 
 gpu_profile_collate_times :: proc (gpu: ^Gpu, print: bool) {
-    cpu_profile_proc()
+    cpu_procedure_profile_zone()
     
     assert(the_gpu_profiler.pool != 0)
     assert(len(the_gpu_profiler.open_zones) == 0)
     
     query_results: [QueryPoolSize] u64
     
-    cpu_profile_zone_begin("get results")
+    cpu_begin_profile_zone("get results")
     // @speed how can we reliably get the results without waiting up to 130ms for them?
     query_count := cast(u32) len(the_gpu_profiler.queries)
     query_result := vk.GetQueryPoolResults(gpu.device, the_gpu_profiler.pool, 0, query_count, cast(int) size_of_slice(query_results[:query_count]), &query_results[0], size_of(query_results[0]), { ._64, .WAIT })
-    cpu_profile_zone_end()
+    cpu_end_profile_zone()
     
     if query_result == .NOT_READY || query_result == .ERROR_DEVICE_LOST { return }
     check(query_result)

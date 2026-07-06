@@ -388,7 +388,7 @@ main :: proc () {
         events := swap_active_array_and_get_events(the_cpu_profiler)
         collate_events(events, &the_cpu_profile_zones, nil)
         
-        cpu_profile_frame_begin("Frame")
+        cpu_begin_frame_profile("Frame")
         
         ////////////////////////////////////////////////
         
@@ -400,7 +400,7 @@ main :: proc () {
         @(static) left_down: bool
         @(static) space_down: bool
         
-        cpu_profile_zone_begin("Input Events")
+        cpu_begin_profile_zone("Input Events")
         
         window_event_begin := time.tick_now()
         for event: sdl.Event; sdl.PollEvent(&event); {
@@ -443,7 +443,7 @@ main :: proc () {
             }
         }
         
-        cpu_profile_zone_end()
+        cpu_end_profile_zone()
         
         window_event_delta := time.tick_since(window_event_begin)
         
@@ -472,9 +472,9 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        cpu_profile_zone_begin("Frame Sleep")
+        cpu_begin_profile_zone("Frame Sleep")
         gpu_wait_semaphore(&gpu, frame_semaphore, next_frame - MaxFramesInFlight)
-        cpu_profile_zone_end()
+        cpu_end_profile_zone()
         
         frame_index := absolute_frame_index % MaxFramesInFlight
         absolute_frame_index += 1
@@ -538,7 +538,7 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        cpu_profile_zone_begin("Setup Descriptor Heap")
+        cpu_begin_profile_zone("Setup Descriptor Heap")
         frame_descriptor: Frame_Descriptor
         frame_descriptor.descriptor_offset = DescriptorStaticLimit              + auto_cast frame_index * DescriptorPerFrameLimit
         frame_descriptor.descriptor_end    = frame_descriptor.descriptor_offset +                     1 * DescriptorPerFrameLimit
@@ -583,9 +583,9 @@ main :: proc () {
                 }
             }
         }
-        cpu_profile_zone_end()
+        cpu_end_profile_zone()
         
-        cpu_profile_zone_begin("Generate Draws")
+        cpu_begin_profile_zone("Generate Draws")
         entropy := seed_random_series(545114)
         when true {
             draws := db_view[:50_000]
@@ -623,7 +623,7 @@ main :: proc () {
                 draw.vertex_offset = mesh.vertex_offset
             }
         }
-        cpu_profile_zone_end()
+        cpu_end_profile_zone()
         
         ////////////////////////////////////////////////
         
@@ -676,7 +676,7 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         
-        cpu_profile_zone_begin("Record command buffer")
+        cpu_begin_profile_zone("Record command buffer")
         
         check(vk.ResetCommandPool(gpu.device, gpu.command_pools[frame_index], {}))
         // @api expecting the user to pass the frame index is a source for mistakes
@@ -964,19 +964,19 @@ main :: proc () {
         
         gpu_profile_frame_end()
         check(vk.EndCommandBuffer(cmd))
-        cpu_profile_zone_end()
+        cpu_end_profile_zone()
         
-        cpu_profile_zone_begin("submit and present queue")
+        cpu_begin_profile_zone("submit and present queue")
         // @cleanup dont pass the frameindex, this is a place that could cause mistakes
         end_of_frame_submit(&gpu, gpu.general_queue, frame_semaphore, next_frame, frame_index, &cmd)
         present_the_queue(&gpu, gpu.general_queue)
         next_frame += 1
-        cpu_profile_zone_end()
+        cpu_end_profile_zone()
         
         ////////////////////////////////////////////////
         
         {
-            cpu_profile_scope("GPU profiler collation")
+            cpu_scoped_profile_zone("GPU profiler collation")
             // @todo(viktor): how can we record how many triangles we have rendered after culling?
             
             gpu_profile_collate_times(&gpu, print_profile_and_stats)
@@ -1001,7 +1001,7 @@ main :: proc () {
                 return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
             }
             
-            cpu_profile_zone_begin("Update window title")
+            cpu_begin_profile_zone("Update window title")
             sb := strings.builder_make(context.temp_allocator)
             fmt.sbprintf(&sb, "cpu: %.3v, gpu: %.3v, culling: early %.3v / late %.3v, rendering: early %.3v / late %.3v", 
                 view(debug.cpu_time), view(debug.gpu_time), 
@@ -1025,10 +1025,10 @@ main :: proc () {
             
             title := strings.to_cstring(&sb)
             sdl.SetWindowTitle(window, title)
-            cpu_profile_zone_end()
+            cpu_end_profile_zone()
             
             if print_profile_and_stats {
-                cpu_profile_scope("collect and print shader stats")
+                cpu_scoped_profile_zone("collect and print shader stats")
                 
                 stats_result: [128] u64
                 size := cast(int) size_of_slice(stats_result[:])
@@ -1050,7 +1050,7 @@ main :: proc () {
             }
         }
         
-        cpu_profile_zone_end()
+        cpu_end_profile_zone()
         
         if print_profile_and_stats {
             zones := the_cpu_profile_zones
@@ -1058,7 +1058,7 @@ main :: proc () {
             fmt.printfln("---------------------\nCPU profile:")
             
             dump_zone :: proc (zones: [dynamic] Zone, index: u32, depth := 0) {
-                cpu_profile_proc()
+                cpu_procedure_profile_zone()
                 
                 if index == 0 && depth != 0 { return }
                 
@@ -1123,30 +1123,30 @@ main :: proc () {
 
 the_cpu_profiler: ^Event_Table
 
-cpu_profile_frame_begin :: proc (name: string, user_kind: u16 = 0, user_index: u32 = 0) {
+cpu_begin_frame_profile :: proc (name: string, user_kind: u16 = 0, user_index: u32 = 0) {
     record_event(the_cpu_profiler, read_cycle_counter(), .BeginFrame, name, user_kind, user_index)
 }
-cpu_profile_zone_begin :: proc (name: string, user_kind: u16 = 0, user_index: u32 = 0) {
+cpu_begin_profile_zone :: proc (name: string, user_kind: u16 = 0, user_index: u32 = 0) {
     record_event(the_cpu_profiler, read_cycle_counter(), .BeginZone, name, user_kind, user_index)
 }
-cpu_profile_zone_end :: proc () {
+cpu_end_profile_zone :: proc () {
     record_event(the_cpu_profiler, read_cycle_counter(), .EndZone, "")
 }
 
-@(deferred_in=cpu_profile_scope_end)
-cpu_profile_scope :: proc (name: string, user_kind: u16 = 0, user_index: u32 = 0) {
+@(deferred_in=cpu_end_scoped_profile_zone)
+cpu_scoped_profile_zone :: proc (name: string, user_kind: u16 = 0, user_index: u32 = 0) {
     record_event(the_cpu_profiler, read_cycle_counter(), .BeginZone, name, user_kind, user_index)
 }
 
-cpu_profile_scope_end :: proc (_: string, _: u16 = 0, _: u32 = 0) {
+cpu_end_scoped_profile_zone :: proc (_: string, _: u16 = 0, _: u32 = 0) {
     record_event(the_cpu_profiler, read_cycle_counter(), .EndZone, "")
 }
 
-@(deferred_in=cpu_profile_proc_end)
-cpu_profile_proc :: proc (user_kind: u16 = 0, user_index: u32 = 0, loc := #caller_location) {
+@(deferred_in=cpu_end_procedure_profile_zone)
+cpu_procedure_profile_zone :: proc (user_kind: u16 = 0, user_index: u32 = 0, loc := #caller_location) {
     record_event(the_cpu_profiler, read_cycle_counter(), .BeginZone, loc.procedure, user_kind, user_index)
 }
-cpu_profile_proc_end :: proc (_: u16 = 0, _: u32 = 0, loc := #caller_location) {
+cpu_end_procedure_profile_zone :: proc (_: u16 = 0, _: u32 = 0, loc := #caller_location) {
     record_event(the_cpu_profiler, read_cycle_counter(), .EndZone, "")
 }
 

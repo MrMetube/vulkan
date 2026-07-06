@@ -19,10 +19,7 @@ import "core:fmt"
 import "core:os"
 
 import vk  "../lib/vulkan"
-import sdl "vendor:sdl3"
-
-// @todo import the cpu profiler and extract the common parts with the gpu profiler,
-// @todo make a list of the api like c forward declarations
+import sdl "vendor:sdl3" // @todo get rid of this dependency
 
 MaxFramesInFlight :: 2
 
