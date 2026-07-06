@@ -15,21 +15,28 @@ the_gpu_profiler: struct {
     zone_labels: [dynamic; QueryPoolSize] string,
     open_zones:  [dynamic; QueryPoolSize] int,
     queries:     [dynamic; QueryPoolSize] Profile_Query,
+    
+    event_table: ^Event_Table
 }
 
 Profile_Query :: struct { zone_index: int, kind: Event_Kind }
 
-gpu_profile_make_query_pool :: proc (device: vk.Device) {
+gpu_profile_init :: proc (gpu: ^Gpu) {
     create_info := vk.QueryPoolCreateInfo {
         sType = .QUERY_POOL_CREATE_INFO,
         queryType = .TIMESTAMP,
         queryCount = QueryPoolSize,
     }
-    check(vk.CreateQueryPool(device, &create_info, nil, &the_gpu_profiler.pool))
+    check(vk.CreateQueryPool(gpu.device, &create_info, nil, &the_gpu_profiler.pool))
+    
+    the_gpu_profiler.zones.allocator = context.allocator
+    
+    the_gpu_profiler.event_table = new(Event_Table, context.allocator)
+    set_recording(the_gpu_profiler.event_table, true)
 }
 
-gpu_profile_frame_begin :: proc (device: vk.Device, cb: vk.CommandBuffer) {
-    vk.ResetQueryPool(device, the_gpu_profiler.pool, 0, QueryPoolSize)
+gpu_profile_frame_begin :: proc (gpu: ^Gpu, cb: vk.CommandBuffer) {
+    vk.ResetQueryPool(gpu.device, the_gpu_profiler.pool, 0, QueryPoolSize)
     
     assert(the_gpu_profiler.pool != 0)
     the_gpu_profiler.cb = cb
@@ -77,39 +84,36 @@ gpu_profile_write_timestamp :: proc (kind: Event_Kind, zone_index: int) {
     vk.CmdWriteTimestamp2(the_gpu_profiler.cb, stage, the_gpu_profiler.pool, query_index)
 }
 
-gpu_profile_collate_times :: proc (gpu: ^Gpu, device: vk.Device, print: bool) {
+gpu_profile_collate_times :: proc (gpu: ^Gpu, print: bool) {
+    cpu_profile_proc()
+    
     assert(the_gpu_profiler.pool != 0)
     assert(len(the_gpu_profiler.open_zones) == 0)
     
     query_results: [QueryPoolSize] u64
     
+    cpu_profile_zone_begin("get results")
+    // @speed how can we reliably get the results without waiting up to 130ms for them?
     query_count := cast(u32) len(the_gpu_profiler.queries)
-    query_result := vk.GetQueryPoolResults(device, the_gpu_profiler.pool, 0, query_count, cast(int) size_of_slice(query_results[:query_count]), &query_results[0], size_of(query_results[0]), { ._64, .WAIT })
+    query_result := vk.GetQueryPoolResults(gpu.device, the_gpu_profiler.pool, 0, query_count, cast(int) size_of_slice(query_results[:query_count]), &query_results[0], size_of(query_results[0]), { ._64, .WAIT })
+    cpu_profile_zone_end()
     
     if query_result == .NOT_READY || query_result == .ERROR_DEVICE_LOST { return }
     check(query_result)
     
-    // @cleanup
-    if the_event_table == nil {
-        the_gpu_profiler.zones.allocator = context.allocator
-        
-        the_event_table = new(Event_Table, context.allocator)
-        set_recording(the_event_table, true)
-    }
-    
     for query, query_index in the_gpu_profiler.queries {
         timestamp := cast(i64) query_results[query_index]
         label := the_gpu_profiler.zone_labels[query.zone_index]
-        record_event(timestamp, query.kind, label)
+        record_event(the_gpu_profiler.event_table, timestamp, query.kind, label)
     }
     
-    events := swap_active_array_and_get_events(the_event_table)
+    events := swap_active_array_and_get_events(the_gpu_profiler.event_table)
     
     collate_events(events, &the_gpu_profiler.zones, nil)
-    zones := the_gpu_profiler.zones
-        
+    
     if print {
-        fmt.printfln("---------------------\nNEW PROFILER TREE")
+        zones := the_gpu_profiler.zones
+        
         fmt.printfln("---------------------\nGPU profile:")
         to_seconds := cast(f64) gpu.device_properties.properties.limits.timestampPeriod * 1e-9
         

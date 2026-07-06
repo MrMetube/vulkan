@@ -71,8 +71,6 @@ Open_Zone :: struct {
     begin_timestamp: i64,
 }
 
-the_event_table: ^Event_Table
-
 set_recording :: proc (table: ^Event_Table, active: bool) {
     table.record_increment = active ? 1 : 0
 }
@@ -84,20 +82,31 @@ swap_active_array_and_get_events :: proc (table: ^Event_Table) -> [] Event {
     return events
 }
 
-record_event :: proc (timestamp: i64, event_kind: Event_Kind, name : string, user_kind: u16 = 0, data_index: u32 = 0) {
-    state := transmute(Events_State) atomic_add(cast(^u32) &the_event_table.state, the_event_table.record_increment)
-    result := &the_event_table.events[state.array_index][state.event_index]
+record_event :: proc (table: ^Event_Table, timestamp: i64, event_kind: Event_Kind, name : string, user_kind: u16 = 0, user_index: u32 = 0) {
+    if table == nil { return }
+    state := transmute(Events_State) atomic_add(cast(^u32) &table.state, table.record_increment)
+    result := &table.events[state.array_index][state.event_index]
     result^ = {
         name = name,
         
         timestamp  = timestamp,
         kind       = event_kind,
         user_kind  = user_kind,
-        user_index = data_index,
+        user_index = user_index,
     }
 }
 
-collate_events :: proc (events: [] Event, zones: ^[dynamic] Zone, user_events: ^[dynamic] Stored_User_Event, frame_begin_timestamp: i64 = 0) {
+// @todo make a off toggle for the whole profiler
+
+profile_zone_begin :: proc (table: ^Event_Table, timestamp: i64, name: string, user_kind: u16 = 0, user_index: u32 = 0) {
+    record_event(table, timestamp, .BeginZone, name, user_kind, user_index)
+}
+
+profile_zone_end :: proc (table: ^Event_Table, timestamp: i64) {
+    record_event(table, timestamp, .EndZone, "")
+}
+
+collate_events :: proc (events: [] Event, zones: ^[dynamic] Zone, user_events: ^[dynamic] Stored_User_Event) {
     clear(zones)
     clear(user_events)
     
@@ -121,13 +130,17 @@ collate_events :: proc (events: [] Event, zones: ^[dynamic] Zone, user_events: ^
             begin_timestamp = event.timestamp
             
         case .BeginZone:
+            if len(open_zones) == 0 {
+                append(&open_zones, Open_Zone { event_index = 0, begin_timestamp = 0 })
+                append(zones, Zone {})
+            }
+            
             open_parent := last(open_zones)
             timestamp_basis = open_parent.begin_timestamp
+            parent_index    = open_parent.zone_index
             
             create_zone = true
-            
             begin_timestamp = event.timestamp
-            parent_index = open_parent.zone_index
             
         case .EndZone:
             open        := pop(&open_zones)
