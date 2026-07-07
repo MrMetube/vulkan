@@ -306,7 +306,7 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
                 check(vk.EnumeratePhysicalDevices(gpu.instance, &device_count, raw_data(&physical_devices)))
             }
             
-            discrete: vk.PhysicalDevice
+            preferred: vk.PhysicalDevice
             fallback: vk.PhysicalDevice
             
             for device in physical_devices {
@@ -342,8 +342,8 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
                     continue
                 }
                 
-                if discrete == nil && properties.properties.deviceType == .DISCRETE_GPU {
-                    discrete = device
+                if preferred == nil && properties.properties.deviceType == .DISCRETE_GPU {
+                    preferred = device
                 }
                 
                 if fallback == nil {
@@ -352,7 +352,7 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             }
             assert(fallback != nil, "Could not find any compatible device :(")
             
-            gpu.physical_device = discrete != nil ? discrete : fallback
+            gpu.physical_device = preferred != nil ? preferred : fallback
         }
         
         gpu.heap_properties = vk.PhysicalDeviceDescriptorHeapPropertiesEXT {
@@ -952,8 +952,7 @@ gpu_destroy_texture_view :: proc (gpu: ^Gpu, view: vk.ImageView) {
 ////////////////////////////////////////////////
 // Pipelines 
 
-// @cleanup
-gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, descriptor_size, sampler_size: u32, set_layout: ..vk.DescriptorSetLayout, sampler_hack_names: [] string = {}) -> Pipeline {
+gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, descriptor_size, sampler_size: u32, constants: ..i32, sampler_hack_names: [] string = {}) -> Pipeline {
     // @todo(viktor): allow for optional shader constant, i.e. vulkan specialization constants
     assert(compute.parsed.stage == .COMPUTE)
     compute := compute
@@ -968,6 +967,15 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, descriptor_size
     heap_mapping: vk.ShaderDescriptorSetAndBindingMappingInfoEXT
     heap_mapping = generate_heap_mappings(resource_mask, resource_types, sampler_hack_names, size_of(vk.DeviceAddress), descriptor_size, sampler_size, &mappings)
     
+    // @todo copy to graphics pipeline
+    specialization_entries: [dynamic; 32] vk.SpecializationMapEntry
+    specialization_info := vk.SpecializationInfo {
+        mapEntryCount = cast(u32) len(specialization_entries),
+        pMapEntries   = raw_data(&specialization_entries),
+        dataSize      = cast(int) size_of_slice(constants),
+        pData         = raw_data(constants),
+    }
+    
     create_info := vk.ComputePipelineCreateInfo {
         sType = .COMPUTE_PIPELINE_CREATE_INFO,
         
@@ -979,7 +987,10 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, descriptor_size
         stage  = { 
             sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
             stage = { compute.parsed.stage }, 
+            
             pName = "main", 
+            pSpecializationInfo = &specialization_info,
+            
             pNext = &vk.ShaderModuleCreateInfo {
                 sType    = .SHADER_MODULE_CREATE_INFO,
                 codeSize = len(compute.bytes),

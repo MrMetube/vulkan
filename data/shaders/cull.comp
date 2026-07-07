@@ -9,6 +9,8 @@
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
+layout(constant_id = 0) const bool Late = false;
+
 // @volatile
 layout(push_constant) uniform Push_Data {
     Cull_Globals globals;
@@ -61,6 +63,8 @@ void main() {
     
     if (draw_index >= globals.data.draw_count) return;
     
+    if (!Late) if (globals.draw_visibility_buffer[draw_index].v == 0) return;
+    
     bool frustum_culling_enabled = (globals.data.flags & Flag_FrustumCulling)   != 0;
     bool lod_enabled             = (globals.data.flags & Flag_LevelOfDetail)    != 0;
     bool occlusion_enabled       = (globals.data.flags & Flag_OcclusionCulling) != 0;
@@ -82,30 +86,37 @@ void main() {
         }
     }
     
-    if (visible && occlusion_enabled) {
-        vec4 rect;
-        if (project_sphere_onto_screen(view_center.xyz, radius, globals.data.p00, globals.data.p11, globals.data.near_z, rect)) {
-            vec2 size_in_pixels = (rect.zw - rect.xy) * globals.data.pyramid_size;
-            
-            float level = floor(log2(max(size_in_pixels.x, size_in_pixels.y)));
-            vec2  rect_center = (rect.xy + rect.zw) * 0.5;
-            
-            float depth = textureLod(sampler2D(Textures[globals.depth_pyramid_index], Samplers[Sampler_Depth]), rect_center, level).x;
-            float min_sphere_depth = globals.data.near_z / (view_center.z - radius); // :ReversedZ:
-            
-            visible = visible && (min_sphere_depth > depth);
+    bool write_command = visible;
+    if (Late) {
+        if (visible && occlusion_enabled) {
+            vec4 rect;
+            if (project_sphere_onto_screen(view_center.xyz, radius, globals.data.p00, globals.data.p11, globals.data.near_z, rect)) {
+                vec2 size_in_pixels = (rect.zw - rect.xy) * globals.data.pyramid_size;
+                
+                float level = floor(log2(max(size_in_pixels.x, size_in_pixels.y)));
+                vec2  rect_center = (rect.xy + rect.zw) * 0.5;
+                
+                float depth = textureLod(sampler2D(Textures[globals.depth_pyramid_index], Samplers[Sampler_Depth]), rect_center, level).x;
+                float min_sphere_depth = globals.data.near_z / (view_center.z - radius); // :ReversedZ:
+                
+                visible = visible && (min_sphere_depth > depth);
+            }
         }
+        
+        uint_p was_visible_last_frame = globals.draw_visibility_buffer[draw_index];
+        write_command = write_command && (was_visible_last_frame.v == 0);
+        
+        was_visible_last_frame.v = visible ? 1 : 0;
     }
     
-    uint_p was_visible_last_frame = globals.draw_visibility_buffer[draw_index];
-    if (visible && (was_visible_last_frame.v == 0)) {
+    if (write_command) {
         uint draw_command_index = atomicAdd(draw_command_count.v, 1);
         
         uint lod_index = 0;
         if (lod_enabled) {
-            vec3 camera_position = vec3(0);
+            vec3 view_camera_position = vec3(0);
             
-            float lod_distance = max(1, distance(view_center.xyz, camera_position) - radius);
+            float lod_distance = max(1, distance(view_center.xyz, view_camera_position) - radius);
             float log_lod_distance = log2(lod_distance);
             lod_index = int(log_lod_distance);
             
@@ -125,6 +136,4 @@ void main() {
         draw_command.v.command.groupCountY = 1;
         draw_command.v.command.groupCountZ = 1;
     }
-    
-    was_visible_last_frame.v = visible ? 1 : 0;
 }

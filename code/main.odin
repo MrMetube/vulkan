@@ -252,8 +252,7 @@ main :: proc () {
     meshlet_task_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.task",   shader_allocator)
     meshlet_mesh_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.mesh",   shader_allocator)
     meshlet_frag_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.frag",   shader_allocator)
-    early_cull_shader   := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/cull_early.comp",   shader_allocator)
-    late_cull_shader    := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/cull_late.comp",    shader_allocator)
+    cull_shader   := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/cull.comp",   shader_allocator)
     depth_reduce_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/depth_reduce.comp", shader_allocator)
     
     ////////////////////////////////////////////////
@@ -501,15 +500,16 @@ main :: proc () {
         
         watchers_check_for_modification(watchers)
         
-        if reload_shaders_if_needed(watchers, shader_allocator, &early_cull_shader) || !pipeline_is_valid(early_cull_pipeline) {
+        reloaded_cull_shader := reload_shaders_if_needed(watchers, shader_allocator, &cull_shader)
+        if reloaded_cull_shader || !pipeline_is_valid(early_cull_pipeline) {
             destroy_pipeline(&gpu, early_cull_pipeline)
-            early_cull_pipeline = gpu_create_compute_pipeline(&gpu, early_cull_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size)
+            early_cull_pipeline = gpu_create_compute_pipeline(&gpu, cull_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, constants = { /* late = */ transmute(i32) cast(b32) false }, sampler_hack_names = {"", "depth_sampler"})
             fmt.printfln("Recreated early_cull_pipeline.")
         }
         
-        if reload_shaders_if_needed(watchers, shader_allocator, &late_cull_shader) || !pipeline_is_valid(late_cull_pipeline) {
+        if reloaded_cull_shader || !pipeline_is_valid(late_cull_pipeline) {
             destroy_pipeline(&gpu, late_cull_pipeline)
-            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, late_cull_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, sampler_hack_names = {"", "depth_sampler"})
+            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, cull_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, constants = { /* late = */ transmute(i32) cast(b32) true }, sampler_hack_names = {"", "depth_sampler"})
             fmt.printfln("Recreated late_cull_pipeline.")
         }
         
@@ -526,6 +526,7 @@ main :: proc () {
                 { format = stuff.color_buffer.format, write_mask = { .R, .G, .B, .A } },
             }
             raster_description.blendstate = &Blend_Desc{ **DefaultBlendDesc }
+            // raster_description.blendstate.dst_color_factor = .ONE
             // :Stencil: 
             
             task, mesh, frag := meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader
@@ -749,7 +750,7 @@ main :: proc () {
                 gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
                 
                 gpu_set_pipeline(cmd, early_cull_pipeline)
-                    gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(early_cull_shader, auto_cast len(draws)))
+                    gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(cull_shader, auto_cast len(draws)))
                 
             gpu_profile_zone_end()
             gpu_labeled_region_end(cmd)
@@ -893,7 +894,7 @@ main :: proc () {
                 ////////////////////////////////////////////////
                 
                 gpu_set_pipeline(cmd, late_cull_pipeline)
-                    gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(late_cull_shader, auto_cast len(draws)))
+                    gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(cull_shader, auto_cast len(draws)))
                     
             gpu_profile_zone_end()
             gpu_labeled_region_end(cmd)

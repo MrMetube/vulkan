@@ -26,7 +26,7 @@ load_mesh :: proc (geometry: ^Geometry, filepath: string, _allocator: Allocator)
         
         v = Vertex {
             p  = p,
-            n  = cast([3] u8) ((n + 1) * 127),
+            n  = cast([3] u8) ((n + 1) * 127.5),
             uv = uv,
         }
     }
