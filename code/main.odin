@@ -80,13 +80,16 @@ Cull_Globals :: struct #all_or_none {
 Cull_Data :: struct #all_or_none {
     view_from_world: m4,
     
-    frustum_planes: [6] v4,
-    draw_count: u32,
+    p00, p11, near_z, far_z: f32,
+    frustum: [4] f32,
     
     pyramid_size: v2,
-    p00, p11, near_z: f32,
+    draw_count:   u32,
+    flags:        u32,
     
-    flags: u32,
+    lod_base: f32,
+    lod_step: f32,
+    _: v2,
 }
 
 // @volatile Cull_Data.flags
@@ -627,25 +630,34 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        // @important @todo once we are satisfied with the occlusion culling the near plane should be set to a more reasonable value like 0.01. the 0.1 value is just useful for debugging, as the depth values lie in a more visible range.
-        near_z: f32 = 0.1
-        screen_from_view := projection_reversed_z_infinite_far_plane(70 * RadPerDeg, cast(f32) gpu.swapchain_size.x / cast(f32) gpu.swapchain_size.y, near_z)
+        //
+        // :ViewSpace:
+        // The default vulkan view space is right-handed with x+ being right, y+ down and the camera looking down z-. The depth buffer maps 
+        // the near z clipping plane to 0 and the far plane to 1. This loses floating point precision for far away object and can increase
+        // z-fighting.
+        // We instead want the coordinate frame to be y+ as up and also want to reverse the depth mapping (reversed-z) to place the most 
+        // amount of precision at the far plane. It is then also simple to move the far plane of the projection matrix towards infinity.
+        // In the limit this produces the matrix given by projection_reversed_z_infinite_far_plane.
+        // 
+        
+        near_z: f32 = 0.01
+        screen_from_view := projection_reversed_z_infinite_far_plane(70 * RadiansFromDegrees, cast(f32) gpu.swapchain_size.x / cast(f32) gpu.swapchain_size.y, near_z)
         view_from_world  := translate(1, -cam_pos)
         
-        draw_distance: f32 = 10
+        // @todo this is in view/camera space make this a distance in world space
+        draw_distance: f32 = 1000
         
-        frustum_planes: [6] v4
+        frustum: [4] f32
         if debug.culling_enabled {
-            frustum_planes[0] = get_row_v4(screen_from_view, 3) + get_row_v4(screen_from_view, 0) // x + w < 0
-            frustum_planes[1] = get_row_v4(screen_from_view, 3) - get_row_v4(screen_from_view, 0) // x - w > 0
-            frustum_planes[2] = get_row_v4(screen_from_view, 3) + get_row_v4(screen_from_view, 1) // y + w < 0
-            frustum_planes[3] = get_row_v4(screen_from_view, 3) - get_row_v4(screen_from_view, 1) // y - w > 0
-            frustum_planes[4] = get_row_v4(screen_from_view, 3) - get_row_v4(screen_from_view, 2) // z - w > 0 -- :ReversedZ:
-            frustum_planes[5] = v4{0, 0, -1, draw_distance}                                       // :ReversedZ: infinite far plane
+            frustum_x := get_row_v4(screen_from_view, 3) + get_row_v4(screen_from_view, 0) // x + w < 0
+            frustum_y := get_row_v4(screen_from_view, 3) + get_row_v4(screen_from_view, 1) // y + w > 0
+            frustum_x /= length(frustum_x.xyz)
+            frustum_y /= length(frustum_y.xyz)
             
-            for &plane in frustum_planes {
-                plane /= length(plane.xyz)
-            }
+            frustum[0] = frustum_x.x
+            frustum[1] = frustum_x.z
+            frustum[2] = frustum_y.y
+            frustum[3] = frustum_y.z
         }
         
         ////////////////////////////////////////////////
@@ -655,17 +667,22 @@ main :: proc () {
         if debug.lod_enabled       { cull_data_flags |= DebugFlag_LevelOfDetail    }
         if debug.occlusion_enabled { cull_data_flags |= DebugFlag_OcclusionCulling }
         cull_data := Cull_Data {
-            frustum_planes          = frustum_planes,
-            draw_count              = auto_cast len(draws),
-            view_from_world         = view_from_world,
-            
-            flags = cull_data_flags,
+            view_from_world = view_from_world,
             
             p00 = screen_from_view[0,0],
             p11 = screen_from_view[1,1],
             near_z = near_z,
+            far_z  = draw_distance,
+            
+            frustum = frustum,
             
             pyramid_size = cast(v2) stuff.depth_pyramid.size.xy,
+            
+            draw_count = auto_cast len(draws),
+            flags      = cull_data_flags,
+            
+            lod_base = 10,
+            lod_step = 1.5,
         }
         
         draw_data.screen_from_view = screen_from_view
@@ -882,16 +899,16 @@ main :: proc () {
             gpu_labeled_region_begin(cmd, "late culling", {0.0, 0.6, 0.8, 1.0})
                 gpu_profile_zone_begin("late culling")
                 
-                ////////////////////////////////////////////////
+                
                 
                 gpu_barrier(cmd, { .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }, { .ALL_TRANSFER })
                 
                 gpu_fill_memory(cmd, draw_command_count_gpu, 0)
                 
+                
+                
                 // depth pyramid = compute + draw command count = transfer
                 gpu_barrier(cmd, { .ALL_TRANSFER, .COMPUTE_SHADER }, { .COMPUTE_SHADER })
-                
-                ////////////////////////////////////////////////
                 
                 gpu_set_pipeline(cmd, late_cull_pipeline)
                     gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(cull_shader, auto_cast len(draws)))
@@ -905,13 +922,13 @@ main :: proc () {
             gpu_profile_zone_begin("late rendering pass")
             gpu_labeled_region_begin(cmd, "late rendering pass", {0.6, 0.1, 07, 1.0})
             
+            
+            
                 gpu_barrier(cmd, 
                     { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS,  .COMPUTE_SHADER }, 
                     { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS },
                 )
                 
-                ////////////////////////////////////////////////
-            
                 begin_meshlet_rendering(&gpu, cmd, &stuff, {}, early = false)
                 
                     gpu_set_pipeline(cmd, meshlet_pipeline)
@@ -987,14 +1004,14 @@ main :: proc () {
             early_cull_delta      := gpu_profile_get_zone_duration(&gpu, "early culling")
             late_cull_delta       := gpu_profile_get_zone_duration(&gpu, "late culling")
             
-            debug.cpu_time             = time_smoothed_blend(cpu_delta, debug.cpu_time,             cpu_delta)
-            debug.early_cull_time      = time_smoothed_blend(cpu_delta, debug.early_cull_time,      early_cull_delta)
-            debug.late_cull_time       = time_smoothed_blend(cpu_delta, debug.late_cull_time,       late_cull_delta)
-            debug.early_rendering_time = time_smoothed_blend(cpu_delta, debug.early_rendering_time, early_rendering_delta)
-            debug.late_rendering_time  = time_smoothed_blend(cpu_delta, debug.late_rendering_time,  late_rendering_delta)
+            debug.cpu_time             = time_smoothed_blend(debug.cpu_time,             cpu_delta,             cpu_delta)
+            debug.early_cull_time      = time_smoothed_blend(debug.early_cull_time,      early_cull_delta,      cpu_delta)
+            debug.late_cull_time       = time_smoothed_blend(debug.late_cull_time,       late_cull_delta,       cpu_delta)
+            debug.early_rendering_time = time_smoothed_blend(debug.early_rendering_time, early_rendering_delta, cpu_delta)
+            debug.late_rendering_time  = time_smoothed_blend(debug.late_rendering_time,  late_rendering_delta,  cpu_delta)
             // this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
             if gpu_delta >= 0 {
-                debug.gpu_time = time_smoothed_blend(cpu_delta, debug.gpu_time, gpu_delta)
+                debug.gpu_time = time_smoothed_blend(debug.gpu_time, gpu_delta, cpu_delta)
             }
             
             view :: proc (seconds: f64) -> time.Duration {
@@ -1227,7 +1244,7 @@ present_the_queue :: proc (gpu: ^Gpu, queue: vk.Queue) {
 
 begin_meshlet_rendering :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stuff: ^Render_Targets_And_Stuff, clear_color: v4, early: bool) {
     desc := Render_Pass_Desc {
-        // :ReversedZ: 0 is the maximal value
+        // :ViewSpace: 0 is the maximal depth value
         depth_target  = { 
             texture = stuff.depth_buffer, view = stuff.depth_view, load_op = early ? .CLEAR : .LOAD, store_op = early ? .STORE : .DONT_CARE, clear_depth = 0, 
         }, 

@@ -79,8 +79,8 @@ MaxF16Precision ::  4 // Maximum number of meaningful digits after the decimal p
 Infinity :: math.INF_F32
 QNaN     :: math.QNAN_F32
 
-RadPerDeg :: Tau/360.0
-DegPerRad :: 360.0/Tau
+RadiansFromDegrees :: Tau/360.0
+DegreesFromRadians :: 360.0/Tau
 
 ////////////////////////////////////////////////
 // Scalar operations
@@ -143,15 +143,16 @@ barycentric_blend_s :: proc (a: $V/ [$N] $E, b, c: V, u, v: E) -> V {
     return result
 }
 
-time_smoothed_blend :: proc (frame_time: f64, last_value: f64, value: f64) -> f64 {
-    h :: 3.0 // = the amount of time it takes for the filter to converge to 90% of a fixed input value
+// @todo just calculate k and pass it to as many linear_blends as i want
+time_smoothed_blend :: proc (from: f64, to: f64, delta_time: f64) -> f64 {
+    h :: 8.0 // = the amount of time it takes for the filter to converge to 90% of a fixed input value
     // @speed We could precompute k if needed as it only depends on h and frame time, not the smoothed value itself.
-    k := power(power(cast(f64) .1, 1 / h), frame_time)
+    base := power(cast(f64) .1, 1 / h)
+    k := power(base, delta_time)
     
-    result := linear_blend(value, last_value, k)
+    result := linear_blend(from, to, k)
     return result
 }
-
 
 safe_ratio_or_else :: proc { safe_ratio_or_else_s, safe_ratio_or_else_v }
 safe_ratio_or_else_s :: proc(numerator: $T, divisor: T) -> (T, bool) where !intrinsics.type_is_array(T) {
@@ -712,7 +713,7 @@ projection_reversed_z_infinite_far_plane :: proc (fov_y, aspect_w_h, near_z: f32
         x,  0,  0,  0,
         0,  y,  0,  0,
         0,  0,  0,  n,
-        0,  0, -1,  0,
+        0,  0, -1,  0, // -1 so we look down -z :ViewSpace:
     }
     
     return result

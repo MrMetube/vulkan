@@ -20,14 +20,13 @@ layout(descriptor_heap) uniform texture2D Textures[];
 layout(descriptor_heap) uniform sampler   Samplers[];
 
 ////////////////////////////////////////////////
+
 // Based on this paper: 
 //     2D Polyhedral Bounds of a Clipped, Perspective-Projected 3D Sphere. Michael Mara, Morgan McGuire. 2013
 //     https://jcgt.org/published/0002/02/05/paper.pdf
-// :ReversedZ: we assume a reversed_z projection matrix and can use that to simplify the matrix multiplications
-
+//     :ViewSpace: is used to simplify the original calculations down to this form
 bool project_sphere_onto_screen(vec3 view_center, float radius, float p00, float p11, float near_z, out vec4 result) {
-    // @todo we remove the handling of clipped boxes, so we need to early out in the shader in these cases and assume that we cannot cull the mesh
-    if (view_center.z < radius + near_z) {
+    if (view_center.z + radius > -near_z) { // :ViewSpace:
         return false;
     }
     
@@ -39,8 +38,8 @@ bool project_sphere_onto_screen(vec3 view_center, float radius, float p00, float
     float cy_length_squared = dot(cy, cy);
     
     // (cos, sin) of angle theta between c and x/y tangent vector
-    vec2 vx = vec2(sqrt(cx_length_squared - (radius * radius)), radius) / sqrt(cx_length_squared);
-    vec2 vy = vec2(sqrt(cy_length_squared - (radius * radius)), radius) / sqrt(cy_length_squared);
+    vec2 vx = vec2(sqrt(cx_length_squared - (radius * radius)), radius);
+    vec2 vy = vec2(sqrt(cy_length_squared - (radius * radius)), radius);
     
     // In the x/y-z reference frame
     // Transform back to camera space
@@ -63,7 +62,8 @@ void main() {
     
     if (draw_index >= globals.data.draw_count) return;
     
-    if (!Late) if (globals.draw_visibility_buffer[draw_index].v == 0) return;
+    uint_p was_visible_last_frame = globals.draw_visibility_buffer[draw_index];
+    if (!Late) if (was_visible_last_frame.v == 0) return;
     
     bool frustum_culling_enabled = (globals.data.flags & Flag_FrustumCulling)   != 0;
     bool lod_enabled             = (globals.data.flags & Flag_LevelOfDetail)    != 0;
@@ -80,47 +80,37 @@ void main() {
     
     bool visible = true;
     if (frustum_culling_enabled) {
-        [[unroll]] for (int i = 0; i < 6; i++) {
-            vec4 view_plane = globals.data.frustum_planes[i];
-            visible = visible && (dot(view_plane, view_center) > -radius);
+        // the left/top/right/bottom plane culling utilizes frustum symmetry to cull against two planes at the same time
+        visible = visible && view_center.z * globals.data.frustum[1] - abs(view_center.x) * globals.data.frustum[0] > -radius;
+        visible = visible && view_center.z * globals.data.frustum[3] - abs(view_center.y) * globals.data.frustum[2] > -radius;
+        // the near/far plane culling uses camera space Z directly, but the camera looks down -z :ViewSpace:
+        visible = visible && view_center.z + radius < -globals.data.near_z && view_center.z - radius > -globals.data.far_z;
+    }
+    
+    if (Late && occlusion_enabled && visible) {
+        vec4 rect;
+        if (project_sphere_onto_screen(view_center.xyz, radius, globals.data.p00, globals.data.p11, globals.data.near_z, rect)) {
+            vec2 size_in_pixels = (rect.zw - rect.xy) * globals.data.pyramid_size;
+            
+            float level = floor(log2(max(size_in_pixels.x, size_in_pixels.y)));
+            vec2  rect_center = (rect.xy + rect.zw) * 0.5;
+            
+            float depth = textureLod(sampler2D(Textures[globals.depth_pyramid_index], Samplers[Sampler_Depth]), rect_center, level).x;
+            float min_sphere_depth = -globals.data.near_z / (view_center.z + radius); // :ViewSpace:
+            
+            visible = visible && (min_sphere_depth > depth);
         }
     }
     
-    bool write_command = visible;
-    if (Late) {
-        if (visible && occlusion_enabled) {
-            vec4 rect;
-            if (project_sphere_onto_screen(view_center.xyz, radius, globals.data.p00, globals.data.p11, globals.data.near_z, rect)) {
-                vec2 size_in_pixels = (rect.zw - rect.xy) * globals.data.pyramid_size;
-                
-                float level = floor(log2(max(size_in_pixels.x, size_in_pixels.y)));
-                vec2  rect_center = (rect.xy + rect.zw) * 0.5;
-                
-                float depth = textureLod(sampler2D(Textures[globals.depth_pyramid_index], Samplers[Sampler_Depth]), rect_center, level).x;
-                float min_sphere_depth = globals.data.near_z / (view_center.z - radius); // :ReversedZ:
-                
-                visible = visible && (min_sphere_depth > depth);
-            }
-        }
-        
-        uint_p was_visible_last_frame = globals.draw_visibility_buffer[draw_index];
-        write_command = write_command && (was_visible_last_frame.v == 0);
-        
-        was_visible_last_frame.v = visible ? 1 : 0;
-    }
-    
-    if (write_command) {
+    if (visible && (!Late || (was_visible_last_frame.v == 0))) {
         uint draw_command_index = atomicAdd(draw_command_count.v, 1);
         
         uint lod_index = 0;
         if (lod_enabled) {
-            vec3 view_camera_position = vec3(0);
-            
-            float lod_distance = max(1, distance(view_center.xyz, view_camera_position) - radius);
-            float log_lod_distance = log2(lod_distance);
-            lod_index = int(log_lod_distance);
-            
-            lod_index = clamp(lod_index, 0, mesh.v.lod_count-1);
+            // lod distance i = base * pow(step, i)
+            // i = log2(distance / base) / log2(step)
+            float lod_index_f = log2(distance(view_center.xyz, vec3(0)) / globals.data.lod_base) / log2(globals.data.lod_step);
+            lod_index = min(uint(max(lod_index_f + 1, 0)), mesh.v.lod_count - 1);
         }
         
         Mesh_LOD lod = mesh.v.lods[lod_index];
@@ -136,4 +126,6 @@ void main() {
         draw_command.v.command.groupCountY = 1;
         draw_command.v.command.groupCountZ = 1;
     }
+    
+    if (Late) was_visible_last_frame.v = visible ? 1 : 0;
 }
