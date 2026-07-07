@@ -148,12 +148,11 @@ gpu_timestamp_to_seconds :: proc (gpu: ^Gpu, timestamp: i64) -> f64 {
 }
 
 gpu_profile_get_zone_duration :: proc (gpu: ^Gpu, name: string) -> (f64, bool) #optional_ok {
-    // @speed zones could have been a hashmap, or copied into one if needed
     result: f64
     ok: bool
     for it in the_gpu_profiler.zones {
         if name == it.name {
-            result = gpu_timestamp_to_seconds(gpu, it.duration)
+            result = gpu_timestamp_to_seconds(gpu, it.duration_with_children)
             ok = true
             break
         }

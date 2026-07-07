@@ -152,10 +152,10 @@ Mesh_LOD :: struct {
 
 // @shader
 Draw_Command :: struct {
-    draw_id:   u32,
+    draw_id:        u32,
     meshlet_offset: u32,
     meshlet_count:  u32,
-    command:   vk.DrawMeshTasksIndirectCommandEXT,
+    command:        vk.DrawMeshTasksIndirectCommandEXT,
 }
 
 // @shader
@@ -526,7 +526,6 @@ main :: proc () {
                 { format = stuff.color_buffer.format, write_mask = { .R, .G, .B, .A } },
             }
             raster_description.blendstate = &Blend_Desc{ **DefaultBlendDesc }
-            // raster_description.blendstate.dst_color_factor = .ONE
             // :Stencil: 
             
             task, mesh, frag := meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader
@@ -981,7 +980,7 @@ main :: proc () {
             
             gpu_profile_collate_times(&gpu, print_profile_and_stats)
             
-            gpu_delta             := gpu_profile_get_zone_duration(&gpu, "frame")
+            gpu_delta             := gpu_profile_get_zone_duration(&gpu, "Frame")
             early_rendering_delta := gpu_profile_get_zone_duration(&gpu, "early rendering pass")
             late_rendering_delta  := gpu_profile_get_zone_duration(&gpu, "late rendering pass")
             early_cull_delta      := gpu_profile_get_zone_duration(&gpu, "early culling")

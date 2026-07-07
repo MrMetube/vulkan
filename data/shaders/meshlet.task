@@ -11,7 +11,7 @@
 
 // @volatile
 layout(push_constant) uniform Push_Data {
-    Draw_Globals globals;
+    Draw_Globals data;
 };
 
 ////////////////////////////////////////////////
@@ -32,11 +32,11 @@ taskPayloadSharedEXT Task_Result task_result;
 void main() {
     uint meshlet_group_index = gl_WorkGroupID.x;
     uint thread_index        = gl_LocalInvocationID.x;
-    Draw_Command_p command   = globals.draw_command_buffer[gl_DrawID];
+    Draw_Command_p command   = data.draw_command_buffer[gl_DrawID];
     uint draw_index          = command.v.draw_id;
     
-    Draw_p draw = globals.draw_buffer[draw_index];
-    Mesh_p mesh = globals.mesh_buffer[draw.v.mesh_index];
+    Draw_p draw = data.draw_buffer[draw_index];
+    Mesh_p mesh = data.mesh_buffer[draw.v.mesh_index];
     
     uint meshlet_index = meshlet_group_index * TaskWidth + thread_index + command.v.meshlet_offset;
     
@@ -49,7 +49,7 @@ void main() {
     if (BACKFACE_CULLING) {
         bool accept = false;
         if (meshlet_index < (command.v.meshlet_count + command.v.meshlet_offset)) {
-            Meshlet_p meshlet = globals.meshlet_buffer[meshlet_index];
+            Meshlet_p meshlet = data.meshlet_buffer[meshlet_index];
             
             vec3 cone_axis    = vec3(meshlet.v.cone_axis[0], meshlet.v.cone_axis[1], meshlet.v.cone_axis[2]) / 127.0;
             float cone_cutoff = float(meshlet.v.cone_cutoff) / 127.0;
@@ -61,8 +61,8 @@ void main() {
             vec3 view_camera_position = vec3(0);
             
             // @todo radius and cutoff might need scaling if the view_from_world matrix is more than translating
-            vec4 view_center    = globals.data.view_from_world * vec4(center, 1);
-            vec4 view_cone_axis = globals.data.view_from_world * vec4(cone_axis, 0);
+            vec4 view_center    = data.data.view_from_world * vec4(center, 1);
+            vec4 view_cone_axis = data.data.view_from_world * vec4(cone_axis, 0);
             
             accept = !cone_cull(view_center.xyz, radius, view_cone_axis.xyz, cone_cutoff, view_camera_position);
         }

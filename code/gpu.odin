@@ -223,7 +223,7 @@ Frame_Descriptor :: struct {
 ////////////////////////////////////////////////
 
 gpu_init :: proc (window: ^sdl.Window) -> Gpu {
-    result: Gpu
+    gpu: Gpu
     
     {
         vk.GetInstanceProcAddr = auto_cast sdl.Vulkan_GetVkGetInstanceProcAddr()
@@ -287,9 +287,9 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
                 }
             }
             
-            check(vk.CreateInstance(&instance_create_info, nil, &result.instance))
+            check(vk.CreateInstance(&instance_create_info, nil, &gpu.instance))
             
-            vk.load_proc_addresses_instance(result.instance)
+            vk.load_proc_addresses_instance(gpu.instance)
             
             assert(vk.GetPhysicalDeviceProperties2 != nil)
         }
@@ -300,10 +300,10 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             physical_devices: [dynamic; 128] vk.PhysicalDevice
             {
                 device_count: u32
-                check(vk.EnumeratePhysicalDevices(result.instance, &device_count, nil))
+                check(vk.EnumeratePhysicalDevices(gpu.instance, &device_count, nil))
                 assert(device_count <= cap(physical_devices))
                 resize(&physical_devices, device_count)
-                check(vk.EnumeratePhysicalDevices(result.instance, &device_count, raw_data(&physical_devices)))
+                check(vk.EnumeratePhysicalDevices(gpu.instance, &device_count, raw_data(&physical_devices)))
             }
             
             discrete: vk.PhysicalDevice
@@ -331,7 +331,7 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
                     continue
                 }
                 
-                if !sdl.Vulkan_GetPresentationSupport(auto_cast result.instance, auto_cast device, family_index_with_graphics) {
+                if !sdl.Vulkan_GetPresentationSupport(auto_cast gpu.instance, auto_cast device, family_index_with_graphics) {
                     continue
                 }
                 
@@ -352,24 +352,24 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             }
             assert(fallback != nil, "Could not find any compatible device :(")
             
-            result.physical_device = discrete != nil ? discrete : fallback
+            gpu.physical_device = discrete != nil ? discrete : fallback
         }
         
-        result.heap_properties = vk.PhysicalDeviceDescriptorHeapPropertiesEXT {
+        gpu.heap_properties = vk.PhysicalDeviceDescriptorHeapPropertiesEXT {
             sType = .PHYSICAL_DEVICE_DESCRIPTOR_HEAP_PROPERTIES_EXT,
         }
-        result.device_properties = vk.PhysicalDeviceProperties2 { 
+        gpu.device_properties = vk.PhysicalDeviceProperties2 { 
             sType = .PHYSICAL_DEVICE_PROPERTIES_2,
-            pNext = &result.heap_properties,
+            pNext = &gpu.heap_properties,
         }
-        vk.GetPhysicalDeviceProperties2(result.physical_device, &result.device_properties)
+        vk.GetPhysicalDeviceProperties2(gpu.physical_device, &gpu.device_properties)
         
-        fmt.printfln("Selected device: %v", cast(cstring) &result.device_properties.properties.deviceName[0])
-        assert(result.device_properties.properties.limits.timestampComputeAndGraphics)
+        fmt.printfln("Selected device: %v", cast(cstring) &gpu.device_properties.properties.deviceName[0])
+        assert(gpu.device_properties.properties.limits.timestampComputeAndGraphics)
         
         ////////////////////////////////////////////////
         
-        if !sdl.Vulkan_CreateSurface(window, auto_cast result.instance, nil, auto_cast &result.surface) {
+        if !sdl.Vulkan_CreateSurface(window, auto_cast gpu.instance, nil, auto_cast &gpu.surface) {
             loc := #location()
             fmt.printf("%v:%v:%v: SDL call returned %v", loc.file_path, loc.line, loc.column, sdl.GetError())
             os.exit(1)
@@ -387,6 +387,36 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             vk.EXT_DESCRIPTOR_HEAP_EXTENSION_NAME,
             vk.KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME,
             vk.KHR_SHADER_UNTYPED_POINTERS_EXTENSION_NAME,
+        }
+        
+        {
+            count: u32
+            vk.EnumerateDeviceExtensionProperties(gpu.physical_device, nil, &count, nil)
+            extensions := make([] vk.ExtensionProperties, count, context.temp_allocator)
+            vk.EnumerateDeviceExtensionProperties(gpu.physical_device, nil, &count, raw_data(extensions))
+            
+            desired_found := make([] b8, len(device_extensions), context.temp_allocator)
+            
+            fmt.printfln("Supported Extensions:")
+            for &it in extensions {
+                for desired, desired_index in device_extensions {
+                    if desired_found[desired_index] { continue }
+                    
+                    if desired == cast(cstring) &it.extensionName[0] {
+                        desired_found[desired_index] = true
+                        break
+                    }
+                }
+            }
+            
+            all_supported: bool = true
+            for found, index in desired_found {
+                if !found {
+                    fmt.printfln("Extension not supported: %v", device_extensions[index])
+                    all_supported = false
+                }
+            }
+            assert(all_supported)
         }
         
         f11 := vk.PhysicalDeviceVulkan11Features {
@@ -458,7 +488,6 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             descriptorHeap = true,
         }
         
-        // @correctness These features are still extensions, and we should query their availability.
         f_mesh := vk.PhysicalDeviceMeshShaderFeaturesEXT {
             sType = .PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
             
@@ -500,28 +529,28 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
         ppNext^ = &f_heap; ppNext = &f_heap.pNext
         ppNext^ = &f_pointer; ppNext = &f_pointer.pNext
         
-        check(vk.CreateDevice(result.physical_device, &device_create_info, nil, &result.device))
+        check(vk.CreateDevice(gpu.physical_device, &device_create_info, nil, &gpu.device))
         
-        vk.load_proc_addresses_device(result.device)
+        vk.load_proc_addresses_device(gpu.device)
         
         ////////////////////////////////////////////////
         
-        vk.GetDeviceQueue(result.device, queue_family_index, 0, &result.general_queue)
-        vk.GetDeviceQueue(result.device, queue_family_index, 1, &result.transfer_queue)
+        vk.GetDeviceQueue(gpu.device, queue_family_index, 0, &gpu.general_queue)
+        vk.GetDeviceQueue(gpu.device, queue_family_index, 1, &gpu.transfer_queue)
         
-        vk.GetPhysicalDeviceMemoryProperties(result.physical_device, &result.memory_properties)
+        vk.GetPhysicalDeviceMemoryProperties(gpu.physical_device, &gpu.memory_properties)
         
         ////////////////////////////////////////////////
         
         {
-            for &pool in result.command_pools {
+            for &pool in gpu.command_pools {
                 command_pool_create_info := vk.CommandPoolCreateInfo {
                     sType = .COMMAND_POOL_CREATE_INFO,
                     flags            = { .RESET_COMMAND_BUFFER },
                     queueFamilyIndex = queue_family_index,
                 }
                 
-                check(vk.CreateCommandPool(result.device, &command_pool_create_info, nil, &pool))
+                check(vk.CreateCommandPool(gpu.device, &command_pool_create_info, nil, &pool))
             }
             
             command_pool_create_info := vk.CommandPoolCreateInfo {
@@ -530,13 +559,13 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
                 queueFamilyIndex = queue_family_index,
             }
             
-            check(vk.CreateCommandPool(result.device, &command_pool_create_info, nil, &result.transfer_command_pool))
+            check(vk.CreateCommandPool(gpu.device, &command_pool_create_info, nil, &gpu.transfer_command_pool))
         }
         
         ////////////////////////////////////////////////
         
-        for &sema in result.image_aquired_semaphores {
-            sema = gpu_create_semaphore(&result)
+        for &sema in gpu.image_aquired_semaphores {
+            sema = gpu_create_semaphore(&gpu)
         }
     }
     
@@ -544,32 +573,32 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
     
     get_swapchain_format: {
         format_count: u32
-        check(vk.GetPhysicalDeviceSurfaceFormatsKHR(result.physical_device, result.surface, &format_count, nil))
+        check(vk.GetPhysicalDeviceSurfaceFormatsKHR(gpu.physical_device, gpu.surface, &format_count, nil))
         
         formats: [dynamic; 128] vk.SurfaceFormatKHR
         assert(format_count <= cap(formats))
         resize(&formats, format_count)
-        check(vk.GetPhysicalDeviceSurfaceFormatsKHR(result.physical_device, result.surface, &format_count, raw_data(&formats)))
+        check(vk.GetPhysicalDeviceSurfaceFormatsKHR(gpu.physical_device, gpu.surface, &format_count, raw_data(&formats)))
         
         if len(formats) == 1 && formats[0].format == .UNDEFINED {
-            result.swapchain_format = .R8G8B8A8_SRGB
+            gpu.swapchain_format = .R8G8B8A8_SRGB
             break get_swapchain_format
         }
         
         for it in formats {
             if it.format == .R8G8B8A8_SRGB || it.format == .B8G8R8A8_SRGB {
-                result.swapchain_format = it.format
+                gpu.swapchain_format = it.format
                 break get_swapchain_format
             }
         }
         
-        result.swapchain_format = formats[0].format
+        gpu.swapchain_format = formats[0].format
     }
     
-    ok := gpu_recreate_swapchain_if_needed(&result)
+    ok := gpu_recreate_swapchain_if_needed(&gpu)
     assert(ok)
     
-    return result
+    return gpu
 }
 
 gpu_deinit :: proc (gpu: ^Gpu) {
@@ -1127,13 +1156,13 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
             rasterizationSamples = { sample_count },
         },
         
-        // @todo(viktor): read from info
+        // @todo(viktor): not exposed in info. can this be dynamic state?
         pDepthStencilState = &vk.PipelineDepthStencilStateCreateInfo {
             sType = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
             depthTestEnable  = true,
             depthWriteEnable = true,
             depthCompareOp   = .GREATER,
-            // :Stencil: stencilTestEnable:     b32,
+            // :Stencil: stencilTestEnable
         },
         
         pColorBlendState = &vk.PipelineColorBlendStateCreateInfo {
@@ -1607,12 +1636,13 @@ gpu_dispatch :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor
 }
 
 gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, commands: GpuSlice($C), count: GpuAddress(u32), max_count: u32, command_offset: umm, push_constant: GpuAddress($T)) {
-    // @speed 
+    gpu_push_constants(cmd, frame_descriptor, push_constant)
+    
+    // @speed The extension device_address_commands would remove the need to ever have a vk.Buffer for any command.
+    // But its not supported on my RTX 3070 ._.
     commands, commands_base_offset := gpu_reflect_get_buffer(commands.p)
     count,    count_offset         := gpu_reflect_get_buffer(count.p)
     
-    gpu_push_constants(cmd, frame_descriptor, push_constant)
-    // @todo is vk.CmdDrawMeshTasksIndirectCount2EXT available? so we dont need to get the buffer objects
     vk.CmdDrawMeshTasksIndirectCountEXT(cmd, commands, commands_base_offset + cast(vk.DeviceSize) command_offset, count, count_offset, max_count, size_of(C))
 }
 
