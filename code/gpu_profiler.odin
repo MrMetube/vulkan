@@ -74,14 +74,7 @@ gpu_profile_write_timestamp :: proc (kind: Profile_Event_Kind, zone_index: int) 
     query_index := cast(u32) len(the_gpu_profiler.queries)
     append(&the_gpu_profiler.queries, Profile_Query { zone_index, kind })
     
-    stage: vk.PipelineStageFlags2
-    switch kind {
-    case .BeginZone: stage = { .TOP_OF_PIPE }
-    case .EndZone:   stage = { .BOTTOM_OF_PIPE }
-    case .UserEvent: unreachable()
-    }
-    
-    vk.CmdWriteTimestamp2(the_gpu_profiler.cb, stage, the_gpu_profiler.pool, query_index)
+    vk.CmdWriteTimestamp2(the_gpu_profiler.cb, { .ALL_COMMANDS }, the_gpu_profiler.pool, query_index)
 }
 
 gpu_profile_collate_times :: proc (gpu: ^Gpu, print: bool) {

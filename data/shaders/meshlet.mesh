@@ -1,12 +1,16 @@
 #version 460
 
-#extension GL_EXT_mesh_shader : require
 #extension GL_EXT_shader_explicit_arithmetic_types: require
 #extension GL_ARB_shader_draw_parameters: require
+#extension GL_EXT_mesh_shader: require
+
+#extension GL_NV_explicit_typecast: require
 
 #include "common.glsl"
 
 #define MeshWidth 32
+
+#define Cull 1
 
 ////////////////////////////////////////////////
 
@@ -35,35 +39,36 @@ uint hash(uint a) {
 
 ////////////////////////////////////////////////
 
-layout(local_size_x = MeshWidth, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 layout(triangles, max_vertices = MaxVertices, max_primitives = MaxTriangles) out;
 
 layout(location = 0) flat   out Mesh_Result_Flat mesh_result_flat[];
 layout(location = 1) smooth out Mesh_Result_Smooth mesh_result_smooth[];
 
+#if Cull
+shared vec3 vertex_clip[MaxVertices];
+#endif // Cull
+
 void main() {
-    uint thread_index   = gl_LocalInvocationID.x;
+    uint thread_index   = gl_LocalInvocationIndex;
 	uint meshlet_index  = task_result.indices[gl_WorkGroupID.x];
-    uint draw_index     = task_result.draw_index;
+    uint group_size     = gl_WorkGroupSize.x;
     uint meshlet_offset = task_result.meshlet_offset;
     
-    Draw_p draw = globals.draw_buffer[draw_index];
+    Draw_p draw = globals.draw_buffer[task_result.draw_index];
     
-    // @cleanup can this even happen here anymore?
-    // if (meshlet_index < (draw.v.meshlet_count + meshlet_offset)) {
     Meshlet_p meshlet = globals.meshlet_buffer[meshlet_index];
     
     uint vertex_count   = meshlet.v.vertex_count;
     uint triangle_count = meshlet.v.triangle_count;
     
-    if (thread_index == 0) {
-        SetMeshOutputsEXT(vertex_count, triangle_count);
-    }
+    SetMeshOutputsEXT(vertex_count, triangle_count);
     
     uint vertex_offset = meshlet.v.data_offset;
     uint index_offset  = vertex_offset + vertex_count;
     
-    for (uint i = thread_index; i < vertex_count; i += MeshWidth) {
+    // @todo make the group size 64 and the max vertices 64, then we dont need a loop for 2 iterations per thread
+    for (uint i = thread_index; i < vertex_count; i += group_size) {
         uint vertex_index = draw.v.vertex_offset + globals.meshlet_data_buffer[vertex_offset + i].v;
         Vertex_p vertex = globals.vertex_buffer[vertex_index];
         
@@ -71,6 +76,9 @@ void main() {
         vec3 world_p = transform(draw.v.orientation, draw.v.scale, draw.v.p, model_p);
         vec4 view_p = globals.data.view_from_world * vec4(world_p, 1.0);
         vec4 screen_p = globals.data.screen_from_view * view_p;
+        // :ViewSpace: vulkan uses a inverted y-axis, so we invert it back to the regular y+ = up here
+        // @todo encode this into the screen_from_view projection
+        screen_p = screen_p * vec4(1, -1, 1, 1);
         
         vec3 model_n = vec3(vertex.v.n[0], vertex.v.n[1], vertex.v.n[2]) / 127.5 - 1;
         vec3 world_n = rotate(draw.v.orientation, model_n);
@@ -86,39 +94,45 @@ void main() {
         result.uv     = vertex.v.uv;
         result.normal = view_n;
         
-        // vulkan uses a inverted y-axis, so we invert it back to the regular y+ = up here
-        gl_MeshVerticesEXT[i].gl_Position = screen_p * vec4(1, -1, 1, 1);
+        gl_MeshVerticesEXT[i].gl_Position = screen_p;
         
         #if Debug
             uint mhash = hash(meshlet_index);
             result.debug_color = vec3(float(mhash & 255), float((mhash >> 8) & 255), float((mhash >> 16) & 255)) / 255.0;
         #endif // Debug
         
+        #if Cull
+            vertex_clip[i] = vec3(screen_p.xy / screen_p.w, screen_p.w);
+        #endif // Cull
+        
         mesh_result_smooth[i] = result;
         mesh_result_flat[i].texture_index = draw.v.texture_index;
     }
     
-    uint group_count = (triangle_count * 3 + 3) / 4;
-    for (uint i = thread_index; i < group_count; i += MeshWidth) {
-        uint word_index = index_offset + (i * 3);
+    #if Cull
+        barrier();
+    #endif // Cull
+    
+    uint8_t_p meshlet_data_bytes = uint8_t_p(globals.meshlet_data_buffer);
+    for (uint i = thread_index; i < triangle_count; i += group_size) {
+        uint offset = index_offset * 4 + i * 3;
         
-        uint u0 = globals.meshlet_data_buffer[word_index + 0].v;
-        uint u1 = globals.meshlet_data_buffer[word_index + 1].v;
-        uint u2 = globals.meshlet_data_buffer[word_index + 2].v;
+        uint triangle_index = i;
         
-        uint triangle_index = i * 4;
+        uint a = meshlet_data_bytes[offset + 0].v;
+        uint b = meshlet_data_bytes[offset + 1].v;
+        uint c = meshlet_data_bytes[offset + 2].v;
+        gl_PrimitiveTriangleIndicesEXT[triangle_index + 0] = uvec3(a, b, c);
         
-        if (triangle_index + 0 < triangle_count) {
-            gl_PrimitiveTriangleIndicesEXT[triangle_index + 0] = uvec3((u0 >>  0) & 0xFF, (u0 >>  8) & 0xFF, (u0 >> 16) & 0xFF);
-        }
-        if (triangle_index + 1 < triangle_count) {
-            gl_PrimitiveTriangleIndicesEXT[triangle_index + 1] = uvec3((u0 >> 24) & 0xFF, (u1 >>  0) & 0xFF, (u1 >>  8) & 0xFF);
-        }
-        if (triangle_index + 2 < triangle_count) {
-            gl_PrimitiveTriangleIndicesEXT[triangle_index + 2] = uvec3((u1 >> 16) & 0xFF, (u1 >> 24) & 0xFF, (u2 >>  0) & 0xFF);
-        }
-        if (triangle_index + 3 < triangle_count) {
-            gl_PrimitiveTriangleIndicesEXT[triangle_index + 3] = uvec3((u2 >>  8) & 0xFF, (u2 >> 16) & 0xFF, (u2 >> 24) & 0xFF);
-        }
+        #if Cull
+            bool culled = false;
+            
+            culled = culled || (vertex_clip[a].z < 0 && vertex_clip[b].z < 0 && vertex_clip[c].z < 0);
+            
+            gl_MeshPrimitivesEXT[triangle_index+0].gl_CullPrimitiveEXT = culled;
+            gl_MeshPrimitivesEXT[triangle_index+1].gl_CullPrimitiveEXT = culled;
+            gl_MeshPrimitivesEXT[triangle_index+2].gl_CullPrimitiveEXT = culled;
+            gl_MeshPrimitivesEXT[triangle_index+3].gl_CullPrimitiveEXT = culled;
+        #endif // Cull
     }
 }

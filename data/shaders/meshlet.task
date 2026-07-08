@@ -1,9 +1,8 @@
 #version 460
 
-#extension GL_EXT_mesh_shader: require
 #extension GL_EXT_shader_explicit_arithmetic_types: require
 #extension GL_ARB_shader_draw_parameters: require
-#extension GL_KHR_shader_subgroup_ballot: require
+#extension GL_EXT_mesh_shader: require
 
 #include "common.glsl"
 
@@ -27,11 +26,14 @@ layout(local_size_x = TaskWidth, local_size_y = 1, local_size_z = 1) in;
 
 taskPayloadSharedEXT Task_Result task_result;
 
-#define BACKFACE_CULLING true
+#define BackfaceCulling true
+
+#if BackfaceCulling
+shared int shared_count;
+#endif // BackfaceCulling
 
 void main() {
     uint meshlet_group_index = gl_WorkGroupID.x;
-    uint thread_index        = gl_LocalInvocationID.x;
     uint meshlet_group_size  = gl_WorkGroupSize.x;
     Draw_Command_p command   = data.draw_command_buffer[gl_DrawID];
     uint draw_index          = command.v.draw_id;
@@ -40,13 +42,14 @@ void main() {
     Draw_p draw = data.draw_buffer[draw_index];
     Mesh_p mesh = data.mesh_buffer[draw.v.mesh_index];
     
-    if (thread_index == 0) {
-        task_result.draw_index     = draw_index;
-        task_result.meshlet_offset = command.v.meshlet_offset;
-    }
+    task_result.draw_index     = draw_index;
+    task_result.meshlet_offset = command.v.meshlet_offset;
     
-    uint count;
-    if (BACKFACE_CULLING) {
+    #if BackfaceCulling
+    
+        shared_count = 0;
+        barrier();
+        
         bool accept = false;
         if (meshlet_index < (command.v.meshlet_count + command.v.meshlet_offset)) {
             Meshlet_p meshlet = data.meshlet_buffer[meshlet_index];
@@ -67,18 +70,23 @@ void main() {
             accept = !cone_cull(view_center.xyz, radius, view_cone_axis.xyz, cone_cutoff, view_camera_position);
         }
         
-        uvec4 ballot = subgroupBallot(accept);
-        uint index   = subgroupBallotExclusiveBitCount(ballot); // how many threads, before this thread, had accept==true
-        count        = subgroupBallotBitCount(ballot);          // how many threads, in total, had accept==true
-        
         if (accept) {
+            uint index = atomicAdd(shared_count, 1);
             task_result.indices[index] = meshlet_index;
         }
-    } else {
+        
+        barrier(); // for shared_count
+        
+        EmitMeshTasksEXT(shared_count, 1, 1);
+        
+    #else // BackfaceCulling
+    
+        uint thread_index = gl_LocalInvocationIndex;
         task_result.indices[thread_index] = meshlet_index;
         uint meshlet_index_of_thread_0 = meshlet_group_index * meshlet_group_size + 0;
-        count = min(meshlet_group_size, command.v.meshlet_count - (meshlet_index_of_thread_0));
-    }
+        uint count = min(meshlet_group_size, command.v.meshlet_count - (meshlet_index_of_thread_0));
+        EmitMeshTasksEXT(count, 1, 1);
+        
+    #endif // BackfaceCulling
     
-    EmitMeshTasksEXT(count, 1, 1);
 }

@@ -62,6 +62,7 @@ generate_shader_api :: proc (output_file: string) {
     collect_types(&simple_types, &reference_types, Cull_Globals)
     collect_types(&simple_types, &reference_types, Draw_Globals)
     collect_types(&simple_types, &reference_types, Depth_Data)
+    reference_types["uint8_t"] = {}
     append_reference_types(&builder, reference_types)
     
     // nested structs
@@ -147,7 +148,8 @@ generate_shader_api :: proc (output_file: string) {
         append_location(builder, loc)
         
         for type_name, _ in refs {
-            alignment :: 4 // @todo(viktor): unhardcode the alignment once we know the inner type
+            alignment := 4 // @todo(viktor): unhardcode the alignment once we know the inner type
+            if type_name == "uint8_t" { alignment = 1 } // @hack
             fmt.sbprintf(builder, "layout(buffer_reference, buffer_reference_align = %v, std430, scalar) buffer %v_p {{ %v v; };\n", alignment, type_name, type_name)
         }
         fmt.sbprintf(builder, "\n")
