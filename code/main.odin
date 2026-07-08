@@ -347,7 +347,7 @@ main :: proc () {
     
     for &pos, index in draw_data.light_pos {
         t := clamp_01_to_range(cast(f32) 0, cast(f32) len(draw_data.light_pos), cast(f32) index)
-        pos.xyz = v3{0, -10, 10}
+        pos.xyz = v3{0, 10, 10}
         pos.xz += arm(t * Tau)
     }
     

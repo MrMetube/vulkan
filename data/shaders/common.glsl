@@ -27,13 +27,14 @@ struct Task_Result {
     uint meshlet_offset;
 };
 
-
 struct Mesh_Result_Smooth {
-    vec3 normal;
-    vec2 uv;
     vec3 light_vec[4];
+    vec3 normal;
     vec3 view_vec;
+    vec2 uv;
+#if Debug
     vec3 debug_color; // @cleanup
+#endif // Debug
 };
 
 struct Mesh_Result_Flat {
@@ -42,7 +43,7 @@ struct Mesh_Result_Flat {
 
 ////////////////////////////////////////////////
 
-vec3 rotate (vec4 q, vec3 v) {
+vec3 rotate(vec4 q, vec3 v) {
     return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
 }
 

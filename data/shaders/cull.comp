@@ -73,9 +73,10 @@ void main() {
     uint_p draw_command_count = globals.draw_command_count;
     
     vec3  world_center = transform(draw.v.orientation, draw.v.scale, draw.v.p, mesh.v.center);
-    float radius       = draw.v.scale * mesh.v.radius; // @todo scale by view_from_world?
+    float radius       = draw.v.scale * mesh.v.radius;
     
     vec4 view_center = globals.data.view_from_world * vec4(world_center, 1);
+    // @todo scale radius by view_from_world?
     
     bool visible = true;
     if (frustum_culling_enabled) {

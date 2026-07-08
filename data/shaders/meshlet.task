@@ -1,6 +1,6 @@
 #version 460
 
-#extension GL_EXT_mesh_shader : require
+#extension GL_EXT_mesh_shader: require
 #extension GL_EXT_shader_explicit_arithmetic_types: require
 #extension GL_ARB_shader_draw_parameters: require
 #extension GL_KHR_shader_subgroup_ballot: require
@@ -32,13 +32,13 @@ taskPayloadSharedEXT Task_Result task_result;
 void main() {
     uint meshlet_group_index = gl_WorkGroupID.x;
     uint thread_index        = gl_LocalInvocationID.x;
+    uint meshlet_group_size  = gl_WorkGroupSize.x;
     Draw_Command_p command   = data.draw_command_buffer[gl_DrawID];
     uint draw_index          = command.v.draw_id;
+    uint meshlet_index       = gl_GlobalInvocationID.x + command.v.meshlet_offset;
     
     Draw_p draw = data.draw_buffer[draw_index];
     Mesh_p mesh = data.mesh_buffer[draw.v.mesh_index];
-    
-    uint meshlet_index = meshlet_group_index * TaskWidth + thread_index + command.v.meshlet_offset;
     
     if (thread_index == 0) {
         task_result.draw_index     = draw_index;
@@ -76,8 +76,8 @@ void main() {
         }
     } else {
         task_result.indices[thread_index] = meshlet_index;
-        
-        count = min(TaskWidth, command.v.meshlet_count - (meshlet_group_index * TaskWidth + 0));
+        uint meshlet_index_of_thread_0 = meshlet_group_index * meshlet_group_size + 0;
+        count = min(meshlet_group_size, command.v.meshlet_count - (meshlet_index_of_thread_0));
     }
     
     EmitMeshTasksEXT(count, 1, 1);

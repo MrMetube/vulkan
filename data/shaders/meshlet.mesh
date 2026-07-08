@@ -42,9 +42,9 @@ layout(location = 0) flat   out Mesh_Result_Flat mesh_result_flat[];
 layout(location = 1) smooth out Mesh_Result_Smooth mesh_result_smooth[];
 
 void main() {
-    uint thread_index  = gl_LocalInvocationID.x;
-	uint meshlet_index = task_result.indices[gl_WorkGroupID.x];
-    uint draw_index    = task_result.draw_index;
+    uint thread_index   = gl_LocalInvocationID.x;
+	uint meshlet_index  = task_result.indices[gl_WorkGroupID.x];
+    uint draw_index     = task_result.draw_index;
     uint meshlet_offset = task_result.meshlet_offset;
     
     Draw_p draw = globals.draw_buffer[draw_index];
@@ -67,33 +67,32 @@ void main() {
         uint vertex_index = draw.v.vertex_offset + globals.meshlet_data_buffer[vertex_offset + i].v;
         Vertex_p vertex = globals.vertex_buffer[vertex_index];
         
-        vec3 p = vertex.v.p;
-        p = rotate(draw.v.orientation, p);
-        p *= draw.v.scale;
-        p += draw.v.p;
-        vec4 view_p = vec4(p, 1.0);
+        vec3 model_p = vertex.v.p;
+        vec3 world_p = transform(draw.v.orientation, draw.v.scale, draw.v.p, model_p);
+        vec4 view_p = globals.data.view_from_world * vec4(world_p, 1.0);
+        vec4 screen_p = globals.data.screen_from_view * view_p;
         
-        vec3 n = vec3(vertex.v.n[0], vertex.v.n[1], vertex.v.n[2]) / 127.0 - 1.0;
-        
+        vec3 model_n = vec3(vertex.v.n[0], vertex.v.n[1], vertex.v.n[2]) / 127.5 - 1;
+        vec3 world_n = rotate(draw.v.orientation, model_n);
+        vec3 view_n  = mat3(globals.data.view_from_world) * world_n;
         Mesh_Result_Smooth result;
-        view_p = globals.data.view_from_world * view_p;
-        
-        vec4 position = globals.data.screen_from_view * view_p;
-        result.normal = mat3(globals.data.view_from_world) * n;
-        result.uv     = vertex.v.uv;
         
         for (int li = 0; li < 4; li++) {
-            result.light_vec[li] = globals.data.light_pos[li].xyz - view_p.xyz;
+            vec4 world_light_p  = vec4(globals.data.light_pos[li].xyz, 1);
+            vec4 view_light_p   = globals.data.view_from_world * world_light_p;
+            result.light_vec[li] =  view_light_p.xyz - view_p.xyz;
         }
         result.view_vec = -view_p.xyz;
-        
-        if (Debug) {
-            uint mhash = hash(meshlet_index);
-            result.debug_color = vec3(float(mhash & 255), float((mhash >> 8) & 255), float((mhash >> 16) & 255)) / 255.0;
-        }
+        result.uv     = vertex.v.uv;
+        result.normal = view_n;
         
         // vulkan uses a inverted y-axis, so we invert it back to the regular y+ = up here
-        gl_MeshVerticesEXT[i].gl_Position = position * vec4(1, -1, 1, 1);
+        gl_MeshVerticesEXT[i].gl_Position = screen_p * vec4(1, -1, 1, 1);
+        
+        #if Debug
+            uint mhash = hash(meshlet_index);
+            result.debug_color = vec3(float(mhash & 255), float((mhash >> 8) & 255), float((mhash >> 16) & 255)) / 255.0;
+        #endif // Debug
         
         mesh_result_smooth[i] = result;
         mesh_result_flat[i].texture_index = draw.v.texture_index;
