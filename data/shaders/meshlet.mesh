@@ -115,23 +115,39 @@ void main() {
     for (uint i = thread_index; i < triangle_count; i += group_size) {
         uint offset = index_offset * 4 + i * 3;
         
-        uint a = meshlet_data_bytes[offset + 0].v;
-        uint b = meshlet_data_bytes[offset + 1].v;
-        uint c = meshlet_data_bytes[offset + 2].v;
-        gl_PrimitiveTriangleIndicesEXT[i] = uvec3(a, b, c);
+        uint ia = meshlet_data_bytes[offset + 0].v;
+        uint ib = meshlet_data_bytes[offset + 1].v;
+        uint ic = meshlet_data_bytes[offset + 2].v;
+        gl_PrimitiveTriangleIndicesEXT[i] = uvec3(ia, ib, ic);
         
         #if Cull
             bool culled = false;
             
-            vec2 ab = vertex_screen[b].xy - vertex_screen[a].xy;
-            vec2 ac = vertex_screen[c].xy - vertex_screen[a].xy;
+            vec2 a = vertex_screen[ia].xy;
+            vec2 b = vertex_screen[ib].xy;
+            vec2 c = vertex_screen[ic].xy;
             
-            // :ViewSpace: negative if facing away from the screen, but as the y-axis and therefore this calculation is negated
+            vec2 ab = b - a;
+            vec2 ac = c - a;
+            
+            // :ViewSpace: The signed area is negative if facing away from the screen, but we invert the y-axis
+            // therefore this calculation is negated
             float signed_triangle_area = -(ab.x * ac.y - ab.y * ac.x);
             culled = culled || (signed_triangle_area <= 0);
             
+            // small primitive culling
+            vec2 b_min = (min(a, min(b, c)) * 0.5 + 0.5) * globals.data.screen_size;
+            vec2 b_max = (max(a, max(b, c)) * 0.5 + 0.5) * globals.data.screen_size;
+            float subpixel_precision = 1 / 256.0; // This can be set to 1 / 2^subpixelPrecisionBits
+            
+            // This is slightly imprecise, as in it doesn't fully match hardware behaviour and is both too loose and too strict.
+            culled = culled || (
+                round(b_min.x - subpixel_precision) == round(b_max.x + subpixel_precision) || 
+                round(b_min.y - subpixel_precision) == round(b_max.y + subpixel_precision)
+            );
+            
             // the previous computations are only valid if all vertices are in front of the perspective plane
-            culled = culled && (vertex_screen[a].z > 0 && vertex_screen[b].z > 0 && vertex_screen[c].z > 0);
+            culled = culled && (vertex_screen[ia].z > 0 && vertex_screen[ib].z > 0 && vertex_screen[ic].z > 0);
             
             gl_MeshPrimitivesEXT[i].gl_CullPrimitiveEXT = culled;
         #endif // Cull
