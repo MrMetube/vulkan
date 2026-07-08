@@ -10,23 +10,17 @@ import "core:strings"
 import vk "../lib/vulkan"
 
 Shader :: struct {
-    input:  string, 
-    
+    input: string, 
     bytes: [] u8,
     
     parsed: struct {
-        stage: vk.ShaderStageFlag,
-        resource_mask:      Shader_Resource_Mask,
-        resource_types:     [32] vk.DescriptorType,
-        use_push_constants: bool,
-        local_size:         uv3,
+        stage:      vk.ShaderStageFlag,
+        local_size: uv3,
     },
-        
+    
     source_watcher: Watcher_Id,
     common_watcher: Watcher_Id,
 }
-
-Shader_Resource_Mask :: bit_set[cast(u32) 0..<32; u32]
 
 /*
     simple struct: 
@@ -315,27 +309,6 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
                     local_size.z = cast(i32) code[5]
                 }
                 
-            case .Decorate:
-                id := code[1]
-                decoration := cast(SpvDecoration) code[2]
-                
-                #partial switch decoration {
-                case .DescriptorSet:
-                    ids[id].set = code[3]
-                case .Binding:
-                    ids[id].binding = code[3]
-                }
-                
-            case .TypeStruct, .TypeImage, .TypeSampler, .TypeSampledImage:
-                id := code[1]
-                assert(ids[id].opcode == {})
-                
-                ids[id].opcode = opcode
-                
-                if opcode == .TypeImage {
-                    ids[id].sampled = code[7]
-                }
-                
             case .Constant:
                 id := code[2]
                 assert(ids[id].opcode == {})
@@ -343,61 +316,9 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
                 ids[id].opcode   = opcode
                 ids[id].type_id  = code[1]
                 ids[id].constant = code[3]
-                    
-            case .Variable:
-                id := code[2]
-                assert(ids[id].opcode == {})
-                
-                ids[id].opcode        = opcode
-                ids[id].type_id       = code[1]
-                ids[id].storage_class = cast(SpvStorageClass) code[3]
-                
-            case .TypePointer:
-                id := code[1]
-                assert(ids[id].opcode == {})
-                
-                ids[id].opcode        = opcode
-                ids[id].type_id       = code[3]
-                ids[id].storage_class = cast(SpvStorageClass) code[2]
             }
             
             code = code[word_count:]
-        }
-        
-        for id in ids {
-            if id.opcode == .Variable && id.storage_class in (bit_set[SpvStorageClass] { .Uniform, .UniformConstant, .StorageBuffer}) {
-                if id.set == 0 {
-                    assert(id.binding < 32)
-                    assert(ids[id.type_id].opcode == .TypePointer)
-                    
-                    assert(id.binding not_in result.parsed.resource_mask)
-                    
-                    type_kind := ids[ids[id.type_id].type_id].opcode
-                    sampled   := ids[ids[id.type_id].type_id].sampled
-                    
-                    #partial switch type_kind {
-                    case .TypeStruct:       
-                        result.parsed.resource_types[id.binding] = .STORAGE_BUFFER
-                        result.parsed.resource_mask += { id.binding }
-                        
-                    case .TypeImage:        
-                        result.parsed.resource_types[id.binding] = sampled == 1 ? .SAMPLED_IMAGE : .STORAGE_IMAGE
-                        result.parsed.resource_mask += { id.binding }
-                        
-                    case .TypeSampler:      
-                        result.parsed.resource_types[id.binding] = .SAMPLER
-                        result.parsed.resource_mask += { id.binding }
-                        
-                    case .TypeSampledImage: 
-                        result.parsed.resource_types[id.binding] = .COMBINED_IMAGE_SAMPLER
-                        result.parsed.resource_mask += { id.binding }
-                    }
-                }
-            }
-            
-            if id.opcode == .Variable && id.storage_class == .PushConstant {
-                result.parsed.use_push_constants = true
-            }
         }
         
         if result.parsed.stage == .COMPUTE {

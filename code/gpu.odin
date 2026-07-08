@@ -956,19 +956,15 @@ Specialization_Constant :: struct #raw_union {
     b: b32,
 }
 
-gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, descriptor_size, sampler_size: u32, constants: [] Specialization_Constant = nil, sampler_hack_names: [] string = {}) -> Pipeline {
+gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil) -> Pipeline {
     assert(compute.parsed.stage == .COMPUTE)
     compute := compute
     
     result: Pipeline
     result.bind_point = .COMPUTE
     
-    resource_mask  := compute.parsed.resource_mask
-    resource_types := compute.parsed.resource_types
-    
-    mappings := [32] vk.DescriptorSetAndBindingMappingEXT {}
-    heap_mapping: vk.ShaderDescriptorSetAndBindingMappingInfoEXT
-    heap_mapping = generate_heap_mappings(resource_mask, resource_types, sampler_hack_names, size_of(vk.DeviceAddress), descriptor_size, sampler_size, &mappings)
+    mappings := [2] vk.DescriptorSetAndBindingMappingEXT {}
+    heap_mapping := get_universal_heap_mapping(heap.resource_size, &mappings)
     
     specialization_entries: [dynamic; 32] vk.SpecializationMapEntry
     specialization_info := fill_specialization_constants(&specialization_entries, constants)
@@ -1003,47 +999,43 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, descriptor_size
     return result
 }
 
-gpu_create_graphics_pipeline :: proc (gpu: ^Gpu, vertex, fragment: Shader, info: Raster_Desc, descriptor_size, sampler_size: u32) -> Pipeline {
+gpu_create_graphics_pipeline :: proc (gpu: ^Gpu, vertex, fragment: Shader, info: Raster_Desc, heap: Descriptor_Heap) -> Pipeline {
     assert(vertex.parsed.stage   == .VERTEX)
     assert(fragment.parsed.stage == .FRAGMENT)
     
     result: Pipeline
-    gpu_create_graphics_pipeline_common(gpu, &result, info, descriptor_size, sampler_size, vertex, fragment)
+    gpu_create_graphics_pipeline_common(gpu, &result, info, heap, vertex, fragment)
     
     return result
 }
 
-gpu_create_graphics_meshlet_pipeline :: proc { gpu_create_graphics_meshlet_pipeline_tmp, gpu_create_graphics_meshlet_pipeline_mp }
-
-gpu_create_graphics_meshlet_pipeline_tmp :: proc (gpu: ^Gpu, task, mesh, frag: Shader, info: Raster_Desc, descriptor_size, sampler_size: u32, sampler_hack_names := [] string {}) -> Pipeline {
+gpu_create_graphics_meshlet_pipeline :: proc { gpu_create_graphics_meshlet_pipeline_mesh, gpu_create_graphics_meshlet_pipeline_task }
+gpu_create_graphics_meshlet_pipeline_task :: proc (gpu: ^Gpu, task, mesh, frag: Shader, info: Raster_Desc, heap: Descriptor_Heap) -> Pipeline {
     assert(task.parsed.stage == .TASK_EXT)
     assert(mesh.parsed.stage == .MESH_EXT)
     assert(frag.parsed.stage == .FRAGMENT)
     
     result: Pipeline
-    gpu_create_graphics_pipeline_common(gpu, &result, info, descriptor_size, sampler_size, task, mesh, frag, sampler_hack_names = sampler_hack_names)
+    gpu_create_graphics_pipeline_common(gpu, &result, info, heap, task, mesh, frag)
     
     return result
 }
 
-gpu_create_graphics_meshlet_pipeline_mp :: proc (gpu: ^Gpu, mesh, frag: Shader, info: Raster_Desc, descriptor_size, sampler_size: u32) -> Pipeline {
+gpu_create_graphics_meshlet_pipeline_mesh :: proc (gpu: ^Gpu, mesh, frag: Shader, info: Raster_Desc, heap: Descriptor_Heap) -> Pipeline {
     assert(mesh.parsed.stage == .MESH_EXT)
     assert(frag.parsed.stage == .FRAGMENT)
     
     result: Pipeline
-    gpu_create_graphics_pipeline_common(gpu, &result, info, descriptor_size, sampler_size, mesh, frag)
+    gpu_create_graphics_pipeline_common(gpu, &result, info, heap, mesh, frag)
     
     return result
 }
 
-gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info: Raster_Desc, descriptor_size, sampler_size: u32, shaders: ..Shader, sampler_hack_names := [] string {}) {
-    resource_types, resource_mask := gather_descriptor_resources(..shaders)
-    
+gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info: Raster_Desc, heap: Descriptor_Heap, shaders: ..Shader) {
     result.bind_point = .GRAPHICS
     
-    mappings := [32] vk.DescriptorSetAndBindingMappingEXT {}
-    heap_mapping: vk.ShaderDescriptorSetAndBindingMappingInfoEXT
-    heap_mapping = generate_heap_mappings(resource_mask, resource_types, sampler_hack_names, size_of(vk.DeviceAddress), descriptor_size, sampler_size, &mappings)
+    mappings := [2] vk.DescriptorSetAndBindingMappingEXT {}
+    heap_mapping := get_universal_heap_mapping(heap.resource_size, &mappings)
     
     shader_stages: [dynamic; 8] vk.PipelineShaderStageCreateInfo
     module_infos:  [dynamic; 8] vk.ShaderModuleCreateInfo
@@ -1069,7 +1061,7 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
     color_formats: [dynamic; 32] Format
     for target in info.color_targets { append(&color_formats, target.format) }
     
-    // @todo(viktor): this has a bunch more fields
+    // @incomplete this has a bunch more fields
     color_attachments: [dynamic; 32] vk.PipelineColorBlendAttachmentState
     for target in info.color_targets {
         attachment := vk.PipelineColorBlendAttachmentState {
@@ -1137,7 +1129,7 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
             topology = info.topology,
         },
         
-        // @study can there be more then 1 with dynamic states?
+        // @study can there be more than 1 with dynamic states?
         pViewportState = &vk.PipelineViewportStateCreateInfo {
             sType = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
             viewportCount = 1,
@@ -1205,24 +1197,6 @@ destroy_pipeline :: proc (gpu: ^Gpu, pipeline: Pipeline) {
     }
 }
 
-gather_descriptor_resources :: proc (shaders: ..Shader) -> ([32] vk.DescriptorType, Shader_Resource_Mask) {
-    resource_types: [32] vk.DescriptorType
-    resource_mask: Shader_Resource_Mask
-    
-    for shader in shaders {
-        for i in shader.parsed.resource_mask {
-            if i in resource_mask {
-                assert(resource_types[i] == shader.parsed.resource_types[i], "Mismatching binding types in shaders")
-            } else {
-                resource_types[i] = shader.parsed.resource_types[i]
-                resource_mask += { i }
-            }
-        }
-    }
-    
-    return resource_types, resource_mask
-}
-
 fill_specialization_constants :: proc (specialization_entries: ^[dynamic; 32] vk.SpecializationMapEntry, constants: [] Specialization_Constant) -> vk.SpecializationInfo {
     for constant, i in constants {
         append(specialization_entries, vk.SpecializationMapEntry {
@@ -1242,89 +1216,32 @@ fill_specialization_constants :: proc (specialization_entries: ^[dynamic; 32] vk
     return specialization_info
 }
 
-generate_heap_mappings :: proc (resource_mask: Shader_Resource_Mask, resource_types: [32] vk.DescriptorType, resource_names: [] string, push_constant_size: u32, descriptor_size, sampler_size: u32, mappings: ^[32] vk.DescriptorSetAndBindingMappingEXT) -> vk.ShaderDescriptorSetAndBindingMappingInfoEXT {
-    mapping_offset: u32
-    descriptor_offset: u32
-    // :SamplerHack: we define name->id correspondence here for now; this will move to shader code when descriptor heaps conquer the world
-	sampler_names := [] string {
-		"texture_sampler",
-		"filter_sampler",
-		"depth_sampler",
-	}
-    
-    // push descriptors
-    for i in cast(u32) 0..<32 {
-        if i in resource_mask {
-            mapping := &mappings[mapping_offset]
-            mapping_offset += 1
-            
-             mapping^ = {
-                sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
-                
-                descriptorSet = 0,
-                firstBinding  = i,
-                bindingCount  = 1,
-                resourceMask  = vk.SpirvResourceTypeFlagsEXT_ALL,
-            }
-            
-            if resource_types[i] == .SAMPLER {
-                mapping.source = .HEAP_WITH_CONSTANT_OFFSET
-                
-                // :SamplerHack: for now we map samplers by name to avoid having to bind them via push path
-				// in the future we will change the shader code to carry the name->binding correspondence statically
-                
-                for name, name_index in sampler_names {
-                    if resource_names[i] == name {
-                        mapping.sourceData.constantOffset.heapOffset = cast(u32) name_index * descriptor_size
-                    }
-                }
-            } else {
-                mapping.source = .HEAP_WITH_PUSH_INDEX
-                mapping.sourceData.pushIndex = {
-                    heapOffset = descriptor_offset * descriptor_size,
-                    pushOffset = push_constant_size,
-                    heapIndexStride = descriptor_size,
-                    heapArrayStride = descriptor_size,
-                }
-                
-                descriptor_offset += 1
-            }
-        }
+get_universal_heap_mapping :: proc (descriptor_size: u32, mappings: ^[2] vk.DescriptorSetAndBindingMappingEXT) -> vk.ShaderDescriptorSetAndBindingMappingInfoEXT {
+    mappings[0] = { // texture array descriptor
+        sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
+        descriptorSet = 1,
+        firstBinding = 0,
+        bindingCount = 1,
+        resourceMask =  vk.SpirvResourceTypeFlagsEXT_ALL,
+        source = .HEAP_WITH_CONSTANT_OFFSET,
+        
+        sourceData = { constantOffset = { heapArrayStride = descriptor_size } },
     }
-    
-	{ // texture array descriptor
-		mapping := &mappings[mapping_offset]
-        mapping_offset += 1
-        
-		mapping^ = {
-            sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
-            descriptorSet = 1,
-            firstBinding = 0,
-            bindingCount = 1,
-            resourceMask =  vk.SpirvResourceTypeFlagsEXT_ALL,
-            source = .HEAP_WITH_CONSTANT_OFFSET,
-        }
-		mapping.sourceData.constantOffset.heapArrayStride = descriptor_size
-	}
 	
-	{ // sampler descriptors
-		mapping := &mappings[mapping_offset]
-        mapping_offset += 1
+    mappings[1] = { // sampler descriptors
+        sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
+        descriptorSet = 2,
+        firstBinding = 0,
+        bindingCount = DescriptorSamplerLimit,
+        resourceMask = vk.SpirvResourceTypeFlagsEXT_ALL,
+        source = .HEAP_WITH_CONSTANT_OFFSET,
         
-        mapping^ = {
-            sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
-            descriptorSet = 2,
-            firstBinding = 0,
-            bindingCount = DescriptorSamplerLimit,
-            resourceMask = vk.SpirvResourceTypeFlagsEXT_ALL,
-            source = .HEAP_WITH_CONSTANT_OFFSET,
-        }
-		mapping.sourceData.constantOffset.heapArrayStride = descriptor_size
-	}
+        sourceData = { constantOffset = { heapArrayStride = descriptor_size } },
+    }
     
 	result := vk.ShaderDescriptorSetAndBindingMappingInfoEXT { 
         sType = .SHADER_DESCRIPTOR_SET_AND_BINDING_MAPPING_INFO_EXT,
-        mappingCount = mapping_offset,
+        mappingCount = 2,
         pMappings    = &mappings[0],
     }
     

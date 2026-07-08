@@ -511,19 +511,19 @@ main :: proc () {
         reloaded_cull_shader := reload_shaders_if_needed(watchers, shader_allocator, &cull_shader)
         if reloaded_cull_shader || !pipeline_is_valid(early_cull_pipeline) {
             destroy_pipeline(&gpu, early_cull_pipeline)
-            early_cull_pipeline = gpu_create_compute_pipeline(&gpu, cull_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, constants = { /* late = */ { b = false } }, sampler_hack_names = {"", "depth_sampler"})
+            early_cull_pipeline = gpu_create_compute_pipeline(&gpu, cull_shader, descriptor_heap, constants = { /* late = */ { b = false } })
             fmt.printfln("Recreated early_cull_pipeline.")
         }
         
         if reloaded_cull_shader || !pipeline_is_valid(late_cull_pipeline) {
             destroy_pipeline(&gpu, late_cull_pipeline)
-            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, cull_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, constants = { /* late = */ { b = true } }, sampler_hack_names = {"", "depth_sampler"})
+            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, cull_shader, descriptor_heap, constants = { /* late = */ { b = true } })
             fmt.printfln("Recreated late_cull_pipeline.")
         }
         
         if reload_shaders_if_needed(watchers, shader_allocator, &depth_reduce_shader) || !pipeline_is_valid(depth_pipeline) {
             destroy_pipeline(&gpu, depth_pipeline)
-            depth_pipeline = gpu_create_compute_pipeline(&gpu, depth_reduce_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, sampler_hack_names = {"", "depth_sampler", ""})
+            depth_pipeline = gpu_create_compute_pipeline(&gpu, depth_reduce_shader, descriptor_heap)
             fmt.printfln("Recreated depth_pipeline.")
         }
         
@@ -540,7 +540,7 @@ main :: proc () {
             task, mesh, frag := meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader
             
             destroy_pipeline(&gpu, meshlet_pipeline)
-            meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, task, mesh, frag, raster_description, descriptor_heap.resource_size, descriptor_heap.sampler_size, sampler_hack_names = {"texture_sampler", "", "", ""})
+            meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, task, mesh, frag, raster_description, descriptor_heap)
             fmt.printfln("Recreated meshlet_pipeline.")
         }
         
@@ -554,6 +554,8 @@ main :: proc () {
         {
             frame_descriptor.descriptor_offset = 0
             {
+                // @cleanup who should keep which data, and how often do we actually need to write this (atleast when the swapchain
+                // is recreated).
                 // @todo add a null texture, which is a bright debug color so that uninitialized indices(0) are easy to find
                 write_texture_to_heap(&gpu, &descriptor_heap, frame_descriptor.descriptor_offset, textures[0], .SAMPLED_IMAGE)
                 textures[0].sampled_index = frame_descriptor.descriptor_offset
