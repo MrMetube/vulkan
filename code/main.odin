@@ -114,6 +114,10 @@ Draw_Data :: struct {
     view_from_world:  m4,
     screen_from_view: m4,
     light_pos:        [4] v4,
+    
+    screen_size: v2,
+    near_z, far_z: f32,
+    frustum: [4] f32,
 }
 
 
@@ -684,6 +688,11 @@ main :: proc () {
             lod_base = 10,
             lod_step = 1.5,
         }
+        
+        draw_data.screen_size = cast(v2) gpu.swapchain_size
+        draw_data.near_z = near_z
+        draw_data.far_z  = draw_distance
+        draw_data.frustum = frustum
         
         draw_data.screen_from_view = screen_from_view
         draw_data.view_from_world  = view_from_world

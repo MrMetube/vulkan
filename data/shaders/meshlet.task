@@ -50,7 +50,7 @@ void main() {
         shared_count = 0;
         barrier();
         
-        bool accept = false;
+        bool visible = false;
         if (meshlet_index < (command.v.meshlet_count + command.v.meshlet_offset)) {
             Meshlet_p meshlet = data.meshlet_buffer[meshlet_index];
             
@@ -67,10 +67,18 @@ void main() {
             vec4 view_center    = data.data.view_from_world * vec4(center, 1);
             vec4 view_cone_axis = data.data.view_from_world * vec4(cone_axis, 0);
             
-            accept = !cone_cull(view_center.xyz, radius, view_cone_axis.xyz, cone_cutoff, view_camera_position);
+            // backface cone culling
+            visible = !cone_cull(view_center.xyz, radius, view_cone_axis.xyz, cone_cutoff, view_camera_position);
+            
+            // @copypasta from cull.comp
+            // the left/top/right/bottom plane culling utilizes frustum symmetry to cull against two planes at the same time
+            visible = visible && view_center.z * globals.data.frustum[1] - abs(view_center.x) * globals.data.frustum[0] > -radius;
+            visible = visible && view_center.z * globals.data.frustum[3] - abs(view_center.y) * globals.data.frustum[2] > -radius;
+            // the near/far plane culling uses camera space Z directly, but the camera looks down -z :ViewSpace:
+            visible = visible && view_center.z + radius < -globals.data.near_z && view_center.z - radius > -globals.data.far_z;
         }
         
-        if (accept) {
+        if (visible) {
             uint index = atomicAdd(shared_count, 1);
             task_result.indices[index] = meshlet_index;
         }

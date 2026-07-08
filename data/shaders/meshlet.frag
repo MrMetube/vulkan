@@ -41,4 +41,5 @@ void main() {
     #endif // Debug
     
     pixel_result = vec4(color, 1);
+    // pixel_result = vec4(n+1*0.5, 1);
 }

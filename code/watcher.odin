@@ -3,7 +3,6 @@ package main
 
 import "core:fmt"
 import "core:os"
-import "core:strings"
 import "core:time"
 
 Watcher :: struct {

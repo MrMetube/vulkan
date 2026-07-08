@@ -16,7 +16,7 @@ the_gpu_profiler: struct {
     open_zones:  [dynamic; QueryPoolSize] int,
     queries:     [dynamic; QueryPoolSize] Profile_Query,
     
-    event_table: ^Profile_Event_Table
+    event_table: ^Profile_Event_Table,
 }
 
 Profile_Query :: struct { zone_index: int, kind: Profile_Event_Kind }
@@ -108,8 +108,6 @@ gpu_profile_collate_times :: proc (gpu: ^Gpu, print: bool) {
         zones := the_gpu_profiler.zones
         
         fmt.printfln("---------------------\nGPU profile:")
-        to_seconds := cast(f64) gpu.device_properties.properties.limits.timestampPeriod * 1e-9
-        
         dump_zone :: proc (gpu: ^Gpu, zones: [dynamic] Profile_Zone, index: u32, depth := 0) {
             if index == 0 && depth != 0 { return }
             

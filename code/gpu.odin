@@ -397,7 +397,6 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
             
             desired_found := make([] b8, len(device_extensions), context.temp_allocator)
             
-            fmt.printfln("Supported Extensions:")
             for &it in extensions {
                 for desired, desired_index in device_extensions {
                     if desired_found[desired_index] { continue }
