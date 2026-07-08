@@ -69,7 +69,7 @@ Cull_Globals :: struct #all_or_none {
     
     draw_buffer:            vk.DeviceAddress "Draw",
     mesh_buffer:            vk.DeviceAddress "Mesh",
-    draw_visibility_buffer: vk.DeviceAddress "uint",
+    draw_visibility_buffer: vk.DeviceAddress "bool",
     draw_command_buffer:    vk.DeviceAddress "Draw_Command",
     draw_command_count:     vk.DeviceAddress "uint",
     
@@ -374,8 +374,9 @@ main :: proc () {
         early_cull_time: f64,
         late_cull_time:  f64,
     } = {
-        culling_enabled = true,
-        lod_enabled     = true,
+        culling_enabled   = true,
+        lod_enabled       = true,
+        occlusion_enabled = true,
     }
     
     // @correctness ensure that this is enough and that we did not overflow inside of a frame and override someone elses data for a shader
@@ -510,13 +511,13 @@ main :: proc () {
         reloaded_cull_shader := reload_shaders_if_needed(watchers, shader_allocator, &cull_shader)
         if reloaded_cull_shader || !pipeline_is_valid(early_cull_pipeline) {
             destroy_pipeline(&gpu, early_cull_pipeline)
-            early_cull_pipeline = gpu_create_compute_pipeline(&gpu, cull_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, constants = { /* late = */ transmute(i32) cast(b32) false }, sampler_hack_names = {"", "depth_sampler"})
+            early_cull_pipeline = gpu_create_compute_pipeline(&gpu, cull_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, constants = { /* late = */ { b = false } }, sampler_hack_names = {"", "depth_sampler"})
             fmt.printfln("Recreated early_cull_pipeline.")
         }
         
         if reloaded_cull_shader || !pipeline_is_valid(late_cull_pipeline) {
             destroy_pipeline(&gpu, late_cull_pipeline)
-            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, cull_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, constants = { /* late = */ transmute(i32) cast(b32) true }, sampler_hack_names = {"", "depth_sampler"})
+            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, cull_shader, descriptor_heap.resource_size, descriptor_heap.sampler_size, constants = { /* late = */ { b = true } }, sampler_hack_names = {"", "depth_sampler"})
             fmt.printfln("Recreated late_cull_pipeline.")
         }
         

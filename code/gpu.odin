@@ -951,8 +951,12 @@ gpu_destroy_texture_view :: proc (gpu: ^Gpu, view: vk.ImageView) {
 ////////////////////////////////////////////////
 // Pipelines 
 
-gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, descriptor_size, sampler_size: u32, constants: ..i32, sampler_hack_names: [] string = {}) -> Pipeline {
-    // @todo(viktor): allow for optional shader constant, i.e. vulkan specialization constants
+Specialization_Constant :: struct #raw_union {
+    u: u32,
+    b: b32,
+}
+
+gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, descriptor_size, sampler_size: u32, constants: [] Specialization_Constant = nil, sampler_hack_names: [] string = {}) -> Pipeline {
     assert(compute.parsed.stage == .COMPUTE)
     compute := compute
     
@@ -966,14 +970,8 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, descriptor_size
     heap_mapping: vk.ShaderDescriptorSetAndBindingMappingInfoEXT
     heap_mapping = generate_heap_mappings(resource_mask, resource_types, sampler_hack_names, size_of(vk.DeviceAddress), descriptor_size, sampler_size, &mappings)
     
-    // @todo copy to graphics pipeline
     specialization_entries: [dynamic; 32] vk.SpecializationMapEntry
-    specialization_info := vk.SpecializationInfo {
-        mapEntryCount = cast(u32) len(specialization_entries),
-        pMapEntries   = raw_data(&specialization_entries),
-        dataSize      = cast(int) size_of_slice(constants),
-        pData         = raw_data(constants),
-    }
+    specialization_info := fill_specialization_constants(&specialization_entries, constants)
     
     create_info := vk.ComputePipelineCreateInfo {
         sType = .COMPUTE_PIPELINE_CREATE_INFO,
@@ -1223,6 +1221,25 @@ gather_descriptor_resources :: proc (shaders: ..Shader) -> ([32] vk.DescriptorTy
     }
     
     return resource_types, resource_mask
+}
+
+fill_specialization_constants :: proc (specialization_entries: ^[dynamic; 32] vk.SpecializationMapEntry, constants: [] Specialization_Constant) -> vk.SpecializationInfo {
+    for constant, i in constants {
+        append(specialization_entries, vk.SpecializationMapEntry {
+            constantID = constant.u, 
+            offset     = cast(u32) i * size_of(u32), 
+            size       = size_of(u32),
+        })
+    }
+    
+    specialization_info := vk.SpecializationInfo {
+        mapEntryCount = cast(u32) len(specialization_entries),
+        pMapEntries   = raw_data(specialization_entries),
+        dataSize      = cast(int) size_of_slice(constants),
+        pData         = raw_data(constants),
+    }
+    
+    return specialization_info
 }
 
 generate_heap_mappings :: proc (resource_mask: Shader_Resource_Mask, resource_types: [32] vk.DescriptorType, resource_names: [] string, push_constant_size: u32, descriptor_size, sampler_size: u32, mappings: ^[32] vk.DescriptorSetAndBindingMappingEXT) -> vk.ShaderDescriptorSetAndBindingMappingInfoEXT {

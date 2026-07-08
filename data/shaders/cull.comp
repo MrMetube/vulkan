@@ -9,7 +9,7 @@
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-layout(constant_id = 0) const bool Late = false;
+layout(constant_id = 0) const bool Late = true; // @todo when this defaults to false occlusion isnt toggleable, but when its true we can toggle it on and off
 
 // @volatile
 layout(push_constant) uniform Push_Data {
@@ -43,8 +43,8 @@ bool project_sphere_onto_screen(vec3 view_center, float radius, float p00, float
     
     // In the x/y-z reference frame
     // Transform back to camera space
-    float min_x = p00 * dot(vec2(vx.x,  vx.y), cx) / dot(vec2(-vx.y, vx.x), cx);
-    float max_x = p00 * dot(vec2(vx.x, -vx.y), cx) / dot(vec2( vx.y, vx.x), cx);
+    float min_x = -p00 * dot(vec2(vx.x,  vx.y), cx) / dot(vec2(-vx.y, vx.x), cx);
+    float max_x = -p00 * dot(vec2(vx.x, -vx.y), cx) / dot(vec2( vx.y, vx.x), cx);
     float min_y = p11 * dot(vec2(vy.x,  vy.y), cy) / dot(vec2(-vy.y, vy.x), cy);
     float max_y = p11 * dot(vec2(vy.x, -vy.y), cy) / dot(vec2( vy.y, vy.x), cy); 
     
@@ -61,8 +61,8 @@ void main() {
     
     if (draw_index >= globals.data.draw_count) return;
     
-    uint_p was_visible_last_frame = globals.draw_visibility_buffer[draw_index];
-    if (!Late) if (was_visible_last_frame.v == 0) return;
+    bool_p was_visible_last_frame = globals.draw_visibility_buffer[draw_index];
+    if (!Late && !was_visible_last_frame.v) return;
     
     bool frustum_culling_enabled = (globals.data.flags & Flag_FrustumCulling)   != 0;
     bool lod_enabled             = (globals.data.flags & Flag_LevelOfDetail)    != 0;
@@ -102,7 +102,7 @@ void main() {
         }
     }
     
-    if (visible && (!Late || (was_visible_last_frame.v == 0))) {
+    if (visible && (!Late || !was_visible_last_frame.v)) {
         uint draw_command_index = atomicAdd(draw_command_count.v, 1);
         
         uint lod_index = 0;
@@ -127,5 +127,5 @@ void main() {
         draw_command.v.command.groupCountZ = 1;
     }
     
-    if (Late) was_visible_last_frame.v = visible ? 1 : 0;
+    if (Late) was_visible_last_frame.v = visible;
 }
