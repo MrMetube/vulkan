@@ -145,7 +145,7 @@ barycentric_blend_s :: proc (a: $V/ [$N] $E, b, c: V, u, v: E) -> V {
 
 // @todo just calculate k and pass it to as many linear_blends as i want
 time_smoothed_blend :: proc (from: f64, to: f64, delta_time: f64) -> f64 {
-    h :: 8.0 // = the amount of time it takes for the filter to converge to 90% of a fixed input value
+    h :: 3.0 // = the amount of time it takes for the filter to converge to 90% of a fixed input value
     // @speed We could precompute k if needed as it only depends on h and frame time, not the smoothed value itself.
     base := power(cast(f64) .1, 1 / h)
     k := power(base, delta_time)
@@ -709,11 +709,12 @@ projection_reversed_z_infinite_far_plane :: proc (fov_y, aspect_w_h, near_z: f32
     y := f
     n := near_z
     
+    // :ViewSpace:
     result := m4 {
         x,  0,  0,  0,
-        0,  y,  0,  0,
+        0, -y,  0,  0, // invert y axis
         0,  0,  0,  n,
-        0,  0, -1,  0, // -1 so we look down -z :ViewSpace:
+        0,  0, -1,  0, // -1 so we look down -z
     }
     
     return result

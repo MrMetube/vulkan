@@ -801,10 +801,6 @@ main :: proc () {
                     gpu_profile_zone_end()
                     gpu_labeled_region_end(cmd)
                     
-                    if print_profile_and_stats {
-                        vk.CmdEndQuery(cmd, stats_pool, 0)
-                    }
-                    
                 gpu_end_render_pass(cmd)
             gpu_labeled_region_end(cmd)
             gpu_profile_zone_end()
@@ -922,8 +918,6 @@ main :: proc () {
             gpu_profile_zone_begin("late rendering pass")
             gpu_labeled_region_begin(cmd, "late rendering pass", {0.6, 0.1, 07, 1.0})
             
-            
-            
                 gpu_barrier(cmd, 
                     { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS,  .COMPUTE_SHADER }, 
                     { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS },
@@ -939,6 +933,10 @@ main :: proc () {
                         )
                     
                 gpu_end_render_pass(cmd)
+                
+                if print_profile_and_stats {
+                    vk.CmdEndQuery(cmd, stats_pool, 0)
+                }
                 
             gpu_labeled_region_end(cmd)
             gpu_profile_zone_end()
