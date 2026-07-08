@@ -1,1 +1,1 @@
-C:\tools\cloc --force-lang=GLSL,mesh --force-lang=GLSL,task --not-match-f="generated" .\code .\data
+C:\tools\cloc --force-lang=GLSL,mesh --force-lang=GLSL,task --not-match-f="(generated|math|util|synch|format|random|metrics)" .\code .\data

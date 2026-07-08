@@ -2,55 +2,50 @@
 
 package main
 
-import "core:sys/windows"
+import win "core:sys/windows"
 
 foreign import psapi "system:psapi.lib"
 foreign psapi {
-    GetProcessMemoryInfo :: proc "system" (
-        Process: windows.HANDLE, 
-        ppsmemCounters: ^PROCESS_MEMORY_COUNTERS, 
-        cb: windows.DWORD,
-    ) ->  windows.BOOL ---
-    
+    GetProcessMemoryInfo :: proc "system" (Process: win.HANDLE, ppsmemCounters: ^PROCESS_MEMORY_COUNTERS, cb: win.DWORD, ) ->  win.BOOL ---
 }
 
 PROCESS_MEMORY_COUNTERS ::  struct {
-    cb:                         windows.DWORD,
-    PageFaultCount:             windows.DWORD,
-    PeakWorkingSetSize:         windows.SIZE_T,
-    WorkingSetSize:             windows.SIZE_T,
-    QuotaPeakPagedPoolUsage:    windows.SIZE_T,
-    QuotaPagedPoolUsage:        windows.SIZE_T,
-    QuotaPeakNonPagedPoolUsage: windows.SIZE_T,
-    QuotaNonPagedPoolUsage:     windows.SIZE_T,
-    PagefileUsage:              windows.SIZE_T,
-    PeakPagefileUsage:          windows.SIZE_T,
+    cb:                         win.DWORD,
+    PageFaultCount:             win.DWORD,
+    PeakWorkingSetSize:         win.SIZE_T,
+    WorkingSetSize:             win.SIZE_T,
+    QuotaPeakPagedPoolUsage:    win.SIZE_T,
+    QuotaPagedPoolUsage:        win.SIZE_T,
+    QuotaPeakNonPagedPoolUsage: win.SIZE_T,
+    QuotaNonPagedPoolUsage:     win.SIZE_T,
+    PagefileUsage:              win.SIZE_T,
+    PeakPagefileUsage:          win.SIZE_T,
 }
 
 PROCESS_MEMORY_COUNTERS_EX :: struct {
-    cb:                         windows.DWORD,
-    PageFaultCount:             windows.DWORD,
-    PeakWorkingSetSize:         windows.SIZE_T,
-    WorkingSetSize:             windows.SIZE_T,
-    QuotaPeakPagedPoolUsage:    windows.SIZE_T,
-    QuotaPagedPoolUsage:        windows.SIZE_T,
-    QuotaPeakNonPagedPoolUsage: windows.SIZE_T,
-    QuotaNonPagedPoolUsage:     windows.SIZE_T,
-    PagefileUsage:              windows.SIZE_T,
-    PeakPagefileUsage:          windows.SIZE_T,
-    PrivateUsage:               windows.SIZE_T,
+    cb:                         win.DWORD,
+    PageFaultCount:             win.DWORD,
+    PeakWorkingSetSize:         win.SIZE_T,
+    WorkingSetSize:             win.SIZE_T,
+    QuotaPeakPagedPoolUsage:    win.SIZE_T,
+    QuotaPagedPoolUsage:        win.SIZE_T,
+    QuotaPeakNonPagedPoolUsage: win.SIZE_T,
+    QuotaNonPagedPoolUsage:     win.SIZE_T,
+    PagefileUsage:              win.SIZE_T,
+    PeakPagefileUsage:          win.SIZE_T,
+    PrivateUsage:               win.SIZE_T,
 }
 
-get_os_timer_frequency :: proc () -> (result: u64) {
-    value: windows.LARGE_INTEGER
-    windows.QueryPerformanceFrequency(&value)
-    result = cast(u64) value
+get_os_timer_frequency :: proc () -> u64 {
+    value: win.LARGE_INTEGER
+    win.QueryPerformanceFrequency(&value)
+    result := cast(u64) value
     return result
 }
 
-read_os_timer :: proc () -> (result: u64) {
-    value: windows.LARGE_INTEGER
-    windows.QueryPerformanceCounter(&value)
-    result = cast(u64) value
+read_os_timer :: proc () -> u64 {
+    value: win.LARGE_INTEGER
+    win.QueryPerformanceCounter(&value)
+    result := cast(u64) value
     return result
 }

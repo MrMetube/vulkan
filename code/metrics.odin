@@ -21,20 +21,20 @@ init_os_metrics :: proc (milliseconds_to_wait_for_cpu_frequency: u64 = 1000) {
     }
 }
 
-read_os_page_fault_count :: proc () -> (result: u64) {
+read_os_page_fault_count :: proc () -> u64 {
     assert(the_metrics.process_handle != nil)
     
     memory_counters := PROCESS_MEMORY_COUNTERS_EX { cb = size_of(PROCESS_MEMORY_COUNTERS_EX) }
     
     GetProcessMemoryInfo(the_metrics.process_handle, cast(^PROCESS_MEMORY_COUNTERS) &memory_counters, size_of(memory_counters))
     
-    result = cast(u64) memory_counters.PageFaultCount
+    result := cast(u64) memory_counters.PageFaultCount
     return result
 }
 
-get_cpu_frequency :: proc () -> (result: u64) {
+get_cpu_frequency :: proc () -> u64 {
     assert(the_metrics.initialized)
-    result = the_metrics.cpu_frequency
+    result := the_metrics.cpu_frequency
     return result
 }
 
@@ -44,7 +44,7 @@ More_Estimation_Info :: struct {
     os_frequency, os_start, os_end, cpu_start, cpu_end: u64,
 }
 
-estimate_cpu_frequency :: proc (milliseconds_to_wait: u64) -> (cpu_frequency: u64)  {
+estimate_cpu_frequency :: proc (milliseconds_to_wait: u64) -> u64  {
     os_frequency := get_os_timer_frequency()
     os_wait_time := os_frequency * milliseconds_to_wait / 1000
     
@@ -58,6 +58,7 @@ estimate_cpu_frequency :: proc (milliseconds_to_wait: u64) -> (cpu_frequency: u6
     
     cpu_end := read_cpu_timer()
     cpu_elapsed := cpu_end - cpu_start
+    cpu_frequency: u64
     if os_elapsed != 0 {
         cpu_frequency = os_frequency * cpu_elapsed / os_elapsed
     }
@@ -86,12 +87,12 @@ estimate_cpu_frequency_more_info :: proc (milliseconds_to_wait: u64) -> (cpu_fre
     return cpu_frequency, more_info
 }
 
-read_cpu_timer :: proc () -> (result: u64) {
-    result = cast(u64) intrinsics.read_cycle_counter()
+read_cpu_timer :: proc () -> u64 {
+    result := cast(u64) intrinsics.read_cycle_counter()
     return result
 }
 
-clocks_to_seconds :: proc (clocks: i64) -> (result: f64) {
-    result = cast(f64) clocks / cast(f64) get_cpu_frequency()
+clocks_to_seconds :: proc (clocks: i64) -> f64 {
+    result := cast(f64) clocks / cast(f64) get_cpu_frequency()
     return result
 }
