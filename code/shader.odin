@@ -38,7 +38,7 @@ Shader :: struct {
 generate_shader_api :: proc (output_file: string) {
     builder := strings.builder_make(context.temp_allocator)
     
-    // @shaders all types used by the cpu and the gpu
+    // :Shader: all types used by the cpu and the gpu
     
     // structs used in buffers
     append_simple_struct(&builder, vk.DrawMeshTasksIndirectCommandEXT)

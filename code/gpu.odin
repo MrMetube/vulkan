@@ -1320,37 +1320,74 @@ gpu_begin_command_recording :: proc (gpu: ^Gpu, command_pool: vk.CommandPool, _:
     return result
 }
 
-gpu_submit :: proc (queue: vk.Queue, semaphore: vk.Semaphore, signal_value: u64, command_buffers: ..vk.CommandBuffer) {
-    for cmd in command_buffers {
+Semaphore_Submit :: struct {
+    sema:   vk.Semaphore,
+    stages: vk.PipelineStageFlags2,
+    signal_value: Maybe(u64)
+}
+
+gpu_submit :: proc (queue: vk.Queue, semaphores: [] Semaphore_Submit, cmds: ..vk.CommandBuffer) {
+    for cmd in cmds {
         check(vk.EndCommandBuffer(cmd))
     }
     
     cmd_infos: [dynamic; 16] vk.CommandBufferSubmitInfo
-    for cmd in command_buffers {
+    for cmd in cmds {
         append(&cmd_infos, vk.CommandBufferSubmitInfo {
             sType = .COMMAND_BUFFER_SUBMIT_INFO,
             commandBuffer = cmd,
         })
     }
     
-    // @todo what if we want to signal multiple semaphores. This is only used by the image_aquired semaphores.
-    once_submit_info := vk.SubmitInfo2 {
-        sType = .SUBMIT_INFO_2,
-        signalSemaphoreInfoCount = 1,
-        pSignalSemaphoreInfos    = &vk.SemaphoreSubmitInfo {
+    signals: [dynamic; 32] vk.SemaphoreSubmitInfo
+    waits:   [dynamic; 32] vk.SemaphoreSubmitInfo
+    for submit in semaphores {
+        info := vk.SemaphoreSubmitInfo {
             sType = .SEMAPHORE_SUBMIT_INFO,
-            semaphore = semaphore,
-            value     = signal_value,
-            stageMask = { .ALL_COMMANDS },
-        },
-        commandBufferInfoCount = cast(u32) len(command_buffers),
+            semaphore = submit.sema,
+            stageMask = submit.stages,
+        }
+        
+        switch signal_value in submit.signal_value {
+        case u64: 
+            info.value = signal_value
+            append(&signals, info)
+        case:
+            append(&waits, info)
+        }
+    }
+    
+    info := vk.SubmitInfo2 {
+        sType = .SUBMIT_INFO_2,
+        waitSemaphoreInfoCount = cast(u32) len(waits),
+        pWaitSemaphoreInfos    = raw_data(&waits),
+        signalSemaphoreInfoCount = cast(u32) len(signals),
+        pSignalSemaphoreInfos    = raw_data(&signals),
+        commandBufferInfoCount = cast(u32) len(cmds),
         pCommandBufferInfos    = &cmd_infos[0],
     }
     
-    check(vk.QueueSubmit2(queue, 1, &once_submit_info, 0))
+    check(vk.QueueSubmit2(queue, 1, &info, 0))
 }
 
-
+gpu_present :: proc (gpu: ^Gpu, queue: vk.Queue, wait_semaphore: vk.Semaphore) {
+    wait_semaphore := wait_semaphore
+    present_info := vk.PresentInfoKHR {
+        sType = .PRESENT_INFO_KHR,
+        waitSemaphoreCount = 1,
+        pWaitSemaphores    = &wait_semaphore,
+        swapchainCount     = 1,
+        pSwapchains        = &gpu.swapchain,
+        pImageIndices      = &gpu.image_index,
+    }
+    
+    result := vk.QueuePresentKHR(queue, &present_info)
+    if result == .ERROR_OUT_OF_DATE_KHR {
+        gpu.swapchain_state = .Dirty
+    } else {
+        check(result)
+    }
+}
 
 ////////////////////////////////////////////////
 // Semaphores
@@ -1507,18 +1544,18 @@ gpu_image_barriers :: proc (cmd: vk.CommandBuffer, flags: vk.DependencyFlags, ba
 // void gpuSignalAfter(GpuCommandBuffer cb, STAGE before, void *ptrGpu, uint64 value, SIGNAL signal);
 // void gpuWaitBefore(GpuCommandBuffer cb, STAGE after, void *ptrGpu, uint64 value, OP op, HAZARD_FLAGS hazards = 0, uint64 mask = ~0);
 
-gpu_signal_after :: proc (command_buffer: vk.CommandBuffer, stage: vk.PipelineStageFlags2, gpu_pointer: pmm, count: u64, signal_op: any) {
+gpu_signal_after :: proc (cmd: vk.CommandBuffer, stage: vk.PipelineStageFlags2, gpu_pointer: pmm, count: u64, signal_op: any) {
     unimplemented()
 }
 
-gpu_wait_before :: proc (command_buffer: vk.CommandBuffer, stage: vk.PipelineStageFlags2, gpu_pointer: pmm, value: u64, wait_op: any) {
+gpu_wait_before :: proc (cmd: vk.CommandBuffer, stage: vk.PipelineStageFlags2, gpu_pointer: pmm, value: u64, wait_op: any) {
     unimplemented()
 }
 
 the_bound_pipeline: Pipeline
 
-gpu_set_pipeline :: proc (command_buffer: vk.CommandBuffer, pipeline: Pipeline) {
-    vk.CmdBindPipeline(command_buffer, pipeline.bind_point, pipeline.pipeline)
+gpu_set_pipeline :: proc (cmd: vk.CommandBuffer, pipeline: Pipeline) {
+    vk.CmdBindPipeline(cmd, pipeline.bind_point, pipeline.pipeline)
     the_bound_pipeline = pipeline
 }
 
@@ -1598,7 +1635,7 @@ gpu_end_render_pass :: proc (cmd: vk.CommandBuffer) {
 // void gpuDrawMeshlets(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, uvec3 dim);
 // void gpuDrawMeshletsIndirect(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, void *dimGpu);
 
-// @api we may want to allow the pipeline to have a push constant per stage. For that we need the shaders to each declare the push data to be N pointers to their respective data. Then the pipeline layout and this command both need to declare the correct size of 3 pointers and their offsets in the push data.
+// @api we may want to allow the pipeline to have a push constant per stage. For that we need the shaders to each declare the push data to be N pointers to their respective data. Then the pipeline layout and this command both needs to declare the correct size of 3 pointers and their offsets in the push data.
 gpu_push_constants :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, push_constant: GpuAddress($T), heap := false) {
     push_constant := push_constant
     info := vk.PushDataInfoEXT {
@@ -1670,7 +1707,6 @@ destroy_descriptor_heap :: proc (gpu: ^Gpu, heap: Descriptor_Heap) {
     gpu_free_pointer(gpu, heap.resources_gpu.p)
 }
 
-// @speed this is called multiple times in a frame. reduce this to once a frame as soon as all pipelines are migrated
 gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: ^Descriptor_Heap) {
     sampler_info := vk.BindHeapInfoEXT {
         sType = .BIND_HEAP_INFO_EXT,

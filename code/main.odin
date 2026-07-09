@@ -56,12 +56,11 @@ Depth_Mip :: struct {
 
 ////////////////////////////////////////////////
 
-// @shader meshlet.mesh
+// :Shader: meshlet.mesh
 MaxVertices  :: 64
 MaxTriangles :: 84
 
-// @shader cull.comp
-Cull_Globals :: struct #all_or_none {
+Cull_Globals :: struct #all_or_none { // :Shader:
     using data: Cull_Data,
     
     draw_buffer:            vk.DeviceAddress "Draw",
@@ -73,8 +72,7 @@ Cull_Globals :: struct #all_or_none {
     depth_pyramid_index: Texture_Index,
 }
 
-// @shader
-Cull_Data :: struct #all_or_none {
+Cull_Data :: struct #all_or_none { // :Shader:
     view_from_world: m4,
     
     p00, p11, near_z, far_z: f32,
@@ -94,8 +92,7 @@ DebugFlag_FrustumCulling   :: (1 << 0)
 DebugFlag_LevelOfDetail    :: (1 << 1)
 DebugFlag_OcclusionCulling :: (1 << 2)
 
-// @shader
-Draw_Globals :: struct #all_or_none {
+Draw_Globals :: struct #all_or_none { // :Shader:
     using data: Draw_Data,
     
     draw_command_buffer: vk.DeviceAddress "Draw_Command",
@@ -106,8 +103,7 @@ Draw_Globals :: struct #all_or_none {
     vertex_buffer:       vk.DeviceAddress "Vertex",
 }
 
-// @shader
-Draw_Data :: struct {
+Draw_Data :: struct { // :Shader:
     view_from_world:  m4,
     screen_from_view: m4,
     light_pos:        [4] v4,
@@ -118,15 +114,13 @@ Draw_Data :: struct {
 }
 
 
-// @shader
-Depth_Data :: struct {
+Depth_Data :: struct { // :Shader:
     size: v2,
     input_index:  Texture_Index,
     output_index: Texture_Index,
 }
 
-// @shader
-Draw :: struct {
+Draw :: struct { // :Shader:
     orientation: q32,
     p:           v3,
     scale:       f32,
@@ -136,8 +130,7 @@ Draw :: struct {
     texture_index: Texture_Index,
 }
 
-// @shader
-Mesh :: struct {
+Mesh :: struct { // :Shader:
     center: v3,
     radius: f32,
     
@@ -148,22 +141,19 @@ Mesh :: struct {
     lods:      [8] Mesh_LOD,
 }
 
-// @shader
-Mesh_LOD :: struct {
+Mesh_LOD :: struct { // :Shader:
     meshlet_offset: u32,
     meshlet_count:  u32,
 }
 
-// @shader
-Draw_Command :: struct {
+Draw_Command :: struct { // :Shader:
     draw_id:        u32,
     meshlet_offset: u32,
     meshlet_count:  u32,
     command:        vk.DrawMeshTasksIndirectCommandEXT,
 }
 
-// @shader
-Meshlet :: struct {
+Meshlet :: struct { // :Shader:
     center: v3,
     radius: f32,
     cone_axis:   [3] i8,
@@ -174,8 +164,7 @@ Meshlet :: struct {
     triangle_count: u8,
 }
 
-// @shader
-Vertex :: struct {
+Vertex :: struct { // :Shader:
     p:  v3,      p_pad: f32,
     n:  [3] u8,  n_pad: u8,
     uv: v2,
@@ -326,9 +315,9 @@ main :: proc () {
             
         gpu_barrier(cmd, { .ALL_TRANSFER }, { .ALL_GRAPHICS })
         
-        gpu_submit(gpu.transfer_queue, upload_semaphore, 1, cmd)
+        gpu_submit(gpu.transfer_queue, { { upload_semaphore, { .ALL_COMMANDS }, 1} }, cmd)
         gpu_wait_semaphore(&gpu, upload_semaphore, 1)
-    }
+     }
     
     ////////////////////////////////////////////////
     
@@ -999,13 +988,17 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         gpu_profile_frame_end()
-        check(vk.EndCommandBuffer(cmd))
         cpu_end_profile_zone()
         
         cpu_begin_profile_zone("submit and present queue")
-        // @cleanup dont pass the frameindex, this is a place that could cause mistakes
-        end_of_frame_submit(&gpu, gpu.general_queue, frame_semaphore, next_frame, frame_index, &cmd)
-        present_the_queue(&gpu, gpu.general_queue)
+        gpu_submit(gpu.general_queue, {
+            { gpu.image_aquired_semaphores[frame_index], { .TRANSFER },     nil },
+            
+            { gpu.render_completes[gpu.image_index],     { .ALL_COMMANDS }, 0 },
+            { frame_semaphore,                           { .ALL_COMMANDS }, next_frame },
+        }, cmd)
+        gpu_present(&gpu, gpu.general_queue, gpu.render_completes[gpu.image_index])
+        
         next_frame += 1
         cpu_end_profile_zone()
         
@@ -1207,63 +1200,6 @@ get_next_image :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, frame_index: u64) ->
     check(result)
     
     return true
-}
-
-end_of_frame_submit :: proc (gpu: ^Gpu, queue: vk.Queue, timeline_semaphore: vk.Semaphore, signal_value: u64, frame_index: u64, command_buffer: ^vk.CommandBuffer) {
-    // we handed out the command buffer and now ask for it to be returned. After this point it has no use, therefore we destroy the users value.
-    defer command_buffer^ = nil
-    
-    semaphore_info := [?] vk.SemaphoreSubmitInfo {
-        {
-            sType = .SEMAPHORE_SUBMIT_INFO,
-            semaphore = gpu.render_completes[gpu.image_index],
-            stageMask = { .ALL_COMMANDS },
-        },
-        {
-            sType = .SEMAPHORE_SUBMIT_INFO,
-            semaphore = timeline_semaphore,
-            value     = signal_value,
-            stageMask = { .ALL_COMMANDS },
-        },
-    }
-    
-    submit_info := vk.SubmitInfo2 {
-        sType = .SUBMIT_INFO_2,
-        waitSemaphoreInfoCount = 1,
-        pWaitSemaphoreInfos = &vk.SemaphoreSubmitInfo {
-            sType = .SEMAPHORE_SUBMIT_INFO,
-         
-            semaphore = gpu.image_aquired_semaphores[frame_index],
-            stageMask = { .TRANSFER },
-        },
-        commandBufferInfoCount = 1,
-        pCommandBufferInfos = &vk.CommandBufferSubmitInfo {
-            sType = .COMMAND_BUFFER_SUBMIT_INFO,
-            commandBuffer = command_buffer^,
-        },
-        signalSemaphoreInfoCount = len(semaphore_info),
-        pSignalSemaphoreInfos    = raw_data(&semaphore_info),
-    }
-    
-    check(vk.QueueSubmit2(queue, 1, &submit_info, 0))
-}
-
-present_the_queue :: proc (gpu: ^Gpu, queue: vk.Queue) {
-    present_info := vk.PresentInfoKHR {
-        sType = .PRESENT_INFO_KHR,
-        waitSemaphoreCount = 1,
-        pWaitSemaphores    = &gpu.render_completes[gpu.image_index],
-        swapchainCount     = 1,
-        pSwapchains        = &gpu.swapchain,
-        pImageIndices      = &gpu.image_index,
-    }
-    
-    result := vk.QueuePresentKHR(queue, &present_info)
-    if result == .ERROR_OUT_OF_DATE_KHR {
-        gpu.swapchain_state = .Dirty
-    } else {
-        check(result)
-    }
 }
 
 begin_meshlet_rendering :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stuff: ^Render_Targets_And_Stuff, clear_color: v4, early: bool) {

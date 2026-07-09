@@ -334,14 +334,18 @@ RawAny :: struct {
 ////////////////////////////////////////////////
 // Preventing compiler optimizations like Dead Code Elimination
 
-// @study: can we also make a force_compiler_to_set(pointer, value) version?
-
 pretend_to_write :: #force_inline proc "contextless" (pointer: ^$T) {
     asm (^T) {"", "m"} (pointer)
 }
 
 pretend_to_read :: #force_inline proc "contextless" (pointer: ^$T) {
     asm (^T) {"", "m"} (pointer)
+}
+
+force_compiler_to_set :: #force_inline proc "contextless" (pointer: ^$T, value: T) {
+    pretend_to_read(pointer)
+    pointer^ = value
+    pretend_to_write(pointer)
 }
 
 ////////////////////////////////////////////////
