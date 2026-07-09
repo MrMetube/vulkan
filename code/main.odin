@@ -1023,14 +1023,16 @@ main :: proc () {
             early_cull_delta      := gpu_profile_get_zone_duration(&gpu, "early culling")
             late_cull_delta       := gpu_profile_get_zone_duration(&gpu, "late culling")
             
-            debug.cpu_time             = time_smoothed_blend(debug.cpu_time,             cpu_delta,             cpu_delta)
-            debug.early_cull_time      = time_smoothed_blend(debug.early_cull_time,      early_cull_delta,      cpu_delta)
-            debug.late_cull_time       = time_smoothed_blend(debug.late_cull_time,       late_cull_delta,       cpu_delta)
-            debug.early_rendering_time = time_smoothed_blend(debug.early_rendering_time, early_rendering_delta, cpu_delta)
-            debug.late_rendering_time  = time_smoothed_blend(debug.late_rendering_time,  late_rendering_delta,  cpu_delta)
+            blend_factor_k := time_smoothed_blend_factor(7, cpu_delta)
+            
+            debug.cpu_time             = linear_blend(cpu_delta,             debug.cpu_time,             blend_factor_k)
+            debug.early_cull_time      = linear_blend(early_cull_delta,      debug.early_cull_time,      blend_factor_k)
+            debug.late_cull_time       = linear_blend(late_cull_delta,       debug.late_cull_time,       blend_factor_k)
+            debug.early_rendering_time = linear_blend(early_rendering_delta, debug.early_rendering_time, blend_factor_k)
+            debug.late_rendering_time  = linear_blend(late_rendering_delta,  debug.late_rendering_time,  blend_factor_k)
             // this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
             if gpu_delta >= 0 {
-                debug.gpu_time = time_smoothed_blend(debug.gpu_time, gpu_delta, cpu_delta)
+                debug.gpu_time = linear_blend(gpu_delta, debug.gpu_time, blend_factor_k)
             }
             
             view :: proc (seconds: f64) -> time.Duration {

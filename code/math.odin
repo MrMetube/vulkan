@@ -143,15 +143,11 @@ barycentric_blend_s :: proc (a: $V/ [$N] $E, b, c: V, u, v: E) -> V {
     return result
 }
 
-// @todo just calculate k and pass it to as many linear_blends as i want
-time_smoothed_blend :: proc (from: f64, to: f64, delta_time: f64) -> f64 {
-    h :: 3.0 // = the amount of time it takes for the filter to converge to 90% of a fixed input value
-    // @speed We could precompute k if needed as it only depends on h and frame time, not the smoothed value itself.
+time_smoothed_blend_factor :: proc (h: f64, delta_time: f64) -> f64 {
+    // h = the amount of time it takes for the filter to converge to 90% of a fixed input value
     base := power(cast(f64) .1, 1 / h)
     k := power(base, delta_time)
-    
-    result := linear_blend(from, to, k)
-    return result
+    return k
 }
 
 safe_ratio_or_else :: proc { safe_ratio_or_else_s, safe_ratio_or_else_v }
