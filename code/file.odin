@@ -41,7 +41,7 @@ load_ktx_texture :: proc (filename: string, allocator: Allocator) -> Loaded_Text
     result.mip_offsets = make([] uint, result.mip_levels, allocator)
     
     for &offset, level in result.mip_offsets {
-        // @todo(viktor): this is not correct, is the Texture1 binding missing. This causes the mipmaps to be wrong.
+        // @todo this is not correct, is the Texture1 binding missing. This causes the mipmaps to be wrong.
         ktx.Texture2_GetImageOffset(cast(^ktx.Texture2) texture, cast(u32) level, 0, 0, &offset)
     }
     

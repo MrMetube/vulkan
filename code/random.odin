@@ -34,7 +34,7 @@ xor_shift :: proc (series: ^RandomSeries) ->  lane_u32 {
     return x
 }
 
-// @todo(viktor): why are all results less than 0.001 ?
+// @todo why are all results less than 0.001 ?
 random_unilateral :: proc { random_unilateral_scalar, random_unilateral_array, random_unilateral_vector }
 random_unilateral_scalar :: proc(series: ^RandomSeries, $T: typeid) -> T where !intrinsics.type_is_simd_vector(T), !intrinsics.type_is_array(T) {
     unilateral := random_unilateral(series)

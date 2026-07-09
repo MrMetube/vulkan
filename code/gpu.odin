@@ -223,7 +223,7 @@ Frame_Descriptor :: struct {
 
 ////////////////////////////////////////////////
 
-gpu_init :: proc (windows_hinstance: pmm) -> Gpu {
+gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
     gpu: Gpu
     
     {
@@ -606,7 +606,7 @@ gpu_init :: proc (windows_hinstance: pmm) -> Gpu {
         gpu.swapchain_format = formats[0].format
     }
     
-    ok := gpu_recreate_swapchain_if_needed(&gpu)
+    ok := gpu_recreate_swapchain_if_needed(&gpu, vsync)
     assert(ok)
     
     return gpu
@@ -639,8 +639,8 @@ check :: proc (result: vk.Result, loc := #caller_location) {
     }
 }
 
-gpu_recreate_swapchain_if_needed :: proc (gpu: ^Gpu) -> (can_render: bool) {
-    if gpu.swapchain_state != .Dirty && gpu.swapchain_state != .Window_Is_Minimized {
+gpu_recreate_swapchain_if_needed :: proc (gpu: ^Gpu, vsync: bool, force_recreation := false) -> (can_render: bool) {
+    if !force_recreation && gpu.swapchain_state != .Dirty && gpu.swapchain_state != .Window_Is_Minimized {
         return true
     }
     
@@ -648,6 +648,29 @@ gpu_recreate_swapchain_if_needed :: proc (gpu: ^Gpu) -> (can_render: bool) {
     
     surface_capabilities: vk.SurfaceCapabilitiesKHR
     check(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(gpu.physical_device, gpu.surface, &surface_capabilities))
+    
+    present_mode := vk.PresentModeKHR.FIFO
+    if !vsync {
+        present_mode_count: u32
+        check(vk.GetPhysicalDeviceSurfacePresentModesKHR(gpu.physical_device, gpu.surface, &present_mode_count, nil))
+        present_modes: [dynamic; 32] vk.PresentModeKHR; assert(present_mode_count <= cap(present_modes))
+        resize(&present_modes, present_mode_count)
+        check(vk.GetPhysicalDeviceSurfacePresentModesKHR(gpu.physical_device, gpu.surface, &present_mode_count, raw_data(&present_modes)))
+        
+        found: bool
+        for mode in present_modes {
+            if mode == .IMMEDIATE {
+                found = true
+                break
+            }
+        }
+        
+        if found {
+            present_mode = .IMMEDIATE
+        } else {
+            fmt.printfln("Vsync was requested but is not supported. Falling back to non-vsync, i.e. FIFO.")
+        }
+    }
     
     // :Linux: Wayland had a special value for surface_capabilities.currentExtent.width
     swapchain_extent := surface_capabilities.currentExtent
@@ -668,7 +691,7 @@ gpu_recreate_swapchain_if_needed :: proc (gpu: ^Gpu) -> (can_render: bool) {
         imageUsage       = { .TRANSFER_DST },
         preTransform     = { .IDENTITY },
         compositeAlpha   = { .OPAQUE },
-        presentMode      = VSync ? .FIFO : .IMMEDIATE,
+        presentMode      = present_mode,
         
         oldSwapchain = old_swapchain,
     }
@@ -1153,7 +1176,7 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
             cullMode  = cull_mode,
             frontFace = .COUNTER_CLOCKWISE,
             
-            // @todo(viktor): which of these fields can by dynamic state?
+            // @todo which of these fields can by dynamic state?
             // depthClampEnable:        b32,
             // rasterizerDiscardEnable: b32,
             // polygonMode:             PolygonMode,
@@ -1168,7 +1191,7 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
             rasterizationSamples = { sample_count },
         },
         
-        // @todo(viktor): not exposed in info. can this be dynamic state?
+        // @todo not exposed in info. can this be dynamic state?
         pDepthStencilState = &vk.PipelineDepthStencilStateCreateInfo {
             sType = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
             depthTestEnable  = true,
@@ -1181,7 +1204,7 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
             sType = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
             attachmentCount = auto_cast len(color_attachments),
             pAttachments    = raw_data(&color_attachments),
-            // @todo(viktor): these field from the optional blend desc? can these be dynamic state?
+            // @todo these field from the optional blend desc? can these be dynamic state?
             // logicOpEnable:   b32,     -> ext dynamic state
             // logicOp:         LogicOp, -> ext dynamic state
             // blendConstants:  [4]f32,  -> dynamic state
@@ -1277,7 +1300,7 @@ get_universal_heap_mapping :: proc (descriptor_size: u32, mappings: ^[2] vk.Desc
 
 // GpuQueue gpuCreateQueue(/* DEVICE & QUEUE CREATION DETAILS OMITTED */);
 
-// @todo(viktor): queue is ignored, we need to allocate from a pool created with the correct queue_family_index
+// @todo queue is ignored, we need to allocate from a pool created with the correct queue_family_index
 gpu_begin_command_recording :: proc (gpu: ^Gpu, command_pool: vk.CommandPool, _: vk.Queue) -> vk.CommandBuffer {
     info := vk.CommandBufferAllocateInfo {
         sType = .COMMAND_BUFFER_ALLOCATE_INFO,
@@ -1310,7 +1333,7 @@ gpu_submit :: proc (queue: vk.Queue, semaphore: vk.Semaphore, signal_value: u64,
         })
     }
     
-    // @todo(viktor): what if we want to signal multiple semaphores. This is only used by the image_aquired semaphores.
+    // @todo what if we want to signal multiple semaphores. This is only used by the image_aquired semaphores.
     once_submit_info := vk.SubmitInfo2 {
         sType = .SUBMIT_INFO_2,
         signalSemaphoreInfoCount = 1,
@@ -1507,12 +1530,11 @@ gpu_set_scissor :: proc (cmd: vk.CommandBuffer, offset: iv2 = 0, size: uv2) {
     vk.CmdSetScissor(cmd, 0, 1, &vk.Rect2D { offset = { **offset }, extent = { **size } })
 }
 
-// @todo(viktor): 
+// @todo 
 // void gpuSetDepthStencilState(GpuCommandBuffer cb, GpuDepthStencilState state);
 // void gpuSetBlendState(GpuCommandBuffer cb, GpuBlendState state); 
 
 gpu_begin_render_pass :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, desc: Render_Pass_Desc) {
-    // @api this should maybe be a parameter
     render_size := gpu.swapchain_size
     
     color_attachments: [dynamic; 64] vk.RenderingAttachmentInfo

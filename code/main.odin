@@ -14,15 +14,12 @@ import vk  "../lib/vulkan"
 
 Optimized :: ODIN_OPTIMIZATION_MODE == .Speed
 
-// @todo make this runtime changeable
-// @todo disabling VSync produces a validation error, that we wont see if optimizations are enabled, as those disable validation
-VSync      :: false when Optimized else true
 Validation :: false when Optimized else true
 
 ////////////////////////////////////////////////
 
 Geometry :: struct {
-    // @todo(viktor): all this data is not needed on the cpu, we could just directly upload it to the gpu buffers
+    // @todo all this data is not needed on the cpu, we could just directly upload it to the gpu buffers
     vertices:     [dynamic] Vertex,
     meshlets:     [dynamic] Meshlet,
     meshlet_data: [dynamic] u32,
@@ -197,12 +194,35 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
+    debug: struct {
+        vsync: bool,
+        
+        culling_enabled:   bool,
+        lod_enabled:       bool,
+        occlusion_enabled: bool,
+        display_pyramid:   bool,
+        display_pyramid_mip_level: i32,
+        
+        cpu_time:  f64,
+        gpu_time:  f64,
+        early_rendering_time: f64,
+        late_rendering_time:  f64,
+        early_cull_time: f64,
+        late_cull_time:  f64,
+    } = {
+        vsync = true,
+        
+        culling_enabled   = true,
+        lod_enabled       = true,
+        occlusion_enabled = true,
+    }
+    
     init_os_metrics()
     gpu: Gpu
     {
         props := sdl.GetWindowProperties(window)
         hinstance := sdl.GetPointerProperty(props, sdl.PROP_WINDOW_WIN32_INSTANCE_POINTER, nil)
-        gpu = gpu_init(hinstance)
+        gpu = gpu_init(hinstance, debug.vsync)
     }
     
     stuff: Render_Targets_And_Stuff
@@ -214,7 +234,7 @@ main :: proc () {
     // 200.000 suzannes: Default = 38.3 ms | GPU = 35.5 ms
     memory := Memory_Kind.Default
     
-    // @todo(viktor): draws change per frame and could also be placed in the per frame bump allocator, as we just need a gpu address
+    // @todo draws change per frame and could also be placed in the per frame bump allocator, as we just need a gpu address
     // All the geometry data can just live in the gpu
     vb_view,  vertex_buffer          := gpu_allocate(&gpu, [] Vertex,  256 * Megabyte / size_of(Vertex),  memory = memory)
     mlb_view, meshlet_buffer         := gpu_allocate(&gpu, [] Meshlet, 256 * Megabyte / size_of(Meshlet), memory = memory)
@@ -226,7 +246,7 @@ main :: proc () {
     
     dvb_cleared := false
     
-    // @todo(viktor): this signifies that we dont need these to be cpu-visible memory
+    // @todo this signifies that we dont need these to be cpu-visible memory
     unused(dvb_view)
     
     geometry: Geometry
@@ -364,24 +384,6 @@ main :: proc () {
     quit: bool
     last_time := time.tick_now()
     
-    debug: struct {
-        culling_enabled:   bool,
-        lod_enabled:       bool,
-        occlusion_enabled: bool,
-        display_pyramid:   bool,
-        display_pyramid_mip_level: i32,
-        
-        cpu_time:  f64,
-        gpu_time:  f64,
-        early_rendering_time: f64,
-        late_rendering_time:  f64,
-        early_cull_time: f64,
-        late_cull_time:  f64,
-    } = {
-        culling_enabled   = true,
-        lod_enabled       = true,
-        occlusion_enabled = true,
-    }
     
     // @correctness ensure that this is enough and that we did not overflow inside of a frame and override someone elses data for a shader
     frame_bump_allocators: [MaxFramesInFlight] Bump_Allocator
@@ -413,6 +415,7 @@ main :: proc () {
         
         cpu_begin_profile_zone("Input Events")
         
+        vsync_changed: bool
         window_event_begin := time.tick_now()
         for event: sdl.Event; sdl.PollEvent(&event); {
             #partial switch event.type {
@@ -436,6 +439,8 @@ main :: proc () {
                 case sdl.K_L:     debug.lod_enabled       = !debug.lod_enabled
                 case sdl.K_O:     debug.occlusion_enabled = !debug.occlusion_enabled
                 case sdl.K_P:     debug.display_pyramid   = !debug.display_pyramid
+                
+                case sdl.K_V:     debug.vsync = !debug.vsync; vsync_changed = true
                 
                 case sdl.K_I:     print_profile_and_stats = true
                 
@@ -490,7 +495,7 @@ main :: proc () {
         frame_index := absolute_frame_index % MaxFramesInFlight
         absolute_frame_index += 1
         
-        if gpu_recreate_swapchain_if_needed(&gpu) {
+        if gpu_recreate_swapchain_if_needed(&gpu, debug.vsync, vsync_changed) {
             ok := get_next_image(&gpu, frame_semaphore, frame_index)
             assert(ok)
         }
@@ -1008,7 +1013,7 @@ main :: proc () {
         
         {
             cpu_scoped_profile_zone("GPU profiler collation")
-            // @todo(viktor): how can we record how many triangles we have rendered after culling?
+            // @todo how can we record how many triangles we have rendered after culling?
             
             gpu_profile_collate_times(&gpu, print_profile_and_stats)
             
@@ -1040,6 +1045,9 @@ main :: proc () {
                 view(debug.early_rendering_time), view(debug.late_rendering_time),
             )
             fmt.sbprintf(&sb, ", Features: ")
+            if debug.vsync {
+                fmt.sbprintf(&sb, "VSync ")
+            }
             if debug.culling_enabled {
                 fmt.sbprintf(&sb, "Culling ")
             }

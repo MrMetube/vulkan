@@ -12,7 +12,7 @@ import win "core:sys/windows"
 
 ////////////////////////////////////////////////
 
-// @todo(viktor): explain the args parsing syntax (run|debug):<target.exe in build dir>
+// @todo explain the args parsing syntax (run|debug):<target.exe in build dir>
 
 cmd   := &the_state.cmd
 procs := &the_state.procs
@@ -50,7 +50,7 @@ Handle_Running_Exe :: enum {
 }
 
 Run :: struct {
-    // @note(viktor): an empty name "" means run the default output
+    // @note an empty name "" means run the default output
     name: string,
     debug: bool,
 }
@@ -87,7 +87,7 @@ deinit_build :: proc () {
 ////////////////////////////////////////////////
 
 begin_build :: proc (cmd: ^Cmd, package_directory: string, output_name: string, handling: Handle_Running_Exe = .Skip) -> bool {
-    // @todo(viktor): check that we do not nest, or make this stateless(see current_output)
+    // @todo check that we do not nest, or make this stateless(see current_output)
     result: bool
     
     if handle_running_exe_gracefully(output_name, handling) {
@@ -183,7 +183,7 @@ run_or_debug_according_to_args :: proc () {
     for run in the_state.runs {
         name := run.name
         if name == "" { // default
-            // @note(viktor): assume last output
+            // @note assume last output
             name = the_state.last_output
         }
         
@@ -272,7 +272,7 @@ handle_running_exe_gracefully :: proc (exe_name: string, handling: Handle_Runnin
             os.exit(0)
             
         case .Kill:
-            // @note(viktor): if the exe was started from the debugger it should already be killed by the kill_all command before the build was started
+            // @note if the exe was started from the debugger it should already be killed by the kill_all command before the build was started
             if running, _ := is_running(raddbg); !running {
                 fmt.printf("  Killing running instance.\n")
                 
