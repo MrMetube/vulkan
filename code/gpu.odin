@@ -15,11 +15,12 @@ package main
 import "base:intrinsics"
 import "base:runtime"
 
+import "core:dynlib"
 import "core:fmt"
 import "core:os"
 
+import win "core:sys/windows"
 import vk  "../lib/vulkan"
-import sdl "vendor:sdl3" // @todo get rid of this dependency
 
 MaxFramesInFlight :: 2
 
@@ -87,7 +88,7 @@ GpuSlice :: struct ($T: typeid) {
     byte_size: int,
 }
 
-// @todo(viktor): can we find a way not or a better place to store this metadata per allocation?
+// If we had access to the address_range extension, most if not all vulkan calls that take a buffer object could be deleted.
 _the_gpu_allocations: map[vk.DeviceAddress] GpuAllocation
 GpuAllocation :: struct {
     buffer:  vk.Buffer,
@@ -222,24 +223,33 @@ Frame_Descriptor :: struct {
 
 ////////////////////////////////////////////////
 
-gpu_init :: proc (window: ^sdl.Window) -> Gpu {
+gpu_init :: proc (windows_hinstance: pmm) -> Gpu {
     gpu: Gpu
     
     {
-        vk.GetInstanceProcAddr = auto_cast sdl.Vulkan_GetVkGetInstanceProcAddr()
-        vk.load_proc_addresses_global(auto_cast vk.GetInstanceProcAddr)
+        vulkan_path: string
+        if ODIN_OS == .Windows {
+            vulkan_path = "vulkan-1.dll"
+        } else { unimplemented() } // Linux: "libvulkan.so.1" @slop
+        
+        vulkan, did_load := dynlib.load_library(vulkan_path, allocator = context.temp_allocator)
+        if !did_load {
+            fmt.eprintfln("Could not load the vulkan dynamic lib %q: %v", vulkan_path, dynlib.last_error())
+            os.exit(1)
+        }
+        
+        get_instance_proc, ok := dynlib.symbol_address(vulkan, "vkGetInstanceProcAddr", allocator = context.temp_allocator)
+        assert(ok)
+        vk.load_proc_addresses_global(get_instance_proc)
         
         {
-            instance_extension_count: u32
-            instance_extensions_raw := sdl.Vulkan_GetInstanceExtensions(&instance_extension_count)
-            
-            instance_extensions: [dynamic; 128] cstring
-            assert(instance_extension_count <= cap(instance_extensions))
-            
-            append(&instance_extensions, ..instance_extensions_raw[:instance_extension_count])
+            instance_extension_names: [dynamic; 16] cstring
+            if ODIN_OS == .Windows {
+                append(&instance_extension_names, "VK_KHR_surface", "VK_KHR_win32_surface")
+            } else { unimplemented() }
             
             when Validation {
-                append(&instance_extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
+                append(&instance_extension_names, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
             }
             
             instance_create_info := vk.InstanceCreateInfo {
@@ -249,8 +259,8 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
                     pApplicationName = "Vulkan Renderer",
                     apiVersion = vk.API_VERSION_1_4,
                 },
-                enabledExtensionCount   = auto_cast len(instance_extensions),
-                ppEnabledExtensionNames = &instance_extensions[0],
+                enabledExtensionCount   = auto_cast len(instance_extension_names),
+                ppEnabledExtensionNames = &instance_extension_names[0],
             }
             
             _ :: runtime
@@ -296,6 +306,18 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
         
         ////////////////////////////////////////////////
         
+        if ODIN_OS == .Windows {
+            
+            info := vk.Win32SurfaceCreateInfoKHR {
+                sType = .WIN32_SURFACE_CREATE_INFO_KHR,
+                hinstance = cast(win.HANDLE) windows_hinstance,
+                hwnd      = win.GetActiveWindow(),
+            }
+            check(vk.CreateWin32SurfaceKHR(gpu.instance, &info, nil, &gpu.surface))
+        } else { unimplemented() }
+        
+        ////////////////////////////////////////////////
+        
         {
             physical_devices: [dynamic; 128] vk.PhysicalDevice
             {
@@ -327,20 +349,15 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
                     }
                 }
                 
-                if family_index_with_graphics == vk.QUEUE_FAMILY_IGNORED {
-                    continue
-                }
+                if family_index_with_graphics == vk.QUEUE_FAMILY_IGNORED { continue }
                 
-                if !sdl.Vulkan_GetPresentationSupport(auto_cast gpu.instance, auto_cast device, family_index_with_graphics) {
-                    continue
-                }
+                supported: b32
+                vk.GetPhysicalDeviceSurfaceSupportKHR(device, family_index_with_graphics, gpu.surface, &supported)
+                if !supported { continue }
                 
                 properties := vk.PhysicalDeviceProperties2 { sType = .PHYSICAL_DEVICE_PROPERTIES_2 }
                 vk.GetPhysicalDeviceProperties2(device, &properties)
-                
-                if properties.properties.apiVersion < vk.API_VERSION_1_4 {
-                    continue
-                }
+                if properties.properties.apiVersion < vk.API_VERSION_1_4 { continue }
                 
                 if preferred == nil && properties.properties.deviceType == .DISCRETE_GPU {
                     preferred = device
@@ -369,11 +386,6 @@ gpu_init :: proc (window: ^sdl.Window) -> Gpu {
         
         ////////////////////////////////////////////////
         
-        if !sdl.Vulkan_CreateSurface(window, auto_cast gpu.instance, nil, auto_cast &gpu.surface) {
-            loc := #location()
-            fmt.printf("%v:%v:%v: SDL call returned %v", loc.file_path, loc.line, loc.column, sdl.GetError())
-            os.exit(1)
-        }
     }
     
     ////////////////////////////////////////////////

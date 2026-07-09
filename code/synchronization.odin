@@ -32,7 +32,7 @@ complete_previous_reads_before_future_reads :: proc () {
     intrinsics.atomic_thread_fence(.Acquire)
 }
 
-// @study(viktor): When would "Sequentially Consistent" ordering be required. Reminder: It ensures not just local order, but global order between all threads and all other "Sequentially Consistent" fences(if I understood it correctly).
+// @study When would "Sequentially Consistent" ordering be required. Reminder: It ensures not just local order, but global order between all threads and all other "Sequentially Consistent" fences(if I understood it correctly).
 compiler_fence :: proc () {
     intrinsics.atomic_signal_fence(.Acq_Rel)
 }

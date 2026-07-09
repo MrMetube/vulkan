@@ -198,8 +198,12 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     init_os_metrics()
-    
-    gpu := gpu_init(window)
+    gpu: Gpu
+    {
+        props := sdl.GetWindowProperties(window)
+        hinstance := sdl.GetPointerProperty(props, sdl.PROP_WINDOW_WIN32_INSTANCE_POINTER, nil)
+        gpu = gpu_init(hinstance)
+    }
     
     stuff: Render_Targets_And_Stuff
     stuff.depth_buffer.format = .D32_SFLOAT
