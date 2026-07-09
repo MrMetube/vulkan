@@ -22,12 +22,7 @@ the_gpu_profiler: struct {
 Profile_Query :: struct { zone_index: int, kind: Profile_Event_Kind }
 
 gpu_profile_init :: proc (gpu: ^Gpu) {
-    create_info := vk.QueryPoolCreateInfo {
-        sType = .QUERY_POOL_CREATE_INFO,
-        queryType = .TIMESTAMP,
-        queryCount = QueryPoolSize,
-    }
-    check(vk.CreateQueryPool(gpu.device, &create_info, nil, &the_gpu_profiler.pool))
+    the_gpu_profiler.pool = create_query_pool(gpu, QueryPoolSize, .TIMESTAMP)
     
     the_gpu_profiler.zones.allocator = context.allocator
     

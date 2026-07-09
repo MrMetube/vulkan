@@ -27,13 +27,20 @@ view_init :: proc "contextless" () {
 
 ////////////////////////////////////////////////
 
+Magnitude_Kind :: enum {
+    Data,
+    Count,
+}
+
 View_Magnitude :: struct {
+    kind: Magnitude_Kind,
     value:     u64,
     precision: int,
 }
 
-view_magnitude :: proc (#any_int value: u64, #any_int precision: int = 1) -> View_Magnitude {
+view_magnitude :: proc (#any_int value: u64, #any_int precision: int = 1, kind := Magnitude_Kind.Data) -> View_Magnitude {
     result := View_Magnitude {
+        kind      = kind,
         value     = value,
         precision = precision,
     }
@@ -45,12 +52,23 @@ View_Magnitude_Formatter :: proc (info: ^fmt.Info, arg: any, verb: rune) -> bool
     
     value: f64
     symbol: rune
-    switch {
-    case view.value > 1000_000_000_000: symbol, value = 'T', cast(f64) view.value / 1000_000_000_000
-    case view.value > 1000_000_000:     symbol, value = 'G', cast(f64) view.value / 1000_000_000
-    case view.value > 1000_000:         symbol, value = 'M', cast(f64) view.value / 1000_000
-    case view.value > 1000:             symbol, value = 'k', cast(f64) view.value / 1000
-    case:                               symbol, value = ' ', cast(f64) view.value
+    switch view.kind {
+    case .Data:
+        switch {
+        case view.value > 1000_000_000_000: symbol, value = 'T', cast(f64) view.value / 1000_000_000_000
+        case view.value > 1000_000_000:     symbol, value = 'G', cast(f64) view.value / 1000_000_000
+        case view.value > 1000_000:         symbol, value = 'M', cast(f64) view.value / 1000_000
+        case view.value > 1000:             symbol, value = 'k', cast(f64) view.value / 1000
+        case:                               symbol, value = ' ', cast(f64) view.value
+        }
+    case .Count:
+        switch {
+        case view.value > 1000_000_000_000: symbol, value = 'T', cast(f64) view.value / 1000_000_000_000
+        case view.value > 1000_000_000:     symbol, value = 'B', cast(f64) view.value / 1000_000_000
+        case view.value > 1000_000:         symbol, value = 'M', cast(f64) view.value / 1000_000
+        case view.value > 1000:             symbol, value = 'k', cast(f64) view.value / 1000
+        case:                               symbol, value = ' ', cast(f64) view.value
+        }
     }
     
     info.prec = view.precision

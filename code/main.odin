@@ -325,25 +325,8 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    stats_pool: vk.QueryPool
-    stats_count: u32
-    {
-        stats_bits := vk.QueryPipelineStatisticFlags {
-            .FRAGMENT_SHADER_INVOCATIONS,
-            .COMPUTE_SHADER_INVOCATIONS,
-            .TASK_SHADER_INVOCATIONS_EXT,
-            .MESH_SHADER_INVOCATIONS_EXT,
-        }
-        stats_count = cast(u32) card(stats_bits)
-        StatsSize :: 1
-        create_info := vk.QueryPoolCreateInfo {
-            sType = .QUERY_POOL_CREATE_INFO,
-            queryType          = .PIPELINE_STATISTICS,
-            pipelineStatistics = stats_bits,
-            queryCount         = stats_count,
-        }
-        check(vk.CreateQueryPool(gpu.device, &create_info, nil, &stats_pool))
-    }
+    stats_count: u32 = 4
+    stats_pool := create_query_pool(&gpu, stats_count, .MESH_PRIMITIVES_GENERATED_EXT)
     
     ////////////////////////////////////////////////
     
@@ -717,6 +700,9 @@ main :: proc () {
         
         gpu_set_active_heap(cmd, &descriptor_heap)
         
+        stats_pool_query_index: u32
+        vk.CmdResetQueryPool(cmd, stats_pool, 0, stats_count)
+        
         ////////////////////////////////////////////////
         
         gpu_image_barriers(cmd, { .BY_REGION },
@@ -792,14 +778,7 @@ main :: proc () {
             gpu_profile_zone_begin("early rendering pass")
             gpu_labeled_region_begin(cmd, "early rendering pass", {0.6, 0.1, 07, 1.0})
                 begin_meshlet_rendering(&gpu, cmd, &stuff, {0.07, 0.07, 0.07, 1}, early = true)
-                        
-                    if print_profile_and_stats {
-                        vk.ResetQueryPool(gpu.device, stats_pool, 0, stats_count)
-                        vk.CmdBeginQuery(cmd, stats_pool, 0, {})
-                    }
-                    
-                    gpu_labeled_region_begin(cmd, "meshlets", {0.0, 0.6, 0.8, 1.0})
-                    gpu_profile_zone_begin("meshlets")
+                    vk.CmdBeginQuery(cmd, stats_pool, stats_pool_query_index, {})
                     
                     gpu_set_pipeline(cmd, meshlet_pipeline)
                         gpu_draw_meshlets_indirect_count(cmd, &frame_descriptor,
@@ -807,9 +786,9 @@ main :: proc () {
                             auto_cast len(draws), offset_of(Draw_Command, command),
                             draw_globals_gpu,
                         )
-                    
-                    gpu_profile_zone_end()
-                    gpu_labeled_region_end(cmd)
+                        
+                    vk.CmdEndQuery(cmd, stats_pool, stats_pool_query_index)
+                    stats_pool_query_index += 1
                     
                 gpu_end_render_pass(cmd)
             gpu_labeled_region_end(cmd)
@@ -933,6 +912,8 @@ main :: proc () {
                     { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS },
                 )
                 
+                vk.CmdBeginQuery(cmd, stats_pool, stats_pool_query_index, {})
+                
                 begin_meshlet_rendering(&gpu, cmd, &stuff, {}, early = false)
                 
                     gpu_set_pipeline(cmd, meshlet_pipeline)
@@ -941,13 +922,12 @@ main :: proc () {
                             auto_cast len(draws), offset_of(Draw_Command, command),
                             draw_globals_gpu,
                         )
-                    
+                        
                 gpu_end_render_pass(cmd)
                 
-                if print_profile_and_stats {
-                    vk.CmdEndQuery(cmd, stats_pool, 0)
-                }
-                
+                vk.CmdEndQuery(cmd, stats_pool, stats_pool_query_index)
+                stats_pool_query_index += 1
+                    
             gpu_labeled_region_end(cmd)
             gpu_profile_zone_end()
         }
@@ -1005,8 +985,21 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         {
-            cpu_scoped_profile_zone("GPU profiler collation")
-            // @todo how can we record how many triangles we have rendered after culling?
+            cpu_scoped_profile_zone("GPU profiling")
+            
+            triangle_count: u64
+            if absolute_frame_index >= MaxFramesInFlight {
+                cpu_scoped_profile_zone("collect and print shader stats")
+                
+                stats_result: [128] u64
+                size := cast(int) size_of_slice(stats_result[:])
+                // @speed we should really not wait for these, as that obviously effects timing measurements
+                check(vk.GetQueryPoolResults(gpu.device, stats_pool, 0, 1, size, &stats_result[0], size_of(stats_result[0]), { ._64, .WAIT }))
+                
+                for i in 0..<stats_pool_query_index {
+                    triangle_count += stats_result[i]
+                }
+            }
             
             gpu_profile_collate_times(&gpu, print_profile_and_stats)
             
@@ -1034,8 +1027,9 @@ main :: proc () {
             
             cpu_begin_profile_zone("Update window title")
             sb := strings.builder_make(context.temp_allocator)
-            fmt.sbprintf(&sb, "cpu: %.3v, gpu: %.3v, culling: early %.3v / late %.3v, rendering: early %.3v / late %.3v", 
+            fmt.sbprintf(&sb, "cpu: %.3v, gpu: %.3v, %v tri/s, culling: early %.3v / late %.3v, rendering: early %.3v / late %.3v", 
                 view(debug.cpu_time), view(debug.gpu_time), 
+                view_magnitude(cast(u64) (cast(f64) triangle_count / debug.gpu_time), kind = .Count),
                 view(debug.early_cull_time), view(debug.late_cull_time),
                 view(debug.early_rendering_time), view(debug.late_rendering_time),
             )
@@ -1060,28 +1054,6 @@ main :: proc () {
             title := strings.to_cstring(&sb)
             sdl.SetWindowTitle(window, title)
             cpu_end_profile_zone()
-            
-            if print_profile_and_stats {
-                cpu_scoped_profile_zone("collect and print shader stats")
-                
-                stats_result: [128] u64
-                size := cast(int) size_of_slice(stats_result[:])
-                query_result := vk.GetQueryPoolResults(gpu.device, stats_pool, 0, 1, size, &stats_result[0], size_of(stats_result[0]), { ._64, .WAIT })
-                check(query_result)
-                
-                fmt.println("------------------------------------\nStats:")
-                bits := [?] vk.QueryPipelineStatisticFlag {
-                    .COMPUTE_SHADER_INVOCATIONS,
-                    .TASK_SHADER_INVOCATIONS_EXT,
-                    .MESH_SHADER_INVOCATIONS_EXT,
-                    .FRAGMENT_SHADER_INVOCATIONS,
-                }
-                
-                for bit, index in bits {
-                    fmt.printfln("  %v = %v", bit, view_magnitude(stats_result[index]))
-                }
-                fmt.printfln("-------------------------------------")
-            }
         }
         
         cpu_end_profile_zone()

@@ -1808,3 +1808,22 @@ write_descriptor_sampler :: proc (gpu: ^Gpu, filter: vk.Filter, mipmap_mode: vk.
     range := vk.HostAddressRangeEXT { address = raw_data(descriptor_heap_slot), size = len(descriptor_heap_slot) }
     check(vk.WriteSamplerDescriptorsEXT(gpu.device, 1, &info, &range))
 }
+
+////////////////////////////////////////////////
+
+create_query_pool :: proc (gpu: ^Gpu, query_count: u32, type: vk.QueryType, stats_bits := vk.QueryPipelineStatisticFlags {}) -> vk.QueryPool {
+    create_info := vk.QueryPoolCreateInfo {
+        sType = .QUERY_POOL_CREATE_INFO,
+        queryType  = type,
+        queryCount = query_count,
+    }
+    
+    if type == .PIPELINE_STATISTICS {
+        create_info.pipelineStatistics = stats_bits
+    }
+    
+    result: vk.QueryPool
+    check(vk.CreateQueryPool(gpu.device, &create_info, nil, &result))
+    
+    return result
+}
