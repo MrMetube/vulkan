@@ -109,7 +109,7 @@ Raster_Desc :: struct {
     cull:                         Cull,
     alpha_to_coverage:            bool,
     // support_dual_source_blending: bool,
-    sample_count:                 u8,
+    sample_count:                 vk.SampleCountFlag,
     depth_format:                 Format,
     stencil_format:               Format,
     color_targets:                [] Color_Target,
@@ -118,7 +118,7 @@ Raster_Desc :: struct {
 
 DefaultRasterDesc :: Raster_Desc {
     topology = .TRIANGLE_LIST,
-    sample_count = 1,
+    sample_count = ._1,
     cull = .CW,
 }
 
@@ -991,42 +991,107 @@ Specialization_Constant :: struct #raw_union {
     b: b32,
 }
 
+// This is a helper struct and proc to wrangle all the pointers between structs in one place.
+// It must be allocated(on the stack) by the caller, to ensure the internal pointers are valid
+// after the return of the helper function.
+Pipeline_Info :: struct {
+    mappings:               [2] vk.DescriptorSetAndBindingMappingEXT,
+    heap_mapping:           vk.ShaderDescriptorSetAndBindingMappingInfoEXT,
+    flags2:                 vk.PipelineCreateFlags2CreateInfo,
+    
+    specialization_entries: [dynamic; 32] vk.SpecializationMapEntry,
+    specialization_info:    vk.SpecializationInfo,
+    
+    shader_stages:          [dynamic; 8] vk.PipelineShaderStageCreateInfo,
+    module_infos:           [dynamic; 8] vk.ShaderModuleCreateInfo,
+}
+
+make_pipeline_info :: proc (info: ^Pipeline_Info, gpu: ^Gpu, heap: Descriptor_Heap, shaders: [] Shader, constants: [] Specialization_Constant) {
+    // universal Descriptor Heap mapping
+    info.mappings[0] = { // texture array descriptor
+        sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
+        descriptorSet = 1,
+        firstBinding = 0,
+        bindingCount = 1,
+        resourceMask =  vk.SpirvResourceTypeFlagsEXT_ALL,
+        source = .HEAP_WITH_CONSTANT_OFFSET,
+        
+        sourceData = { constantOffset = { heapArrayStride = heap.resource_size } },
+    }
+    
+    info.mappings[1] = { // sampler descriptors
+        sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
+        descriptorSet = 2,
+        firstBinding = 0,
+        bindingCount = DescriptorSamplerLimit,
+        resourceMask = vk.SpirvResourceTypeFlagsEXT_ALL,
+        source = .HEAP_WITH_CONSTANT_OFFSET,
+        
+        sourceData = { constantOffset = { heapArrayStride = heap.resource_size } },
+    }
+    
+    info.heap_mapping = vk.ShaderDescriptorSetAndBindingMappingInfoEXT { 
+        sType = .SHADER_DESCRIPTOR_SET_AND_BINDING_MAPPING_INFO_EXT,
+        mappingCount = 2,
+        pMappings    = &info.mappings[0],
+    }
+    
+    info.flags2 = vk.PipelineCreateFlags2CreateInfo {
+        sType = .PIPELINE_CREATE_FLAGS_2_CREATE_INFO,
+        flags = { .DESCRIPTOR_HEAP_EXT },
+    }
+    
+    // Fill specialization constants
+    for constant, i in constants {
+        append(&info.specialization_entries, vk.SpecializationMapEntry {
+            constantID = constant.u, 
+            offset     = cast(u32) i * size_of(u32), 
+            size       = size_of(u32),
+        })
+    }
+    
+    info.specialization_info = vk.SpecializationInfo {
+        mapEntryCount = cast(u32) len(info.specialization_entries),
+        pMapEntries   = raw_data(&info.specialization_entries),
+        dataSize      = cast(int) size_of_slice(constants),
+        pData         = raw_data(constants),
+    }
+    
+    // Shader creation
+    for &shader in shaders {
+        append(&info.module_infos, vk.ShaderModuleCreateInfo {
+            sType = .SHADER_MODULE_CREATE_INFO, 
+            pNext = &info.heap_mapping,
+            
+            codeSize = len(shader.bytes), 
+            pCode    = cast(^u32) raw_data(shader.bytes),
+        })
+        
+        append(&info.shader_stages, vk.PipelineShaderStageCreateInfo{ 
+            sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
+            pNext = last(&info.module_infos),
+            
+            stage = { shader.parsed.stage }, 
+            pName = "main", 
+            
+            pSpecializationInfo = &info.specialization_info,
+        })
+    }
+}
+
 gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil) -> Pipeline {
     assert(compute.parsed.stage == .COMPUTE)
-    compute := compute
+    
+    pipeline_info: Pipeline_Info
+    make_pipeline_info(&pipeline_info, gpu, heap, { compute }, constants)
     
     result: Pipeline
     result.bind_point = .COMPUTE
-    
-    mappings := [2] vk.DescriptorSetAndBindingMappingEXT {}
-    heap_mapping := get_universal_heap_mapping(heap.resource_size, &mappings)
-    
-    specialization_entries: [dynamic; 32] vk.SpecializationMapEntry
-    specialization_info := fill_specialization_constants(&specialization_entries, constants)
-    
     create_info := vk.ComputePipelineCreateInfo {
         sType = .COMPUTE_PIPELINE_CREATE_INFO,
         
-        pNext = &vk.PipelineCreateFlags2CreateInfo {
-            sType = .PIPELINE_CREATE_FLAGS_2_CREATE_INFO,
-            flags = { .DESCRIPTOR_HEAP_EXT },
-        },
-        
-        stage  = { 
-            sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
-            stage = { compute.parsed.stage }, 
-            
-            pName = "main", 
-            pSpecializationInfo = &specialization_info,
-            
-            pNext = &vk.ShaderModuleCreateInfo {
-                sType    = .SHADER_MODULE_CREATE_INFO,
-                codeSize = len(compute.bytes),
-                pCode    = cast(^u32) &compute.bytes[0],
-                
-                pNext = &heap_mapping,
-            },
-        },
+        pNext = &pipeline_info.flags2,
+        stage = pipeline_info.shader_stages[0],
     }
     
     check(vk.CreateComputePipelines(gpu.device, gpu.pipeline_cache, 1, &create_info, nil, &result.pipeline))
@@ -1067,36 +1132,19 @@ gpu_create_graphics_meshlet_pipeline_mesh :: proc (gpu: ^Gpu, mesh, frag: Shader
 }
 
 gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info: Raster_Desc, heap: Descriptor_Heap, shaders: ..Shader) {
+    pipeline_info: Pipeline_Info
+    make_pipeline_info(&pipeline_info, gpu, heap, shaders, {})
+    
     result.bind_point = .GRAPHICS
     
-    mappings := [2] vk.DescriptorSetAndBindingMappingEXT {}
-    heap_mapping := get_universal_heap_mapping(heap.resource_size, &mappings)
-    
-    shader_stages: [dynamic; 8] vk.PipelineShaderStageCreateInfo
-    module_infos:  [dynamic; 8] vk.ShaderModuleCreateInfo
-    for &shader in shaders {
-        append(&module_infos, vk.ShaderModuleCreateInfo {
-            sType = .SHADER_MODULE_CREATE_INFO, 
-            codeSize = len(shader.bytes), 
-            pCode    = cast(^u32) raw_data(shader.bytes),
-            
-            pNext = &heap_mapping,
-        })
-        
-        append(&shader_stages, vk.PipelineShaderStageCreateInfo{ 
-            sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
-            stage = { shader.parsed.stage }, 
-            pName = "main", 
-            pNext = last(&module_infos),
-        })
-    }
-    
+    // @incomplete expose all dynamic states that are core in 1.4, 
+    // and remove their values below and from Raster_Desc if present.
+    // DEPTH_BIAS, BLEND_CONSTANTS, DEPTH_BOUNDS, STENCIL_COMPARE_MASK, STENCIL_WRITE_MASK, STENCIL_REFERENCE
     dynamic_states := [] vk.DynamicState { .VIEWPORT, .SCISSOR, .LINE_WIDTH }
     
     color_formats: [dynamic; 32] Format
     for target in info.color_targets { append(&color_formats, target.format) }
     
-    // @incomplete this has a bunch more fields
     color_attachments: [dynamic; 32] vk.PipelineColorBlendAttachmentState
     for target in info.color_targets {
         attachment := vk.PipelineColorBlendAttachmentState {
@@ -1119,18 +1167,6 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
         append(&color_attachments, attachment)
     }
     
-    sample_count: vk.SampleCountFlag
-    switch info.sample_count {
-    case: assert(false, "invalid sample count")
-    case 1:  sample_count = ._1
-    case 2:  sample_count = ._2
-	case 4:  sample_count = ._4
-	case 8:  sample_count = ._8
-	case 16: sample_count = ._16
-	case 32: sample_count = ._32
-	case 64: sample_count = ._64
-    }
-    
     cull_mode:  vk.CullModeFlags
     switch info.cull {
     case .None: cull_mode = {}
@@ -1145,10 +1181,7 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
         pNext = &vk.PipelineRenderingCreateInfo {
             sType = .PIPELINE_RENDERING_CREATE_INFO,
             
-            pNext = &vk.PipelineCreateFlags2CreateInfo {
-                sType = .PIPELINE_CREATE_FLAGS_2_CREATE_INFO,
-                flags = { .DESCRIPTOR_HEAP_EXT },
-            },
+            pNext = &pipeline_info.flags2,
             
             colorAttachmentCount    = auto_cast len(color_formats),
             pColorAttachmentFormats = raw_data(&color_formats),
@@ -1156,8 +1189,8 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
             stencilAttachmentFormat = info.stencil_format,
         },
         
-        stageCount = auto_cast len(shader_stages),
-        pStages    = &shader_stages[0],
+        stageCount = auto_cast len(pipeline_info.shader_stages),
+        pStages    = &pipeline_info.shader_stages[0],
         
         pInputAssemblyState = &vk.PipelineInputAssemblyStateCreateInfo {
             sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
@@ -1186,9 +1219,10 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
             // depthBiasSlopeFactor:    f32,
         },
         
+        // @incomplete
         pMultisampleState = &vk.PipelineMultisampleStateCreateInfo {
             sType = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-            rasterizationSamples = { sample_count },
+            rasterizationSamples = { info.sample_count },
         },
         
         // @todo not exposed in info. can this be dynamic state?
@@ -1230,57 +1264,6 @@ destroy_pipeline :: proc (gpu: ^Gpu, pipeline: Pipeline) {
         check(vk.DeviceWaitIdle(gpu.device))
         vk.DestroyPipeline(gpu.device, pipeline.pipeline, nil)
     }
-}
-
-fill_specialization_constants :: proc (specialization_entries: ^[dynamic; 32] vk.SpecializationMapEntry, constants: [] Specialization_Constant) -> vk.SpecializationInfo {
-    for constant, i in constants {
-        append(specialization_entries, vk.SpecializationMapEntry {
-            constantID = constant.u, 
-            offset     = cast(u32) i * size_of(u32), 
-            size       = size_of(u32),
-        })
-    }
-    
-    specialization_info := vk.SpecializationInfo {
-        mapEntryCount = cast(u32) len(specialization_entries),
-        pMapEntries   = raw_data(specialization_entries),
-        dataSize      = cast(int) size_of_slice(constants),
-        pData         = raw_data(constants),
-    }
-    
-    return specialization_info
-}
-
-get_universal_heap_mapping :: proc (descriptor_size: u32, mappings: ^[2] vk.DescriptorSetAndBindingMappingEXT) -> vk.ShaderDescriptorSetAndBindingMappingInfoEXT {
-    mappings[0] = { // texture array descriptor
-        sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
-        descriptorSet = 1,
-        firstBinding = 0,
-        bindingCount = 1,
-        resourceMask =  vk.SpirvResourceTypeFlagsEXT_ALL,
-        source = .HEAP_WITH_CONSTANT_OFFSET,
-        
-        sourceData = { constantOffset = { heapArrayStride = descriptor_size } },
-    }
-	
-    mappings[1] = { // sampler descriptors
-        sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
-        descriptorSet = 2,
-        firstBinding = 0,
-        bindingCount = DescriptorSamplerLimit,
-        resourceMask = vk.SpirvResourceTypeFlagsEXT_ALL,
-        source = .HEAP_WITH_CONSTANT_OFFSET,
-        
-        sourceData = { constantOffset = { heapArrayStride = descriptor_size } },
-    }
-    
-	result := vk.ShaderDescriptorSetAndBindingMappingInfoEXT { 
-        sType = .SHADER_DESCRIPTOR_SET_AND_BINDING_MAPPING_INFO_EXT,
-        mappingCount = 2,
-        pMappings    = &mappings[0],
-    }
-    
-    return result
 }
 
 
@@ -1552,11 +1535,8 @@ gpu_wait_before :: proc (cmd: vk.CommandBuffer, stage: vk.PipelineStageFlags2, g
     unimplemented()
 }
 
-the_bound_pipeline: Pipeline
-
 gpu_set_pipeline :: proc (cmd: vk.CommandBuffer, pipeline: Pipeline) {
     vk.CmdBindPipeline(cmd, pipeline.bind_point, pipeline.pipeline)
-    the_bound_pipeline = pipeline
 }
 
 gpu_set_viewport :: proc (cmd: vk.CommandBuffer, offset: v2 = 0, size: v2, min_depth: f32 = 0, max_depth: f32 = 1) {
