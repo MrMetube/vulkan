@@ -3,6 +3,7 @@ package main
 
 import "core:fmt"
 import "core:time"
+import "profiler"
 
 import vk "../lib/vulkan"
 
@@ -11,23 +12,23 @@ QueryPoolSize :: 256
 the_gpu_profiler: struct {
     cb:          vk.CommandBuffer,
     pool:        vk.QueryPool,
-    zones:       [dynamic] Profile_Zone,
+    zones:       [dynamic] profiler.Zone,
     zone_labels: [dynamic; QueryPoolSize] string,
     open_zones:  [dynamic; QueryPoolSize] int,
     queries:     [dynamic; QueryPoolSize] Profile_Query,
     
-    event_table: ^Profile_Event_Table,
+    event_table: ^profiler.Event_Table,
 }
 
-Profile_Query :: struct { zone_index: int, kind: Profile_Event_Kind }
+Profile_Query :: struct { zone_index: int, kind: profiler.Event_Kind }
 
 gpu_profile_init :: proc (gpu: ^Gpu) {
     the_gpu_profiler.pool = create_query_pool(gpu, QueryPoolSize, .TIMESTAMP)
     
     the_gpu_profiler.zones.allocator = context.allocator
     
-    the_gpu_profiler.event_table = new(Profile_Event_Table, context.allocator)
-    set_recording(the_gpu_profiler.event_table, true)
+    the_gpu_profiler.event_table = new(profiler.Event_Table, context.allocator)
+    profiler.set_recording(the_gpu_profiler.event_table, true)
 }
 
 gpu_profile_frame_begin :: proc (gpu: ^Gpu, cb: vk.CommandBuffer) {
@@ -65,7 +66,7 @@ gpu_profile_zone_end   :: proc () {
     gpu_profile_write_timestamp(.EndZone, zone_index)
 }
 
-gpu_profile_write_timestamp :: proc (kind: Profile_Event_Kind, zone_index: int) {
+gpu_profile_write_timestamp :: proc (kind: profiler.Event_Kind, zone_index: int) {
     query_index := cast(u32) len(the_gpu_profiler.queries)
     append(&the_gpu_profiler.queries, Profile_Query { zone_index, kind })
     
@@ -92,38 +93,33 @@ gpu_profile_collate_times :: proc (gpu: ^Gpu, print: bool) {
     for query, query_index in the_gpu_profiler.queries {
         timestamp := cast(i64) query_results[query_index]
         label := the_gpu_profiler.zone_labels[query.zone_index]
-        record_event(the_gpu_profiler.event_table, timestamp, query.kind, label)
+        profiler.record_event(the_gpu_profiler.event_table, timestamp, query.kind, label)
     }
     
-    events := swap_active_array_and_get_events(the_gpu_profiler.event_table)
+    events := profiler.swap_active_array_and_get_events(the_gpu_profiler.event_table)
     
-    collate_events(events, &the_gpu_profiler.zones, nil)
+    profiler.collate_events(events, &the_gpu_profiler.zones, nil)
     
     if print {
         zones := the_gpu_profiler.zones
         
-        fmt.printfln("---------------------\nGPU profile:")
-        dump_zone :: proc (gpu: ^Gpu, zones: [dynamic] Profile_Zone, index: u32, depth := 0) {
-            if index == 0 && depth != 0 { return }
+        link: u32
+        for {
+            zone := zones[link]
+            depth := zone.depth_of_the_event
             
-            node := zones[index]
             xx :: proc (seconds: f64) -> time.Duration { return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 10 * time.Nanosecond)  }
             
             for _ in 0..<depth { fmt.printf("    ") }
-            fmt.printf("%v: %v", node.name, xx(gpu_timestamp_to_seconds(gpu, node.duration)))
-            if node.duration_with_children != node.duration {
-                fmt.printf(" (with children %v)", xx(gpu_timestamp_to_seconds(gpu, node.duration_with_children)))
+            fmt.printf("%v: %v", zone.name, xx(gpu_timestamp_to_seconds(gpu, zone.duration)))
+            if zone.duration_with_children != zone.duration {
+                fmt.printf(" (with children %v)", xx(gpu_timestamp_to_seconds(gpu, zone.duration_with_children)))
             }
             fmt.printfln("")
             
-            for link := node.first_child_index; link != 0; {
-                child := zones[link]
-                dump_zone(gpu, zones, link, depth + 1)
-                link = child.next_sibling_index
-            }
+            link = zone.depth_next_event
+            if link == 0 { break }
         }
-        
-        dump_zone(gpu, zones, 0)
     }
 }
 

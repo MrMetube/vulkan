@@ -1,4 +1,4 @@
-package main
+package profiler
 
 import "base:intrinsics"
 import "core:sys/windows"

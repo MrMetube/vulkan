@@ -1,48 +1,56 @@
 #+vet explicit-allocators
-package main
+package profiler
+
+import "core:sync"
+
+atomic_add      :: sync.atomic_add
+atomic_exchange :: sync.atomic_exchange
 
 MaxEventCount :: #config(MaxProfileEventCount, 500_000)
 
-Profile_Event_Table :: struct {
+Event_Table :: struct {
     current_array_index: u32,
     record_increment:    u32,
     
-    state: Profile_Events_State,
-    events: [2] [MaxEventCount] Profile_Event,
+    state: Events_State,
+    events: [2] [MaxEventCount] Event,
 }
 
-Profile_Event_Table_With_Data :: struct ($Data: typeid) {
-    using base: Profile_Event_Table,
+Event_Table_With_Data :: struct ($Data: typeid) {
+    using base: Event_Table,
     event_data: [2] [MaxEventCount] Data,
 }
 
 // @volatile is treated as a plain u32 for an atomic add later on
-Profile_Events_State :: bit_field u32 { 
+Events_State :: bit_field u32 { 
     event_index: u32 | 31,
     array_index: u32 | 1,
 }
 
-Profile_Event :: struct {
+Event :: struct {
     name:      string,
     timestamp: i64,
-    kind:      Profile_Event_Kind,
+    kind:      Event_Kind,
 }
 
-Profile_Event_Kind :: enum u8 {
+Event_Kind :: enum u8 {
     BeginZone,
     EndZone,
     UserEvent,
 }
 
-Profile_Zone :: struct {
+Zone :: struct {
     name: string,
-    // tree of zones
+    // tree of nested zones
     parent_zone_index:  u32,
     first_child_index:  u32,
     last_child_index:   u32,
     next_sibling_index: u32,
     // list of user events that happened inside this zone
     first_user_event:   u32,
+    // list of zones in depth-first order
+    depth_next_event:   u32,
+    depth_of_the_event: u32,
     
     event_index_of_zone_begin: u32,
     
@@ -54,19 +62,19 @@ Profile_Zone :: struct {
 Stored_User_Event :: struct {
     next_sibling: u32,
     
-    using event: Profile_Event,
+    using event: Event,
 }
 
 ////////////////////////////////////////////////
 
-set_recording :: proc (table: ^Profile_Event_Table, active: bool) {
+set_recording :: proc (table: ^Event_Table, active: bool) {
     table.record_increment = active ? 1 : 0
 }
 
-record_event :: proc (table: ^Profile_Event_Table, timestamp: i64, kind: Profile_Event_Kind, name: string) {
+record_event :: proc (table: ^Event_Table, timestamp: i64, kind: Event_Kind, name: string) {
     if table == nil { return }
     
-    state := transmute(Profile_Events_State) atomic_add(cast(^u32) &table.state, table.record_increment)
+    state := transmute(Events_State) atomic_add(cast(^u32) &table.state, table.record_increment)
     
     table.events[state.array_index][state.event_index] = {
         name       = name,
@@ -75,10 +83,10 @@ record_event :: proc (table: ^Profile_Event_Table, timestamp: i64, kind: Profile
     }
 }
 
-record_event_with_data :: proc (table: ^Profile_Event_Table_With_Data($Data), timestamp: i64, kind: Profile_Event_Kind, name: string, data: Data) {
+record_event_with_data :: proc (table: ^Event_Table_With_Data($Data), timestamp: i64, kind: Event_Kind, name: string, data: Data) {
     if table == nil { return }
     
-    state := transmute(Profile_Events_State) atomic_add(cast(^u32) &table.state, table.record_increment)
+    state := transmute(Events_State) atomic_add(cast(^u32) &table.state, table.record_increment)
     
     table.events[state.array_index][state.event_index] = {
         name       = name,
@@ -91,14 +99,14 @@ record_event_with_data :: proc (table: ^Profile_Event_Table_With_Data($Data), ti
 
 ////////////////////////////////////////////////
 
-swap_active_array_and_get_events :: proc (table: ^Profile_Event_Table) -> [] Profile_Event {
+swap_active_array_and_get_events :: proc (table: ^Event_Table) -> [] Event {
     array_index := table.current_array_index == 0 ? cast(u32) 1 : 0
     state  := atomic_exchange(&table.state, { event_index = 0, array_index = array_index })
     events := table.events[state.array_index][:state.event_index]
     return events
 }
 
-swap_active_array_and_get_events_with_data :: proc (table: ^Profile_Event_Table_With_Data($Data)) -> ([] Profile_Event, [] Data) {
+swap_active_array_and_get_events_with_data :: proc (table: ^Event_Table_With_Data($Data)) -> ([] Event, [] Data) {
     array_index := table.current_array_index == 0 ? cast(u32) 1 : 0
     state  := atomic_exchange(&table.state, { event_index = 0, array_index = array_index })
     events := table.events[state.array_index][:state.event_index]
@@ -106,7 +114,7 @@ swap_active_array_and_get_events_with_data :: proc (table: ^Profile_Event_Table_
     return events, data
 }
 
-collate_events :: proc (events: [] Profile_Event, zones: ^[dynamic] Profile_Zone, user_events: ^[dynamic] Stored_User_Event) {
+collate_events :: proc (events: [] Event, zones: ^[dynamic] Zone, user_events: ^[dynamic] Stored_User_Event) {
     clear(zones)
     clear(user_events)
     
@@ -121,7 +129,7 @@ collate_events :: proc (events: [] Profile_Event, zones: ^[dynamic] Profile_Zone
         begin_timestamp: i64
         end_timestamp:   i64
         
-        zone:  ^Profile_Zone
+        zone:  ^Zone
         parent_index: Maybe(u32)
         
         create_zone: bool
@@ -179,14 +187,17 @@ collate_events :: proc (events: [] Profile_Event, zones: ^[dynamic] Profile_Zone
                 parent_relative_timestamp = event.timestamp - timestamp_basis,
             }
             
-            if parent_index, ok := parent_index.?; ok {
+            if parent_index, ok := parent_index.?; ok { 
                 parent := &zones[parent_index]
                 if parent.first_child_index == 0 {
                     assert(zone_index != 0)
                     parent.first_child_index = zone_index
                 }
+                
                 zones[parent.last_child_index].next_sibling_index = zone_index
                 parent.last_child_index = zone_index
+                
+                zone.parent_zone_index = parent_index
             }
         }
         
@@ -200,4 +211,71 @@ collate_events :: proc (events: [] Profile_Event, zones: ^[dynamic] Profile_Zone
             parent.duration -= end_timestamp - begin_timestamp
         }
     }
+    
+    // build depth first links
+    if len(zones) > 0 {
+        Entry :: struct { index: u32, depth: u32 }
+        stack := make([dynamic] Entry, context.temp_allocator)
+        children := make([dynamic] u32, context.temp_allocator)
+        
+        append(&stack, Entry{ 0, 0 })
+        prev: ^Zone
+        for len(stack) != 0 {
+            entry := pop(&stack)
+            
+            zone := &zones[entry.index]
+            zone.depth_of_the_event = entry.depth
+            if prev != nil {
+                prev.depth_next_event = entry.index
+            }
+            prev = zone
+            
+            clear(&children)
+            for link := zone.first_child_index; link != 0; {
+                append(&children, link)
+                link = zones[link].next_sibling_index
+            }
+            
+            #reverse for child in children {
+                append(&stack, Entry{child, entry.depth + 1})
+            }
+        }
+    }
+}
+
+// @copypaste from util.odin
+append_into :: proc { append_into_array, append_into_fixed_array }
+append_into_array :: proc (array: ^[dynamic] $T) -> ^T {
+    appended := append_nothing(array)
+    result: ^T 
+    if appended != 0 {
+        result = last(array^)
+    }
+    return result
+}
+append_into_fixed_array :: proc (array: ^[dynamic; $N] $T) -> ^T {
+    appended, ok := append_nothing(array)
+    result: ^T 
+    if appended != 0 && ok {
+        result = last(array)
+    }
+    return result
+}
+
+last :: proc { last_slice, last_array, last_fixed_array }
+last_fixed_array :: proc (array: ^[dynamic; $N] $T) -> ^T {
+    result := last(array[:])
+    return result
+}
+last_array :: proc (array: [dynamic] $T) -> ^T {
+    result := last(array[:])
+    return result
+}
+last_slice :: proc (array: [] $T) -> ^T {
+    result: ^T
+    #no_bounds_check \
+    if len(array) > 0 {
+        result = &array[len(array)-1]
+    }
+    return result
 }

@@ -1,6 +1,5 @@
 #+build windows
-
-package main
+package profiler
 
 import win "core:sys/windows"
 
