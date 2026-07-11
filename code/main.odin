@@ -138,9 +138,11 @@ UI_Draw :: struct { // :Shader:
     rect:  Rectangle2,
     color: v4,
     
+    border_color:     v4,
+    border_thickness: f32,
+    
     corner_radius: f32,
     highlight:     bool,
-    // @todo border width and color?
 }
 
 Draw :: struct { // :Shader:
@@ -992,6 +994,9 @@ main :: proc () {
         // UI pass
         
         {
+            @(static) xx: f32 // @cleanup
+            xx += delta_time
+            
             @(static) active_rect: Rectangle2
             hot_rect: Rectangle2
             
@@ -1010,8 +1015,26 @@ main :: proc () {
             }
             
             ui_draws_cpu, ui_draws_gpu := bump_allocate_slice(bump, [] UI_Draw, 2)
-            ui_draws_cpu[0] = { rect  = rect_a, color = color_a, highlight = active_rect != {} ? rect_a == active_rect : rect_a == hot_rect, corner_radius = 10 }
-            ui_draws_cpu[1] = { rect  = rect_b, color = color_b, highlight = active_rect != {} ? rect_b == active_rect : rect_b == hot_rect, corner_radius = 20 }
+            ui_draws_cpu[0] = { 
+                rect  = rect_a, 
+                color = color_a, 
+                highlight = active_rect != {} ? rect_a == active_rect : rect_a == hot_rect, 
+                corner_radius = 10,
+                
+                border_color     = rect_a == active_rect || rect_a == hot_rect ? Blue : Jasmine,
+                border_thickness = 4,
+            }
+            ui_draws_cpu[1] = { 
+                rect  = rect_b, 
+                color = color_b, 
+                highlight = active_rect != {} ? rect_b == active_rect : rect_b == hot_rect, 
+                corner_radius = 20,
+                
+                border_color = Orange,
+                border_thickness = 5 + sin(xx)*5,
+            }
+            
+            ////////////////////////////////////////////////
             
             ui_globals_cpu, ui_globals_gpu := bump_allocate_type(bump, UI_Data)
             ui_globals_cpu^ = {
