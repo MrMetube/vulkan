@@ -48,6 +48,7 @@ generate_shader_api :: proc (output_file: string) {
     append_simple_struct(&builder, Mesh)
     append_simple_struct(&builder, Meshlet)
     append_simple_struct(&builder, Vertex)
+    append_simple_struct(&builder, UI_Draw)
     
     reference_types := make(map[string] struct {}, context.temp_allocator)
     simple_types    := make(map[typeid] struct {}, context.temp_allocator)
@@ -56,6 +57,7 @@ generate_shader_api :: proc (output_file: string) {
     collect_types(&simple_types, &reference_types, Cull_Globals)
     collect_types(&simple_types, &reference_types, Draw_Globals)
     collect_types(&simple_types, &reference_types, Depth_Data)
+    collect_types(&simple_types, &reference_types, UI_Data)
     reference_types["uint8_t"] = {}
     append_reference_types(&builder, reference_types)
     
@@ -68,6 +70,7 @@ generate_shader_api :: proc (output_file: string) {
     append_buffer_reference_struct(&builder, Cull_Globals)
     append_buffer_reference_struct(&builder, Draw_Globals)
     append_buffer_reference_struct(&builder, Depth_Data)
+    append_buffer_reference_struct(&builder, UI_Data)
     
     ////////////////////////////////////////////////
     // implementation
@@ -92,8 +95,9 @@ generate_shader_api :: proc (output_file: string) {
         case v4: type_name = "vec4"
         case m4: type_name = "mat4"
         
-        case q32: type_name = "vec4"
-        case b32: type_name = "bool"
+        case q32:        type_name = "vec4"
+        case Rectangle2: type_name = "vec4"
+        case b32:        type_name = "bool"
         
         case: 
             if array_type, ok := info.variant.(runtime.Type_Info_Array); ok {

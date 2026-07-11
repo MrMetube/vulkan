@@ -1,8 +1,7 @@
-
-#extension GL_EXT_buffer_reference: require
-#extension GL_EXT_buffer_reference2: require
+#extension GL_EXT_buffer_reference:    require
+#extension GL_EXT_buffer_reference2:   require
 #extension GL_EXT_shader_8bit_storage: require
-#extension GL_EXT_buffer_reference   : require
+#extension GL_EXT_buffer_reference:    require
 #extension GL_EXT_scalar_block_layout: require
 
 #include "api.generated.glsl"
@@ -39,6 +38,16 @@ struct Mesh_Result_Smooth {
 
 struct Mesh_Result_Flat {
     uint texture_index;
+};
+
+struct UI_Result {
+    vec4 color;
+};
+
+struct UI_Result_Flat {
+    vec4 rect;
+    float corner_radius;
+    uint has_mouse; // bool
 };
 
 ////////////////////////////////////////////////

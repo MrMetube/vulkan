@@ -1197,6 +1197,10 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
             topology = info.topology,
         },
         
+        pVertexInputState = &vk.PipelineVertexInputStateCreateInfo {
+            sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        },
+        
         // @study can there be more than 1 with dynamic states?
         pViewportState = &vk.PipelineViewportStateCreateInfo {
             sType = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
@@ -1609,7 +1613,6 @@ gpu_end_render_pass :: proc (cmd: vk.CommandBuffer) {
 // void gpuDispatchIndirect(GpuCommandBuffer cb, void* dataGpu, void* gridDimensionsGpu);
 
 // void gpuDrawIndexedInstanced(GpuCommandBuffer cb, void* vertexDataGpu, void* pixelDataGpu, void* indicesGpu, uint32 indexCount, uint32 instanceCount);
-// void gpuDrawIndexedInstancedIndirect(GpuCommandBuffer cb, void* vertexDataGpu, void* pixelDataGpu, void* indicesGpu, void* argsGpu);
 // void gpuDrawIndexedInstancedIndirectMulti(GpuCommandBuffer cb, void* dataVxGpu, uint32 vxStride, void* dataPxGpu, uint32 pxStride, void* argsGpu, void* drawCountGpu);
 
 // void gpuDrawMeshlets(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, uvec3 dim);
@@ -1627,7 +1630,22 @@ gpu_push_constants :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Desc
 
 gpu_dispatch :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, push_constant: GpuAddress($T), group_size: uv3) {
     gpu_push_constants(cmd, frame_descriptor, push_constant)
+    
     vk.CmdDispatch(cmd, **group_size)
+}
+
+gpu_draw_indirect :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, commands: GpuAddress($C), push_constant: GpuAddress($T)) {
+    gpu_push_constants(cmd, frame_descriptor, push_constant)
+    
+    commands, commands_base_offset := gpu_reflect_get_buffer(commands.p)
+    vk.CmdDrawIndirect(cmd, commands, commands_base_offset, 1, size_of(C))
+}
+
+gpu_draw_indexed_instanced_indirect :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, draws: GpuSlice($D), max_count: u32, push_constant: GpuAddress($T)) {
+    gpu_push_constants(cmd, frame_descriptor, push_constant)
+    
+    draws, draws_base_offset := gpu_reflect_get_buffer(draws.p)
+    vk.CmdDrawIndexedIndirect(cmd, draws, draws_base_offset + cast(vk.DeviceSize) draw_offset, max_count, size_of(D))
 }
 
 gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, commands: GpuSlice($C), count: GpuAddress(u32), max_count: u32, command_offset: umm, push_constant: GpuAddress($T)) {

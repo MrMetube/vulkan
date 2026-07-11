@@ -394,6 +394,15 @@ color_to_u8_4 :: proc (color: v4) -> Color {
     return result
 }
 
+color3_from_u8 :: proc (color: Color) -> v3 {
+    result := cast(v3) color.rgb / 255
+    return result
+}
+color4_from_u8 :: proc (color: Color) -> v4 {
+    result := cast(v4) color / 255
+    return result
+}
+
 ////////////////////////////////////////////////
 // Simd operations
 
@@ -722,7 +731,7 @@ projection_reversed_z_infinite_far_plane :: proc (fov_y, aspect_w_h, near_z: f32
 rect_min_dimension    :: proc { rect_min_dimension_2, rect_min_dimension_v }
 rect_zero_dimension   :: proc { rect_zero_dimension_2, rect_zero_dimension_v }
 rect_min_max          :: proc { rect_min_max_2, rect_min_max_v }
-rect_min_dimension_2  :: proc (x: $E, y, w, h: E)                 -> Rectangle([2] E) { return { {x, y},                   {w, h}                   } }
+rect_min_dimension_2  :: proc (x: $E, y, w, h: E)                 -> Rectangle([2] E) { return { {x, y},                   {x, y} + {w, h}          } }
 rect_min_dimension_v  :: proc (min: $T, dimension: T)             -> Rectangle(T)     { return { min,                      min + dimension          } }
 rect_zero_dimension_2 :: proc (w: $E, h: E)                       -> Rectangle([2] E) { return { 0,                        {w, h}                   } }
 rect_zero_dimension_v :: proc (dimension: $T)                     -> Rectangle(T)     { return { 0,                        dimension                } }
@@ -748,14 +757,14 @@ rect_get_dimension :: proc(rect: Rectangle($T)) -> T { return rect.max - rect.mi
 rect_get_center    :: proc(rect: Rectangle($T)) -> T { return rect.min + 0.5 * rect_get_dimension(rect) }
 
 rect_add_radius :: proc(rect: $R/Rectangle($T), radius: T) -> R {
-    result = rect
+    result := rect
     result.min -= radius
     result.max += radius
     return result
 }
 
 rect_scale_radius :: proc(rect: $R/Rectangle($T), factor: T) -> R {
-    result = rect
+    result := rect
     center := rect_get_center(rect)
     result.min = linear_blend(center, result.min, factor)
     result.max = linear_blend(center, result.max, factor)
@@ -763,6 +772,7 @@ rect_scale_radius :: proc(rect: $R/Rectangle($T), factor: T) -> R {
 }
 
 rect_add_offset :: proc(rect: $R/Rectangle($T), offset: T) -> R {
+    result: R
     result.min = rect.min + offset
     result.max = rect.max + offset
     
@@ -770,7 +780,7 @@ rect_add_offset :: proc(rect: $R/Rectangle($T), offset: T) -> R {
 }
 
 rect_contains :: proc(rect: Rectangle($T), point: T) -> bool {
-    result = true
+    result := true
     #no_bounds_check #unroll for i in 0..<len(T) {
         result &&= rect.min[i] <= point[i] && point[i] < rect.max[i] 
     }
