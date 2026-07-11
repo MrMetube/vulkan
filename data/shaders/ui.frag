@@ -51,38 +51,41 @@ vec3 linear_from_oklab(vec3 c) {
     ) * lms;
 }
 
-vec3 oklch_from_linear(vec3 c) {
-    vec3 lab = oklab_from_linear(c);
+vec4 oklch_from_linear(vec4 c) {
+    vec3 lab = oklab_from_linear(c.rgb);
     float chroma = length(lab.yz);
     float hue = atan(lab.z, lab.y); // radians
     if (hue < 0.0) hue += 6.28318530718;
-    return vec3(lab.x, chroma, hue);
+    return vec4(lab.x, chroma, hue, c.a);
 }
 
-vec3 linear_from_oklch(vec3 lch) {
-    float a = lch.y * cos(lch.z);
-    float b = lch.y * sin(lch.z);
-    return linear_from_oklab(vec3(lch.x, a, b));
+vec4 linear_from_oklch(vec4 lch_a) {
+    float a = lch_a.y * cos(lch_a.z);
+    float b = lch_a.y * sin(lch_a.z);
+    vec3 rgb = linear_from_oklab(vec3(lch_a.x, a, b));
+    return vec4(rgb, lch_a.a);
 }
 
 ////////////////////////////////////////////////
 
-bool is_in_rounded_corner(vec4 rect, float corner_radius, vec2 pixel) {
-    vec2 min_delta = rect.xy - pixel +  corner_radius;
-    vec2 max_delta = rect.zw - pixel + -corner_radius;
-    
-    float corner_radius_squared = square(corner_radius);
-    
-    bool result = false;
-    if (
-        (min_delta.x > 0 && min_delta.y > 0 && square(min_delta.x) + square(min_delta.y) - corner_radius_squared > 0) ||
-        (min_delta.x > 0 && max_delta.y < 0 && square(min_delta.x) + square(max_delta.y) - corner_radius_squared > 0) ||
-        (max_delta.x < 0 && min_delta.y > 0 && square(max_delta.x) + square(min_delta.y) - corner_radius_squared > 0) ||
-        (max_delta.x < 0 && max_delta.y < 0 && square(max_delta.x) + square(max_delta.y) - corner_radius_squared > 0) ) {
-        result = true;
-    }
-    return result;
+// Signed distance to a 2D rounded box.
+//     https://www.shadertoy.com/view/4llXD7
+//
+// List of some other 2D distances:
+//     iquilezles.org/articles/distfunctions2d
+
+
+// roundness = (top-right, bottom-right, top-left, bottom-left)
+float sdRoundBox( in vec2 p, in vec2 radius, in vec4 roundness) {
+    vec2 b = radius;
+    vec4 r = roundness;
+    r.xy = (p.x>0.0) ? r.xy : r.zw;
+    r.x  = (p.y>0.0) ? r.x  : r.y;
+    vec2 q = abs(p)-b+r.x;
+    return min(max(q.x,q.y),0.0) + length(max(q,0.0)) - r.x;
 }
+
+////////////////////////////////////////////////
 
 layout(push_constant) uniform Push_Data {
     UI_Data data;
@@ -95,7 +98,7 @@ void main() {
     vec2 delta = pixel - mouse;
     float dist = length(delta);
     
-    float radius = 10.0;
+    float radius = 10.0; 
     float falloff = 100.0;
     float max_factor = 0.25;
     
@@ -104,22 +107,40 @@ void main() {
     
     float factor = max_factor * decay;
     
-    vec4 a = s_in.color;
-    vec4 b = vec4(1, 1, 1, 1);
-    
-    vec3 a_ok = oklch_from_linear(a.rgb);
-    vec3 b_ok = oklch_from_linear(b.rgb);
+    vec4 color_ok     = oklch_from_linear(s_in.color);
+    vec4 highlight_ok = oklch_from_linear(vec4(1));
+    vec4 border_ok    = oklch_from_linear(vec4(0.95, 0.05, 0.65, 1));
     
     factor = f_in.has_mouse != 0 ? factor : 0;
-    vec3 mix_ok = mix(a_ok, b_ok, factor);
+    vec4 inner_ok = mix(color_ok, highlight_ok, factor);
     
-    vec3 rgb = linear_from_oklch(mix_ok);
+    // border and corners
+    float border_thickness = 6;
+    vec4  border_color = vec4(0.95, 0.05, 0.65, 1);
+    vec4  outer_rect = f_in.rect;
+    float outer_corner_radius = f_in.corner_radius;
     
-    vec4 color = vec4(rgb, mix(a.a, b.a, factor));
+    float inner_corner_radius = max(0, f_in.corner_radius - border_thickness);
+    vec4  inner_rect = outer_rect + vec4(1,1, -1,-1) * border_thickness;
     
-    if (is_in_rounded_corner(f_in.rect, f_in.corner_radius, pixel)) {
-        color.a = 0;
-    }
+    vec4 color = border_color;
+    
+    vec2 outer_radius = (outer_rect.zw - outer_rect.xy) * 0.5;
+    vec2 outer_center = outer_rect.xy + outer_radius;
+    
+    vec2 inner_radius = (inner_rect.zw - inner_rect.xy) * 0.5;
+    vec2 inner_center = inner_rect.xy + inner_radius;
+    
+    float d_outer = sdRoundBox(pixel - outer_center, outer_radius, vec4(outer_corner_radius));
+    float d_inner = sdRoundBox(pixel - inner_center, inner_radius, vec4(inner_corner_radius));
+    
+    float aa = fwidth(d_outer);
+    
+    float outer = 1.0 - smoothstep(-aa, aa, d_outer);
+    float inner = 1.0 - smoothstep(-aa, aa, d_inner);
+    
+    color = linear_from_oklch(mix(border_ok, inner_ok, inner));
+    color.a *= outer;
     
     out_color = color;
 }

@@ -992,13 +992,13 @@ main :: proc () {
         // UI pass
         
         {
-            
             @(static) active_rect: Rectangle2
             hot_rect: Rectangle2
+            
             color_a := color4_from_u8(Color { 0x18, 0x18, 0x18, 0xFF })
-            rect_a  := rect_min_dimension(cast(f32) 100, 100, 100, 40)
+            rect_a  := rect_min_dimension(cast(f32) 100, 100, 400, 160)
             color_b := Green
-            rect_b  := rect_min_dimension(cast(f32) 200+10, 100, 100, 40)
+            rect_b  := rect_min_dimension(cast(f32) 200+400, 100, 400, 160)
             
             if !left_down { active_rect = {} }
             
