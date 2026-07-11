@@ -18,7 +18,6 @@
 #define MaxVertices  64
 #define MaxTriangles 84
 
-// @volatile
 layout(push_constant) uniform Push_Data {
     Draw_Globals globals;
 };
@@ -42,8 +41,8 @@ uint hash(uint a) {
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 layout(triangles, max_vertices = MaxVertices, max_primitives = MaxTriangles) out;
 
-layout(location = 0) flat   out Mesh_Result_Flat mesh_result_flat[];
-layout(location = 1) smooth out Mesh_Result_Smooth mesh_result_smooth[];
+layout(location = 0) flat   out uint               draw_index[];
+layout(location = 1) smooth out Mesh_Result mesh_result_smooth[];
 
 #if Cull
 shared vec3 vertex_screen[MaxVertices];
@@ -80,7 +79,7 @@ void main() {
         vec3 model_n = vec3(vertex.v.n[0], vertex.v.n[1], vertex.v.n[2]) / 127.5 - 1;
         vec3 world_n = rotate(draw.v.orientation, model_n);
         vec3 view_n  = mat3(globals.data.view_from_world) * world_n;
-        Mesh_Result_Smooth result;
+        Mesh_Result result;
         
         for (int li = 0; li < 4; li++) {
             vec4 world_light_p  = vec4(globals.data.light_pos[li].xyz, 1);
@@ -104,7 +103,7 @@ void main() {
         gl_MeshVerticesEXT[i].gl_Position = screen_p;
         
         mesh_result_smooth[i] = result;
-        mesh_result_flat[i].texture_index = draw.v.texture_index;
+        draw_index[i] = task_result.draw_index;
     }
     
     #if Cull

@@ -5,7 +5,7 @@
 
 layout(location = 0) flat in uint draw_index;
 
-layout(location = 0) out vec4 out_color;
+layout(location = 0) out vec4 pixel_result;
 
 #define square(x) (x) * (x)
 #define square_root(x) sqrt(x)
@@ -41,6 +41,13 @@ void main() {
     vec2 delta = pixel - mouse;
     float dist = length(delta);
     
+    UI_Draw draw = data.draw_buffer[draw_index].v;
+    
+    vec4 color_ok     = oklch_from_linear(draw.color);
+    vec4 highlight_ok = oklch_from_linear(vec4(1));
+    vec4 border_ok    = oklch_from_linear(draw.border_color);
+    
+    // highlight
     float radius = 10.0; 
     float falloff = 100.0;
     float max_factor = 0.25;
@@ -50,14 +57,9 @@ void main() {
     
     float factor = max_factor * decay;
     
-    UI_Draw draw = data.draw_buffer[draw_index].v;
-    
-    vec4 color_ok     = oklch_from_linear(draw.color);
-    vec4 highlight_ok = oklch_from_linear(vec4(1));
-    vec4 border_ok    = oklch_from_linear(draw.border_color);
-    
     factor = draw.highlight ? factor : 0;
     vec4 inner_ok = mix(color_ok, highlight_ok, factor);
+    // @todo should border color also get this highlight?
     
     // border and corners
     float border_thickness = draw.border_thickness;
@@ -85,5 +87,5 @@ void main() {
     vec4 color = linear_from_oklch(mix(border_ok, inner_ok, inner));
     color.a *= outer;
     
-    out_color = color;
+    pixel_result = color;
 }

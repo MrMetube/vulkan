@@ -26,7 +26,7 @@ struct Task_Result {
     uint meshlet_offset;
 };
 
-struct Mesh_Result_Smooth {
+struct Mesh_Result {
     vec3 light_vec[4];
     vec3 normal;
     vec3 view_vec;
@@ -34,12 +34,6 @@ struct Mesh_Result_Smooth {
 #if Debug
     vec3 debug_color; // @cleanup
 #endif // Debug
-};
-
-// @todo can we also just pass the draw/mesh index to the frag shader like in ui.vert and let it index the buffer?
-// Then also rename Mesh_Result_Smooth
-struct Mesh_Result_Flat { 
-    uint texture_index;
 };
 
 ////////////////////////////////////////////////
