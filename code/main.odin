@@ -294,10 +294,10 @@ main :: proc () {
     
     
     // @speed we duplicate this watcher per shader, so that each shader can keep track of the header being changed and be recompiled independently from other shaders, without effecting their modification test.
-    meshlet_task_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.task",   shader_allocator)
-    meshlet_mesh_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.mesh",   shader_allocator)
-    meshlet_frag_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.frag",   shader_allocator)
-    cull_shader   := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/cull.comp",   shader_allocator)
+    meshlet_task_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.task",      shader_allocator)
+    meshlet_mesh_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.mesh",      shader_allocator)
+    meshlet_frag_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.frag",      shader_allocator)
+    cull_shader         := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/cull.comp",         shader_allocator)
     depth_reduce_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/depth_reduce.comp", shader_allocator)
     
     ui_vert_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/ui.vert", shader_allocator)
@@ -353,7 +353,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    stats_count: u32 = 4
+    stats_count: u32 = 3
     stats_pool := create_query_pool(&gpu, stats_count, .MESH_PRIMITIVES_GENERATED_EXT)
     
     ////////////////////////////////////////////////
@@ -386,7 +386,6 @@ main :: proc () {
     last_time := time.tick_now()
     
     
-    // @correctness ensure that this is enough and that we did not overflow inside of a frame and override someone elses data for a shader
     frame_bump_allocators: [MaxFramesInFlight] Bump_Allocator
     for &bump in frame_bump_allocators {
         bump = bump_allocator_make_temporary(&gpu, 256 * Megabyte, usage = { .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER })
@@ -469,9 +468,9 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        // Though we do not track the time, *we* take to handle the input, we also exclude all time taken by sdl and windows(which may block) with this
         current_time  := time.tick_now()
         delta_tick    := time.tick_diff(last_time, current_time)
+        // Though we do not track the time, *we* take to handle the input, we also exclude all time taken by sdl and windows(which may block)
         delta_tick    -= window_event_delta
         
         cpu_delta := time.duration_seconds(delta_tick)
@@ -504,7 +503,6 @@ main :: proc () {
             assert(ok)
         }
         
-        // @cleanup this signals that we need to transition all images in stuff from .UNDEFINED to .GENERAL image layout
         if gpu.swapchain_state == .Was_Resized {
             gpu.swapchain_state = .Ok
             recreate_stuff(&gpu, &stuff)
@@ -547,7 +545,6 @@ main :: proc () {
                 { format = stuff.color_buffer.format, write_mask = DefaulColorMask },
             }
             raster_description.blendstate = &Blend_Desc{ **DefaultBlendDesc }
-            // raster_description.blendstate.dst_color_factor = .ONE
             // :Stencil: 
             
             task, mesh, frag := meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader
@@ -567,7 +564,6 @@ main :: proc () {
             raster_description.blendstate.dst_color_factor = .ONE_MINUS_SRC_ALPHA
             raster_description.blendstate.src_alpha_factor = .ONE
             raster_description.blendstate.dst_alpha_factor = .ONE_MINUS_SRC_ALPHA
-            // @todo alpha blending for the ui
             
             destroy_pipeline(&gpu, ui_pipeline)
             ui_pipeline = gpu_create_graphics_pipeline(&gpu, ui_vert_shader, ui_frag_shader, raster_description, descriptor_heap)
