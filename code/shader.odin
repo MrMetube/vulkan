@@ -9,17 +9,19 @@ import "core:strings"
 
 import vk "../lib/vulkan"
 
+Shader_Info :: struct {
+    input: string,
+    
+    source: Watcher_Id,
+    common: Watcher_Id,
+}
+
 Shader :: struct {
-    input: string, 
-    bytes: [] u8,
+    info: Shader_Info,
     
-    parsed: struct {
-        stage:      vk.ShaderStageFlag,
-        local_size: uv3,
-    },
-    
-    source_watcher: Watcher_Id,
-    common_watcher: Watcher_Id,
+    bytes:      [] u8,
+    stage:      vk.ShaderStageFlag,
+    local_size: uv3,
 }
 
 /*
@@ -190,9 +192,9 @@ init_shader_and_watchers :: proc (watchers: ^[dynamic] Watcher, common_watcher: 
     if !ok {
         assert(false, fmt.tprintf("Failed to initially load the shader `%v`", input))
     }
-    result.source_watcher = watchers_make(watchers, result.input)
-    result.common_watcher = common_watcher
-    watcher_set_up_to_date(watchers^, result.source_watcher, result.common_watcher)
+    result.info.source = watchers_make(watchers, result.info.input)
+    result.info.common = common_watcher
+    watcher_set_up_to_date(watchers^, result.info.source, result.info.common)
     
     return result
 }
@@ -201,9 +203,9 @@ reload_shaders_if_needed :: proc (watchers: [dynamic] Watcher, shader_allocator:
     was_changed: bool
     
     for shader in shaders {
-        if watcher_modified(watchers, shader.source_watcher, shader.common_watcher) {
-            watcher_set_up_to_date(watchers, shader.source_watcher, shader.common_watcher)
-            result, ok := compile_and_load_shader(shader.input, shader_allocator, old = shader)
+        if watcher_modified(watchers, shader.info.source, shader.info.common) {
+            watcher_set_up_to_date(watchers, shader.info.source, shader.info.common)
+            result, ok := compile_and_load_shader(shader.info.input, shader_allocator, old = shader)
             if ok {
                 shader^ = result
                 was_changed = true
@@ -224,9 +226,10 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
     
     result: Shader
     if old != nil {
-        result = old^
+        result.info = old.info
+    } else {
+        result.info.input = input_path
     }
-    result.input = input_path
     
     shader_output := fmt.tprintf("%v%v", output_path, output_extension)
     
@@ -241,7 +244,7 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
     
     shader_bytes, err := os.read_entire_file(shader_output, bytes_allocator)
     if err != nil {
-        fmt.printfln("Could not load the output file of '%v', which is '%v': %v", result.input, shader_output, os.error_string(err))
+        fmt.printfln("Could not load the output file of '%v', which is '%v': %v", result.info.input, shader_output, os.error_string(err))
         return result, false
     }
     
@@ -252,8 +255,6 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
     result.bytes = shader_bytes
     
     { // parse shader
-        result.parsed = {}
-        
         shader_code := slice_from_parts(u32, raw_data(shader_bytes), len(shader_bytes) / 4)
         
         assert(shader_code[0] == SpvMagicNumber)
@@ -288,20 +289,20 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
                 execution_model := cast(SpvExecutionModel) code[1]
                 
                 #partial switch execution_model {
-                case .Vertex:     result.parsed.stage = .VERTEX
-                case .Fragment:   result.parsed.stage = .FRAGMENT
-                case .MeshEXT:    result.parsed.stage = .MESH_EXT
-                case .TaskEXT:    result.parsed.stage = .TASK_EXT
-                case .GLCompute:  result.parsed.stage = .COMPUTE
+                case .Vertex:     result.stage = .VERTEX
+                case .Fragment:   result.stage = .FRAGMENT
+                case .MeshEXT:    result.stage = .MESH_EXT
+                case .TaskEXT:    result.stage = .TASK_EXT
+                case .GLCompute:  result.stage = .COMPUTE
                 }
             
             case .ExecutionMode:
                 mode := cast(SpvExecutionMode) code[2]
                 #partial switch mode {
                 case .LocalSize:
-                    result.parsed.local_size.x = code[3]
-                    result.parsed.local_size.y = code[4]
-                    result.parsed.local_size.z = code[5]
+                    result.local_size.x = code[3]
+                    result.local_size.y = code[4]
+                    result.local_size.z = code[5]
                 }
                 
             case .ExecutionModeId:
@@ -325,15 +326,15 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
             code = code[word_count:]
         }
         
-        if result.parsed.stage == .COMPUTE {
+        if result.stage == .COMPUTE {
             for it in 0..<3 {
                 if local_size[it] >= 0 {
                     assert(ids[local_size[it]].opcode == .Constant)
-                    result.parsed.local_size[it] = ids[local_size[it]].constant
+                    result.local_size[it] = ids[local_size[it]].constant
                 }
             }
             
-            assert(result.parsed.local_size != 0)
+            assert(result.local_size != 0)
         }
     }
     
@@ -369,7 +370,7 @@ compile_shader_end :: proc (cmd: ^Cmd, shader_input: string) -> bool {
 
 get_group_count :: proc (shader: Shader, count_x: u32 = 1, count_y: u32 = 1, count_z: u32 = 1) -> uv3 {
     total_count := uv3{ count_x, count_y, count_z }
-    result := (total_count + shader.parsed.local_size-1) / shader.parsed.local_size
+    result := (total_count + shader.local_size-1) / shader.local_size
     return result
 }
 
@@ -410,7 +411,7 @@ run_command :: proc (cmd: ^Cmd, or_exit := true, keep := false, stdout: Command_
     
     if async == nil {
         if output != nil {
-            switch &out in stdout {
+            switch out in stdout {
             case nil: 
                 fmt.println(cast(string) output)
             case ^string: 
@@ -420,7 +421,7 @@ run_command :: proc (cmd: ^Cmd, or_exit := true, keep := false, stdout: Command_
         }
         
         if error != nil {
-            switch &out in stderr {
+            switch out in stderr {
             case nil: 
                 fmt.eprintln(cast(string) error)
             case ^string: 

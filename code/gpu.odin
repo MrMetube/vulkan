@@ -1071,7 +1071,7 @@ make_pipeline_info :: proc (info: ^Pipeline_Info, gpu: ^Gpu, heap: Descriptor_He
             sType = .PIPELINE_SHADER_STAGE_CREATE_INFO, 
             pNext = last(&info.module_infos),
             
-            stage = { shader.parsed.stage }, 
+            stage = { shader.stage }, 
             pName = "main", 
             
             pSpecializationInfo = &info.specialization_info,
@@ -1080,7 +1080,7 @@ make_pipeline_info :: proc (info: ^Pipeline_Info, gpu: ^Gpu, heap: Descriptor_He
 }
 
 gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil) -> Pipeline {
-    assert(compute.parsed.stage == .COMPUTE)
+    assert(compute.stage == .COMPUTE)
     
     pipeline_info: Pipeline_Info
     make_pipeline_info(&pipeline_info, gpu, heap, { compute }, constants)
@@ -1100,8 +1100,8 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, heap: Descripto
 }
 
 gpu_create_graphics_pipeline :: proc (gpu: ^Gpu, vertex, fragment: Shader, info: Raster_Desc, heap: Descriptor_Heap) -> Pipeline {
-    assert(vertex.parsed.stage   == .VERTEX)
-    assert(fragment.parsed.stage == .FRAGMENT)
+    assert(vertex.stage   == .VERTEX)
+    assert(fragment.stage == .FRAGMENT)
     
     result: Pipeline
     gpu_create_graphics_pipeline_common(gpu, &result, info, heap, vertex, fragment)
@@ -1111,9 +1111,9 @@ gpu_create_graphics_pipeline :: proc (gpu: ^Gpu, vertex, fragment: Shader, info:
 
 gpu_create_graphics_meshlet_pipeline :: proc { gpu_create_graphics_meshlet_pipeline_mesh, gpu_create_graphics_meshlet_pipeline_task }
 gpu_create_graphics_meshlet_pipeline_task :: proc (gpu: ^Gpu, task, mesh, frag: Shader, info: Raster_Desc, heap: Descriptor_Heap) -> Pipeline {
-    assert(task.parsed.stage == .TASK_EXT)
-    assert(mesh.parsed.stage == .MESH_EXT)
-    assert(frag.parsed.stage == .FRAGMENT)
+    assert(task.stage == .TASK_EXT)
+    assert(mesh.stage == .MESH_EXT)
+    assert(frag.stage == .FRAGMENT)
     
     result: Pipeline
     gpu_create_graphics_pipeline_common(gpu, &result, info, heap, task, mesh, frag)
@@ -1122,8 +1122,8 @@ gpu_create_graphics_meshlet_pipeline_task :: proc (gpu: ^Gpu, task, mesh, frag: 
 }
 
 gpu_create_graphics_meshlet_pipeline_mesh :: proc (gpu: ^Gpu, mesh, frag: Shader, info: Raster_Desc, heap: Descriptor_Heap) -> Pipeline {
-    assert(mesh.parsed.stage == .MESH_EXT)
-    assert(frag.parsed.stage == .FRAGMENT)
+    assert(mesh.stage == .MESH_EXT)
+    assert(frag.stage == .FRAGMENT)
     
     result: Pipeline
     gpu_create_graphics_pipeline_common(gpu, &result, info, heap, mesh, frag)

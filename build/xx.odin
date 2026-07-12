@@ -326,7 +326,7 @@ run_command :: proc (cmd: ^Cmd, or_exit := true, keep := false, stdout: Command_
     
     if async == nil {
         if output != nil {
-            switch &out in stdout {
+            switch out in stdout {
             case nil: 
                 fmt.println(cast(string) output)
             case ^string: 
@@ -336,7 +336,7 @@ run_command :: proc (cmd: ^Cmd, or_exit := true, keep := false, stdout: Command_
         }
         
         if error != nil {
-            switch &out in stderr {
+            switch out in stderr {
             case nil: 
                 fmt.eprintln(cast(string) error)
             case ^string: 
