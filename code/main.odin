@@ -287,22 +287,20 @@ main :: proc () {
     
     generate_shader_api("shaders/api.generated.glsl")
     
-    shader_allocator := context.allocator
-    
     watcher_allocator := context.allocator
     watchers := make([dynamic] Watcher, watcher_allocator)
     
-    init_assets()
+    init_assets(context.allocator)
     
     // @speed we duplicate this watcher per shader, so that each shader can keep track of the header being changed and be recompiled independently from other shaders, without effecting their modification test.
-    meshlet_task_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.task",      shader_allocator)
-    meshlet_mesh_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.mesh",      shader_allocator)
-    meshlet_frag_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.frag",      shader_allocator)
-    cull_shader         := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/cull.comp",         shader_allocator)
-    depth_reduce_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/depth_reduce.comp", shader_allocator)
+    meshlet_task_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.task")
+    meshlet_mesh_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.mesh")
+    meshlet_frag_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.frag")
+    cull_shader         := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/cull.comp")
+    depth_reduce_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/depth_reduce.comp")
     
-    ui_vert_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/ui.vert", shader_allocator)
-    ui_frag_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/ui.frag", shader_allocator)
+    ui_vert_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/ui.vert")
+    ui_frag_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/ui.frag")
     
     ////////////////////////////////////////////////
     
@@ -524,7 +522,7 @@ main :: proc () {
         
         load_all_shaders_that_were_recompiled_and_are_done()
         
-        recompile_shaders_if_needed(watchers, shader_allocator, cull_shader)
+        recompile_shaders_if_needed(watchers, cull_shader)
         reloaded_cull_shader := test_and_reset_shaders_was_modified(cull_shader)
         
         if !pipeline_is_valid(early_cull_pipeline) || reloaded_cull_shader {
@@ -539,14 +537,14 @@ main :: proc () {
             fmt.printfln("Recreated late_cull_pipeline.")
         }
         
-        recompile_shaders_if_needed(watchers, shader_allocator, depth_reduce_shader)
+        recompile_shaders_if_needed(watchers, depth_reduce_shader)
         if !pipeline_is_valid(depth_pipeline) || test_and_reset_shaders_was_modified(depth_reduce_shader) {
             destroy_pipeline(&gpu, depth_pipeline)
             depth_pipeline = gpu_create_compute_pipeline(&gpu, get_shader(depth_reduce_shader), descriptor_heap)
             fmt.printfln("Recreated depth_pipeline.")
         }
         
-        recompile_shaders_if_needed(watchers, shader_allocator, meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader)
+        recompile_shaders_if_needed(watchers, meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader)
         if !pipeline_is_valid(meshlet_pipeline) || test_and_reset_shaders_was_modified(meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader) {
             raster_description := DefaultRasterDesc
             raster_description.depth_format = stuff.depth_buffer.format
@@ -563,7 +561,7 @@ main :: proc () {
             fmt.printfln("Recreated meshlet_pipeline.")
         }
         
-        recompile_shaders_if_needed(watchers, shader_allocator, ui_vert_shader, ui_frag_shader)
+        recompile_shaders_if_needed(watchers, ui_vert_shader, ui_frag_shader)
         if !pipeline_is_valid(ui_pipeline) || test_and_reset_shaders_was_modified(ui_vert_shader, ui_frag_shader) {
             raster_description := DefaultRasterDesc
             raster_description.color_targets = {

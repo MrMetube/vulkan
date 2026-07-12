@@ -186,12 +186,12 @@ generate_shader_api :: proc (output_file: string) {
     }
 }
 
-init_shader_and_watchers :: proc (watchers: ^[dynamic] Watcher, common_watcher: Watcher_Id, input: string, bytes_allocator: Allocator, output_extension := ".spv") -> Shader_Id {
+init_shader_and_watchers :: proc (watchers: ^[dynamic] Watcher, common_watcher: Watcher_Id, input: string, output_extension := ".spv") -> Shader_Id {
     id, info := make_shader()
     
     info.input = input
     
-    compile_shader(id, input, bytes_allocator)
+    compile_shader(id, input)
     
     info.source = watchers_make(watchers, info.input)
     info.common = common_watcher
@@ -200,28 +200,28 @@ init_shader_and_watchers :: proc (watchers: ^[dynamic] Watcher, common_watcher: 
     return id
 }
 
-recompile_shaders_if_needed :: proc (watchers: [dynamic] Watcher, shader_allocator: Allocator, shaders_ids: ..Shader_Id) {
+recompile_shaders_if_needed :: proc (watchers: [dynamic] Watcher, shaders_ids: ..Shader_Id) {
     for id in shaders_ids {
         info := get_shader_info(id)^
         
         if watcher_modified(watchers, info.source, info.common) {
-            data := get_shader(id)
+            shader := get_shader(id)
             
             watcher_set_up_to_date(watchers, info.source, info.common)
             
-            compile_shader(id, info.input, shader_allocator, old = data)
+            compile_shader(id, info.input, old_bytes = shader.bytes)
         }
     }
 }
 
-compile_shader :: proc (id: Shader_Id, input_path: string, shader_allocator: Allocator, output_directory := "build", output_extension := ".spv", old: ^Shader = nil) {
+compile_shader :: proc (id: Shader_Id, input_path: string, output_directory := "build", output_extension := ".spv", old_bytes: [] u8 = nil) {
     cmd: Cmd
     cmd.allocator = context.temp_allocator
     
     input_directory, input_file := os.split_path(input_path)
     
     output_path, _ := os.join_path({input_directory, output_directory, input_file}, context.temp_allocator)
-    shader_output := fmt.aprintf("%v%v", output_path, output_extension, allocator = shader_allocator)
+    shader_output := fmt.tprintf("%v%v", output_path, output_extension)
     
     compile_shader_begin(&cmd, shader_output)
     
@@ -231,13 +231,12 @@ compile_shader :: proc (id: Shader_Id, input_path: string, shader_allocator: All
     
     append(&cmd, input_path)
     
-    procs, comp := make_shader_compilation()
+    procs, comp, comp_allocator := make_shader_compilation()
     comp^ = {
         id,
-        strings.clone(input_path, shader_allocator),
-        shader_output,
-        shader_allocator,
-        old,
+        strings.clone(input_path,    comp_allocator),
+        strings.clone(shader_output, comp_allocator),
+        old_bytes,
     }
     
     if !run_command(&cmd, or_exit = false, stdout = os.stdout, stderr = os.stderr, async = procs) {

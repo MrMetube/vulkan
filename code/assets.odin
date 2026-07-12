@@ -10,33 +10,29 @@ Assets :: struct {
     
     // These can never be freed
     shader_infos: [dynamic] Shader_Info,
-    shaders:  [dynamic] Shader,
+    shaders:      [dynamic] Shader,
     
     ////////////////////////////////////////////////
     
-    shader_compilation_procs: Procs,
-    shader_compilation_infos: [dynamic] Shader_Compilation,
+    // This needs to store the transient information in each Shader_Compilation and must be able to free individual compilation related allocations.
+    shader_compilation_allocator: Allocator,
+    // This needs to store the byte data from the recompile and loading up until the next successful recompilation. It also needs to be able to free single allocations.
+    shader_bytes_allocator:       Allocator,
+    shader_compilation_procs:     Procs,
+    shader_compilation_infos:     [dynamic] Shader_Compilation,
 }
-
-Shader_Compilation :: struct {
-    id: Shader_Id,
-    input_path:    string,
-    shader_output: string,
-    shader_allocator: Allocator,
-    old: ^Shader,
-}
-
-Shader_Id :: distinct u32
-Nil_Id :: cast(Shader_Id) 0
 
 ////////////////////////////////////////////////
 
-init_assets :: proc () {
+init_assets :: proc (shader_bytes_allocator: Allocator) {
     assets := &The_Assets
     
     // Nils
     append_nothing(&assets.shaders)
     append_nothing(&assets.shader_infos)
+    
+    assets.shader_compilation_allocator = context.allocator
+    assets.shader_bytes_allocator       = shader_bytes_allocator
     
     assets.initialized = true
 }
@@ -49,6 +45,17 @@ get_assets :: proc (loc := #caller_location) -> ^Assets {
 }
 
 ////////////////////////////////////////////////
+// Shaders
+
+Shader_Compilation :: struct {
+    id: Shader_Id,
+    input_path:    string,
+    shader_output: string,
+    old_bytes: [] u8,
+}
+
+Shader_Id  :: distinct u32
+Nil_Shader :: cast(Shader_Id) 0
 
 make_shader :: proc () -> (Shader_Id, ^Shader_Info) {
     assets := get_assets()
@@ -65,7 +72,7 @@ get_shader :: proc (id: Shader_Id, immediately: bool = false) -> ^Shader {
     
     id := id
     if id >= auto_cast len(assets.shaders) {
-        id = Nil_Id
+        id = Nil_Shader
     } else {
         if immediately {
             load_all_shaders_immediately()
@@ -81,19 +88,21 @@ get_shader_info :: proc (id: Shader_Id) -> ^Shader_Info {
     
     id := id
     if id >= auto_cast len(assets.shader_infos) {
-        id = Nil_Id
+        id = Nil_Shader
     }
     
     result := &assets.shader_infos[id]
     return result
 }
 
-make_shader_compilation :: proc () -> (^Procs, ^Shader_Compilation) {
+make_shader_compilation :: proc () -> (^Procs, ^Shader_Compilation, Allocator) {
     assets := get_assets()
     
-    comp := append_into(&assets.shader_compilation_infos)
+    comp  := append_into(&assets.shader_compilation_infos)
     procs := &assets.shader_compilation_procs
-    return procs, comp
+    alloc := assets.shader_compilation_allocator
+    
+    return procs, comp, alloc
 }
 
 test_and_reset_shaders_was_modified :: proc (ids: ..Shader_Id) -> bool {
@@ -155,15 +164,15 @@ load_and_parse_shader :: proc (info: Shader_Compilation) {
     
     ok := true
     
-    shader_bytes, err := os.read_entire_file(info.shader_output, info.shader_allocator)
+    shader_bytes, err := os.read_entire_file(info.shader_output, assets.shader_bytes_allocator)
     if err != nil {
-        fmt.printfln("Could not load the output file of '%v', which is '%v': %v", info.input_path, info.shader_output, os.error_string(err))
+        fmt.printfln("Could not load the output file of %q, which is %q: %v", info.input_path, info.shader_output, os.error_string(err))
         ok = false
     }
     
     if ok {
-        if info.old != nil {
-            delete(info.old.bytes, info.shader_allocator)
+        if info.old_bytes != nil {
+            delete(info.old_bytes, assets.shader_bytes_allocator)
         }
         
         shader: Shader
@@ -177,7 +186,6 @@ load_and_parse_shader :: proc (info: Shader_Compilation) {
         }
     }
     
-    // @todo compilation arena allocator
-    delete(info.input_path,    info.shader_allocator)
-    delete(info.shader_output, info.shader_allocator)
+    delete(info.input_path,    assets.shader_compilation_allocator)
+    delete(info.shader_output, assets.shader_compilation_allocator)
 }
