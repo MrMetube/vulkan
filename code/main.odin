@@ -396,6 +396,8 @@ main :: proc () {
     the_cpu_profile_zones := make([dynamic] profiler.Zone, context.allocator)
     profiler.set_recording(the_cpu_profiler, true)
     
+    load_all_shaders_immediately()
+    
     mouse_p: v2
     for !quit {
         free_all(context.temp_allocator)
@@ -520,7 +522,11 @@ main :: proc () {
         
         watchers_check_for_modification(watchers)
         
-        reloaded_cull_shader := reload_shaders_if_needed(watchers, shader_allocator, cull_shader)
+        load_all_shaders_that_were_recompiled_and_are_done()
+        
+        recompile_shaders_if_needed(watchers, shader_allocator, cull_shader)
+        reloaded_cull_shader := test_and_reset_shaders_was_modified(cull_shader)
+        
         if !pipeline_is_valid(early_cull_pipeline) || reloaded_cull_shader {
             destroy_pipeline(&gpu, early_cull_pipeline)
             early_cull_pipeline = gpu_create_compute_pipeline(&gpu, get_shader(cull_shader), descriptor_heap, constants = { /* late = */ { b = false } })
@@ -533,13 +539,15 @@ main :: proc () {
             fmt.printfln("Recreated late_cull_pipeline.")
         }
         
-        if !pipeline_is_valid(depth_pipeline) || reload_shaders_if_needed(watchers, shader_allocator, depth_reduce_shader) {
+        recompile_shaders_if_needed(watchers, shader_allocator, depth_reduce_shader)
+        if !pipeline_is_valid(depth_pipeline) || test_and_reset_shaders_was_modified(depth_reduce_shader) {
             destroy_pipeline(&gpu, depth_pipeline)
             depth_pipeline = gpu_create_compute_pipeline(&gpu, get_shader(depth_reduce_shader), descriptor_heap)
             fmt.printfln("Recreated depth_pipeline.")
         }
         
-        if !pipeline_is_valid(meshlet_pipeline) || reload_shaders_if_needed(watchers, shader_allocator, meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader) {
+        recompile_shaders_if_needed(watchers, shader_allocator, meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader)
+        if !pipeline_is_valid(meshlet_pipeline) || test_and_reset_shaders_was_modified(meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader) {
             raster_description := DefaultRasterDesc
             raster_description.depth_format = stuff.depth_buffer.format
             raster_description.color_targets = {
@@ -555,7 +563,8 @@ main :: proc () {
             fmt.printfln("Recreated meshlet_pipeline.")
         }
         
-        if !pipeline_is_valid(ui_pipeline) || reload_shaders_if_needed(watchers, shader_allocator, ui_vert_shader, ui_frag_shader) {
+        recompile_shaders_if_needed(watchers, shader_allocator, ui_vert_shader, ui_frag_shader)
+        if !pipeline_is_valid(ui_pipeline) || test_and_reset_shaders_was_modified(ui_vert_shader, ui_frag_shader) {
             raster_description := DefaultRasterDesc
             raster_description.color_targets = {
                 { format = stuff.color_buffer.format, write_mask = DefaulColorMask }
@@ -1237,6 +1246,7 @@ main :: proc () {
     destroy_pipeline(&gpu, early_cull_pipeline)
     destroy_pipeline(&gpu, late_cull_pipeline)
     destroy_pipeline(&gpu, depth_pipeline)
+    destroy_pipeline(&gpu, ui_pipeline)
     
     for texture in textures {
         gpu_free_image(&gpu, texture)

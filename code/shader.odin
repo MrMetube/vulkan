@@ -17,6 +17,7 @@ Shader_Info :: struct {
 }
 
 Shader :: struct {
+    was_modified: bool,
     bytes:      [] u8,
     stage:      vk.ShaderStageFlag,
     local_size: uv3,
@@ -186,16 +187,11 @@ generate_shader_api :: proc (output_file: string) {
 }
 
 init_shader_and_watchers :: proc (watchers: ^[dynamic] Watcher, common_watcher: Watcher_Id, input: string, bytes_allocator: Allocator, output_extension := ".spv") -> Shader_Id {
-    id, shader, info := make_shader()
+    id, info := make_shader()
     
     info.input = input
     
-    ok: bool
-    shader^, ok = compile_and_load_shader(input, bytes_allocator)
-    
-    if !ok {
-        assert(false, fmt.tprintf("Failed to initially load the shader `%v`", input))
-    }
+    compile_shader(id, input, bytes_allocator)
     
     info.source = watchers_make(watchers, info.input)
     info.common = common_watcher
@@ -204,8 +200,7 @@ init_shader_and_watchers :: proc (watchers: ^[dynamic] Watcher, common_watcher: 
     return id
 }
 
-reload_shaders_if_needed :: proc (watchers: [dynamic] Watcher, shader_allocator: Allocator, shaders_ids: ..Shader_Id) -> bool {
-    was_changed: bool
+recompile_shaders_if_needed :: proc (watchers: [dynamic] Watcher, shader_allocator: Allocator, shaders_ids: ..Shader_Id) {
     for id in shaders_ids {
         info := get_shader_info(id)^
         
@@ -214,25 +209,19 @@ reload_shaders_if_needed :: proc (watchers: [dynamic] Watcher, shader_allocator:
             
             watcher_set_up_to_date(watchers, info.source, info.common)
             
-            result, ok := compile_and_load_shader(info.input, shader_allocator, old = data)
-            if ok {
-                replace_shader(id, result)
-                was_changed = true
-            }
+            compile_shader(id, info.input, shader_allocator, old = data)
         }
     }
-    
-    return was_changed
 }
 
-compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator, output_directory := "build", output_extension := ".spv", old: ^Shader = nil) -> (Shader, bool) {
+compile_shader :: proc (id: Shader_Id, input_path: string, shader_allocator: Allocator, output_directory := "build", output_extension := ".spv", old: ^Shader = nil) {
     cmd: Cmd
     cmd.allocator = context.temp_allocator
     
     input_directory, input_file := os.split_path(input_path)
     
     output_path, _ := os.join_path({input_directory, output_directory, input_file}, context.temp_allocator)
-    shader_output := fmt.tprintf("%v%v", output_path, output_extension)
+    shader_output := fmt.aprintf("%v%v", output_path, output_extension, allocator = shader_allocator)
     
     compile_shader_begin(&cmd, shader_output)
     
@@ -240,103 +229,100 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
     if ODIN_DEBUG { append(&cmd, "-g") }
     if Optimized  { append(&cmd, "-O") }
     
-    ok := compile_shader_end(&cmd, input_path)
-    if !ok { return {}, false }
+    append(&cmd, input_path)
     
-    shader_bytes, err := os.read_entire_file(shader_output, bytes_allocator)
-    if err != nil {
-        fmt.printfln("Could not load the output file of '%v', which is '%v': %v", input_path, shader_output, os.error_string(err))
-        return {}, false
+    procs, comp := make_shader_compilation()
+    comp^ = {
+        id,
+        strings.clone(input_path, shader_allocator),
+        shader_output,
+        shader_allocator,
+        old,
     }
     
-    if old != nil {
-        delete(old.bytes, bytes_allocator)
+    if !run_command(&cmd, or_exit = false, stdout = os.stdout, stderr = os.stderr, async = procs) {
+        assert(false, "Failing to run the command means that it is faulty.")
+    }
+}
+
+parse_shader :: proc (shader: ^Shader) {
+    if shader.bytes == nil { return }
+    
+    shader_code := slice_from_parts(u32, raw_data(shader.bytes), len(shader.bytes) / 4)
+    
+    assert(shader_code[0] == SpvMagicNumber)
+    id_bound := shader_code[3]
+    
+    Id :: struct {
+        opcode:   SpvOp,
+        type_id:  u32,
+        
+        set:     u32,
+        binding: u32,
+        
+        constant: u32,
+        storage_class: SpvStorageClass,
+        sampled: u32,
     }
     
-    result: Shader
-    result.bytes = shader_bytes
+    ids := make([] Id, id_bound, context.temp_allocator)
     
-    { // parse shader
-        shader_code := slice_from_parts(u32, raw_data(shader_bytes), len(shader_bytes) / 4)
+    for &id in ids { id.binding = 0xff }
+    
+    code := shader_code[5:]
+    
+    local_size: [3] i32 = -1
+    
+    for len(code) != 0 {
+        opcode     := cast(SpvOp) cast(u16) ((code[0] >>  0) & 0xFFFF)
+        word_count := cast(u16) ((code[0] >> 16) & 0xFFFF)
         
-        assert(shader_code[0] == SpvMagicNumber)
-        id_bound := shader_code[3]
-        
-        Id :: struct {
-            opcode:   SpvOp,
-            type_id:  u32,
+        #partial switch opcode {
+        case .EntryPoint:
+            execution_model := cast(SpvExecutionModel) code[1]
             
-            set:     u32,
-            binding: u32,
-            
-            constant: u32,
-            storage_class: SpvStorageClass,
-            sampled: u32,
-        }
-        
-        ids := make([] Id, id_bound, context.temp_allocator)
-        
-        for &id in ids { id.binding = 0xff }
-        
-        code := shader_code[5:]
-        
-        local_size: [3] i32 = -1
-        
-        for len(code) != 0 {
-            opcode     := cast(SpvOp) cast(u16) ((code[0] >>  0) & 0xFFFF)
-            word_count := cast(u16) ((code[0] >> 16) & 0xFFFF)
-            
-            #partial switch opcode {
-            case .EntryPoint:
-                execution_model := cast(SpvExecutionModel) code[1]
-                
-                #partial switch execution_model {
-                case .Vertex:     result.stage = .VERTEX
-                case .Fragment:   result.stage = .FRAGMENT
-                case .MeshEXT:    result.stage = .MESH_EXT
-                case .TaskEXT:    result.stage = .TASK_EXT
-                case .GLCompute:  result.stage = .COMPUTE
-                }
-            
-            case .ExecutionMode:
-                mode := cast(SpvExecutionMode) code[2]
-                #partial switch mode {
-                case .LocalSize:
-                    result.local_size = { code[3], code[4], code[5] }
-                }
-                
-            case .ExecutionModeId:
-                mode := cast(SpvExecutionMode) code[2]
-                #partial switch mode {
-                case .LocalSizeId:
-                    local_size = { cast(i32) code[3], cast(i32) code[4], cast(i32) code[5] }
-                }
-                
-            case .Constant:
-                id := code[2]
-                assert(ids[id].opcode == {})
-                
-                ids[id].opcode   = opcode
-                ids[id].type_id  = code[1]
-                ids[id].constant = code[3]
+            #partial switch execution_model {
+            case .Vertex:     shader.stage = .VERTEX
+            case .Fragment:   shader.stage = .FRAGMENT
+            case .MeshEXT:    shader.stage = .MESH_EXT
+            case .TaskEXT:    shader.stage = .TASK_EXT
+            case .GLCompute:  shader.stage = .COMPUTE
             }
             
-            code = code[word_count:]
-        }
-        
-        if result.stage == .COMPUTE {
-            for it in 0..<3 {
-                if local_size[it] >= 0 {
-                    assert(ids[local_size[it]].opcode == .Constant)
-                    result.local_size[it] = ids[local_size[it]].constant
-                }
+        case .ExecutionMode:
+            mode := cast(SpvExecutionMode) code[2]
+            if mode == .LocalSize {
+                shader.local_size = { code[3], code[4], code[5] }
             }
             
-            assert(result.local_size != 0)
+        case .ExecutionModeId:
+            mode := cast(SpvExecutionMode) code[2]
+            if mode == .LocalSizeId {
+                local_size = { cast(i32) code[3], cast(i32) code[4], cast(i32) code[5] }
+            }
+            
+        case .Constant:
+            id := code[2]
+            assert(ids[id].opcode == {})
+            
+            ids[id].opcode   = opcode
+            ids[id].type_id  = code[1]
+            ids[id].constant = code[3]
         }
+            
+        code = code[word_count:]
     }
     
-    return result, true
+    if shader.stage == .COMPUTE {
+        for it in 0..<3 {
+            if local_size[it] >= 0 {
+                assert(ids[local_size[it]].opcode == .Constant)
+                shader.local_size[it] = ids[local_size[it]].constant
+            }
+        }
+        
+        assert(shader.local_size != 0)
+    }
 }
 
 compile_shader_begin :: proc (cmd: ^Cmd, shader_output: string) {
