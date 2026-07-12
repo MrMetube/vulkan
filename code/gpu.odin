@@ -1006,7 +1006,7 @@ Pipeline_Info :: struct {
     module_infos:           [dynamic; 8] vk.ShaderModuleCreateInfo,
 }
 
-make_pipeline_info :: proc (info: ^Pipeline_Info, gpu: ^Gpu, heap: Descriptor_Heap, shaders: [] Shader, constants: [] Specialization_Constant) {
+make_pipeline_info :: proc (info: ^Pipeline_Info, gpu: ^Gpu, heap: Descriptor_Heap, shaders: [] ^Shader, constants: [] Specialization_Constant) {
     // universal Descriptor Heap mapping
     info.mappings[0] = { // texture array descriptor
         sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
@@ -1079,7 +1079,7 @@ make_pipeline_info :: proc (info: ^Pipeline_Info, gpu: ^Gpu, heap: Descriptor_He
     }
 }
 
-gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil) -> Pipeline {
+gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: ^Shader, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil) -> Pipeline {
     assert(compute.stage == .COMPUTE)
     
     pipeline_info: Pipeline_Info
@@ -1099,7 +1099,7 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: Shader, heap: Descripto
     return result
 }
 
-gpu_create_graphics_pipeline :: proc (gpu: ^Gpu, vertex, fragment: Shader, info: Raster_Desc, heap: Descriptor_Heap) -> Pipeline {
+gpu_create_graphics_pipeline :: proc (gpu: ^Gpu, vertex, fragment: ^Shader, info: Raster_Desc, heap: Descriptor_Heap) -> Pipeline {
     assert(vertex.stage   == .VERTEX)
     assert(fragment.stage == .FRAGMENT)
     
@@ -1110,7 +1110,7 @@ gpu_create_graphics_pipeline :: proc (gpu: ^Gpu, vertex, fragment: Shader, info:
 }
 
 gpu_create_graphics_meshlet_pipeline :: proc { gpu_create_graphics_meshlet_pipeline_mesh, gpu_create_graphics_meshlet_pipeline_task }
-gpu_create_graphics_meshlet_pipeline_task :: proc (gpu: ^Gpu, task, mesh, frag: Shader, info: Raster_Desc, heap: Descriptor_Heap) -> Pipeline {
+gpu_create_graphics_meshlet_pipeline_task :: proc (gpu: ^Gpu, task, mesh, frag: ^Shader, info: Raster_Desc, heap: Descriptor_Heap) -> Pipeline {
     assert(task.stage == .TASK_EXT)
     assert(mesh.stage == .MESH_EXT)
     assert(frag.stage == .FRAGMENT)
@@ -1121,7 +1121,7 @@ gpu_create_graphics_meshlet_pipeline_task :: proc (gpu: ^Gpu, task, mesh, frag: 
     return result
 }
 
-gpu_create_graphics_meshlet_pipeline_mesh :: proc (gpu: ^Gpu, mesh, frag: Shader, info: Raster_Desc, heap: Descriptor_Heap) -> Pipeline {
+gpu_create_graphics_meshlet_pipeline_mesh :: proc (gpu: ^Gpu, mesh, frag: ^Shader, info: Raster_Desc, heap: Descriptor_Heap) -> Pipeline {
     assert(mesh.stage == .MESH_EXT)
     assert(frag.stage == .FRAGMENT)
     
@@ -1131,7 +1131,7 @@ gpu_create_graphics_meshlet_pipeline_mesh :: proc (gpu: ^Gpu, mesh, frag: Shader
     return result
 }
 
-gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info: Raster_Desc, heap: Descriptor_Heap, shaders: ..Shader) {
+gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info: Raster_Desc, heap: Descriptor_Heap, shaders: ..^Shader) {
     pipeline_info: Pipeline_Info
     make_pipeline_info(&pipeline_info, gpu, heap, shaders, {})
     

@@ -17,8 +17,6 @@ Shader_Info :: struct {
 }
 
 Shader :: struct {
-    info: Shader_Info,
-    
     bytes:      [] u8,
     stage:      vk.ShaderStageFlag,
     local_size: uv3,
@@ -187,27 +185,38 @@ generate_shader_api :: proc (output_file: string) {
     }
 }
 
-init_shader_and_watchers :: proc (watchers: ^[dynamic] Watcher, common_watcher: Watcher_Id, input: string, bytes_allocator: Allocator, output_extension := ".spv") -> Shader {
-    result, ok := compile_and_load_shader(input, bytes_allocator)
+init_shader_and_watchers :: proc (watchers: ^[dynamic] Watcher, common_watcher: Watcher_Id, input: string, bytes_allocator: Allocator, output_extension := ".spv") -> Shader_Id {
+    id, shader, info := make_shader()
+    
+    info.input = input
+    
+    ok: bool
+    shader^, ok = compile_and_load_shader(input, bytes_allocator)
+    
     if !ok {
         assert(false, fmt.tprintf("Failed to initially load the shader `%v`", input))
     }
-    result.info.source = watchers_make(watchers, result.info.input)
-    result.info.common = common_watcher
-    watcher_set_up_to_date(watchers^, result.info.source, result.info.common)
     
-    return result
+    info.source = watchers_make(watchers, info.input)
+    info.common = common_watcher
+    watcher_set_up_to_date(watchers^, info.source, info.common)
+    
+    return id
 }
 
-reload_shaders_if_needed :: proc (watchers: [dynamic] Watcher, shader_allocator: Allocator, shaders: ..^Shader) -> bool {
+reload_shaders_if_needed :: proc (watchers: [dynamic] Watcher, shader_allocator: Allocator, shaders_ids: ..Shader_Id) -> bool {
     was_changed: bool
-    
-    for shader in shaders {
-        if watcher_modified(watchers, shader.info.source, shader.info.common) {
-            watcher_set_up_to_date(watchers, shader.info.source, shader.info.common)
-            result, ok := compile_and_load_shader(shader.info.input, shader_allocator, old = shader)
+    for id in shaders_ids {
+        info := get_shader_info(id)^
+        
+        if watcher_modified(watchers, info.source, info.common) {
+            data := get_shader(id)
+            
+            watcher_set_up_to_date(watchers, info.source, info.common)
+            
+            result, ok := compile_and_load_shader(info.input, shader_allocator, old = data)
             if ok {
-                shader^ = result
+                replace_shader(id, result)
                 was_changed = true
             }
         }
@@ -223,14 +232,6 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
     input_directory, input_file := os.split_path(input_path)
     
     output_path, _ := os.join_path({input_directory, output_directory, input_file}, context.temp_allocator)
-    
-    result: Shader
-    if old != nil {
-        result.info = old.info
-    } else {
-        result.info.input = input_path
-    }
-    
     shader_output := fmt.tprintf("%v%v", output_path, output_extension)
     
     compile_shader_begin(&cmd, shader_output)
@@ -240,18 +241,19 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
     if Optimized  { append(&cmd, "-O") }
     
     ok := compile_shader_end(&cmd, input_path)
-    if !ok { return result, false }
+    if !ok { return {}, false }
     
     shader_bytes, err := os.read_entire_file(shader_output, bytes_allocator)
     if err != nil {
-        fmt.printfln("Could not load the output file of '%v', which is '%v': %v", result.info.input, shader_output, os.error_string(err))
-        return result, false
+        fmt.printfln("Could not load the output file of '%v', which is '%v': %v", input_path, shader_output, os.error_string(err))
+        return {}, false
     }
     
     if old != nil {
         delete(old.bytes, bytes_allocator)
     }
     
+    result: Shader
     result.bytes = shader_bytes
     
     { // parse shader
@@ -300,18 +302,14 @@ compile_and_load_shader :: proc (input_path: string, bytes_allocator: Allocator,
                 mode := cast(SpvExecutionMode) code[2]
                 #partial switch mode {
                 case .LocalSize:
-                    result.local_size.x = code[3]
-                    result.local_size.y = code[4]
-                    result.local_size.z = code[5]
+                    result.local_size = { code[3], code[4], code[5] }
                 }
                 
             case .ExecutionModeId:
                 mode := cast(SpvExecutionMode) code[2]
                 #partial switch mode {
                 case .LocalSizeId:
-                    local_size.x = cast(i32) code[3]
-                    local_size.y = cast(i32) code[4]
-                    local_size.z = cast(i32) code[5]
+                    local_size = { cast(i32) code[3], cast(i32) code[4], cast(i32) code[5] }
                 }
                 
             case .Constant:
@@ -368,7 +366,7 @@ compile_shader_end :: proc (cmd: ^Cmd, shader_input: string) -> bool {
     return true
 }
 
-get_group_count :: proc (shader: Shader, count_x: u32 = 1, count_y: u32 = 1, count_z: u32 = 1) -> uv3 {
+get_group_count :: proc (shader: ^Shader, count_x: u32 = 1, count_y: u32 = 1, count_z: u32 = 1) -> uv3 {
     total_count := uv3{ count_x, count_y, count_z }
     result := (total_count + shader.local_size-1) / shader.local_size
     return result

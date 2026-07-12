@@ -292,6 +292,7 @@ main :: proc () {
     watcher_allocator := context.allocator
     watchers := make([dynamic] Watcher, watcher_allocator)
     
+    init_assets()
     
     // @speed we duplicate this watcher per shader, so that each shader can keep track of the header being changed and be recompiled independently from other shaders, without effecting their modification test.
     meshlet_task_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.task",      shader_allocator)
@@ -519,26 +520,26 @@ main :: proc () {
         
         watchers_check_for_modification(watchers)
         
-        reloaded_cull_shader := reload_shaders_if_needed(watchers, shader_allocator, &cull_shader)
+        reloaded_cull_shader := reload_shaders_if_needed(watchers, shader_allocator, cull_shader)
         if !pipeline_is_valid(early_cull_pipeline) || reloaded_cull_shader {
             destroy_pipeline(&gpu, early_cull_pipeline)
-            early_cull_pipeline = gpu_create_compute_pipeline(&gpu, cull_shader, descriptor_heap, constants = { /* late = */ { b = false } })
+            early_cull_pipeline = gpu_create_compute_pipeline(&gpu, get_shader(cull_shader), descriptor_heap, constants = { /* late = */ { b = false } })
             fmt.printfln("Recreated early_cull_pipeline.")
         }
         
         if !pipeline_is_valid(late_cull_pipeline) || reloaded_cull_shader {
             destroy_pipeline(&gpu, late_cull_pipeline)
-            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, cull_shader, descriptor_heap, constants = { /* late = */ { b = true } })
+            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, get_shader(cull_shader), descriptor_heap, constants = { /* late = */ { b = true } })
             fmt.printfln("Recreated late_cull_pipeline.")
         }
         
-        if !pipeline_is_valid(depth_pipeline) || reload_shaders_if_needed(watchers, shader_allocator, &depth_reduce_shader) {
+        if !pipeline_is_valid(depth_pipeline) || reload_shaders_if_needed(watchers, shader_allocator, depth_reduce_shader) {
             destroy_pipeline(&gpu, depth_pipeline)
-            depth_pipeline = gpu_create_compute_pipeline(&gpu, depth_reduce_shader, descriptor_heap)
+            depth_pipeline = gpu_create_compute_pipeline(&gpu, get_shader(depth_reduce_shader), descriptor_heap)
             fmt.printfln("Recreated depth_pipeline.")
         }
         
-        if !pipeline_is_valid(meshlet_pipeline) || reload_shaders_if_needed(watchers, shader_allocator, &meshlet_task_shader, &meshlet_mesh_shader, &meshlet_frag_shader) {
+        if !pipeline_is_valid(meshlet_pipeline) || reload_shaders_if_needed(watchers, shader_allocator, meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader) {
             raster_description := DefaultRasterDesc
             raster_description.depth_format = stuff.depth_buffer.format
             raster_description.color_targets = {
@@ -550,14 +551,14 @@ main :: proc () {
             task, mesh, frag := meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader
             
             destroy_pipeline(&gpu, meshlet_pipeline)
-            meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, task, mesh, frag, raster_description, descriptor_heap)
+            meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, get_shader(task), get_shader(mesh), get_shader(frag), raster_description, descriptor_heap)
             fmt.printfln("Recreated meshlet_pipeline.")
         }
         
-        if !pipeline_is_valid(ui_pipeline) || reload_shaders_if_needed(watchers, shader_allocator, &ui_vert_shader, &ui_frag_shader) {
+        if !pipeline_is_valid(ui_pipeline) || reload_shaders_if_needed(watchers, shader_allocator, ui_vert_shader, ui_frag_shader) {
             raster_description := DefaultRasterDesc
             raster_description.color_targets = {
-                { format = stuff.color_buffer.format, write_mask = DefaulColorMask, }
+                { format = stuff.color_buffer.format, write_mask = DefaulColorMask }
             }
             raster_description.blendstate = &Blend_Desc { **DefaultBlendDesc }
             raster_description.blendstate.src_color_factor = .SRC_ALPHA
@@ -566,7 +567,7 @@ main :: proc () {
             raster_description.blendstate.dst_alpha_factor = .ONE_MINUS_SRC_ALPHA
             
             destroy_pipeline(&gpu, ui_pipeline)
-            ui_pipeline = gpu_create_graphics_pipeline(&gpu, ui_vert_shader, ui_frag_shader, raster_description, descriptor_heap)
+            ui_pipeline = gpu_create_graphics_pipeline(&gpu, get_shader(ui_vert_shader), get_shader(ui_frag_shader), raster_description, descriptor_heap)
             fmt.printfln("Recreated ui_pipeline.")
         }
         
@@ -804,7 +805,7 @@ main :: proc () {
                 gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
                 
                 gpu_set_pipeline(cmd, early_cull_pipeline)
-                gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(cull_shader, auto_cast len(draws)))
+                gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(get_shader(cull_shader), auto_cast len(draws)))
                 
             gpu_profile_zone_end()
             gpu_labeled_region_end(cmd)
@@ -874,7 +875,7 @@ main :: proc () {
                     depth_globals_cpu.output_index = mip.storage_index
                 }
                 
-                gpu_dispatch(cmd, &frame_descriptor, depth_globals_gpu, get_group_count(depth_reduce_shader, **mip.size))
+                gpu_dispatch(cmd, &frame_descriptor, depth_globals_gpu, get_group_count(get_shader(depth_reduce_shader), **mip.size))
                 
                 gpu_barrier(cmd, { .COMPUTE_SHADER }, { .COMPUTE_SHADER })
             }
@@ -943,7 +944,7 @@ main :: proc () {
                 gpu_barrier(cmd, { .ALL_TRANSFER, .COMPUTE_SHADER }, { .COMPUTE_SHADER })
                 
                 gpu_set_pipeline(cmd, late_cull_pipeline)
-                gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(cull_shader, auto_cast len(draws)))
+                gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(get_shader(cull_shader), auto_cast len(draws)))
                     
             gpu_profile_zone_end()
             gpu_labeled_region_end(cmd)
