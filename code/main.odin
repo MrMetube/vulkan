@@ -285,12 +285,11 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    generate_shader_api("shaders/api.generated.glsl")
-    
-    watcher_allocator := context.allocator
-    watchers := make([dynamic] Watcher, watcher_allocator)
+    watchers := make([dynamic] Watcher, context.allocator)
     
     init_assets(context.allocator)
+    
+    generate_shader_api("shaders/api.generated.glsl")
     
     // @speed we duplicate this watcher per shader, so that each shader can keep track of the header being changed and be recompiled independently from other shaders, without effecting their modification test.
     meshlet_task_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.task")
@@ -394,7 +393,7 @@ main :: proc () {
     the_cpu_profile_zones := make([dynamic] profiler.Zone, context.allocator)
     profiler.set_recording(the_cpu_profiler, true)
     
-    load_all_shaders_immediately()
+    load_all_shaders(immediately = true)
     
     mouse_p: v2
     for !quit {
@@ -519,10 +518,13 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         watchers_check_for_modification(watchers)
-        
-        load_all_shaders_that_were_recompiled_and_are_done()
-        
         recompile_shaders_if_needed(watchers, cull_shader)
+        recompile_shaders_if_needed(watchers, depth_reduce_shader)
+        recompile_shaders_if_needed(watchers, meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader)
+        recompile_shaders_if_needed(watchers, ui_vert_shader, ui_frag_shader)
+        
+        load_all_shaders(immediately = false)
+        
         reloaded_cull_shader := test_and_reset_shaders_was_modified(cull_shader)
         
         if !pipeline_is_valid(early_cull_pipeline) || reloaded_cull_shader {
@@ -537,14 +539,12 @@ main :: proc () {
             fmt.printfln("Recreated late_cull_pipeline.")
         }
         
-        recompile_shaders_if_needed(watchers, depth_reduce_shader)
         if !pipeline_is_valid(depth_pipeline) || test_and_reset_shaders_was_modified(depth_reduce_shader) {
             destroy_pipeline(&gpu, depth_pipeline)
             depth_pipeline = gpu_create_compute_pipeline(&gpu, get_shader(depth_reduce_shader), descriptor_heap)
             fmt.printfln("Recreated depth_pipeline.")
         }
         
-        recompile_shaders_if_needed(watchers, meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader)
         if !pipeline_is_valid(meshlet_pipeline) || test_and_reset_shaders_was_modified(meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader) {
             raster_description := DefaultRasterDesc
             raster_description.depth_format = stuff.depth_buffer.format
@@ -561,7 +561,6 @@ main :: proc () {
             fmt.printfln("Recreated meshlet_pipeline.")
         }
         
-        recompile_shaders_if_needed(watchers, ui_vert_shader, ui_frag_shader)
         if !pipeline_is_valid(ui_pipeline) || test_and_reset_shaders_was_modified(ui_vert_shader, ui_frag_shader) {
             raster_description := DefaultRasterDesc
             raster_description.color_targets = {
@@ -581,11 +580,14 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         cpu_begin_profile_zone("Setup Descriptor Heap")
-        frame_descriptor: Frame_Descriptor
-        frame_descriptor.descriptor_offset = DescriptorStaticLimit              + auto_cast frame_index * DescriptorPerFrameLimit
-        frame_descriptor.descriptor_end    = frame_descriptor.descriptor_offset +                     1 * DescriptorPerFrameLimit
         
+        frame_descriptor: Frame_Descriptor
         {
+            cpu_scoped_profile_zone("Setup Descriptor Heap")
+            
+            frame_descriptor.descriptor_offset = DescriptorStaticLimit              + auto_cast frame_index * DescriptorPerFrameLimit
+            frame_descriptor.descriptor_end    = frame_descriptor.descriptor_offset +                     1 * DescriptorPerFrameLimit
+            
             frame_descriptor.descriptor_offset = 0
             {
                 // @cleanup who should keep which data, and how often do we actually need to write this (atleast when the swapchain
@@ -627,12 +629,12 @@ main :: proc () {
                 }
             }
         }
-        cpu_end_profile_zone()
         
-        cpu_begin_profile_zone("Generate Draws")
-        entropy := seed_random_series(545114)
-        when true {
-            draws := db_view[:50_000]
+        draws: [] Draw
+        {
+            cpu_scoped_profile_zone("Generate Draws")
+            entropy := seed_random_series(545114)
+            draws = db_view[:50_000]
             global_rotation := la.quaternion_from_euler_angles_f32(**(object_rotation * random_unilateral(&entropy, v3)), .XYX)
             for &draw in draws {
                 p := random_bilateral(&entropy, v3) * {10, 10, 10} + {0, 0, -10}
@@ -649,25 +651,7 @@ main :: proc () {
                 draw.mesh_index    = mesh_index
                 draw.vertex_offset = mesh.vertex_offset
             }
-        } else {
-            draws := db_view[:200_000]
-            global_rotation := la.quaternion_from_euler_angles_f32(**(object_rotation * random_unilateral(&entropy, v3)), .XYX)
-            for &draw, draw_index in draws {
-                p := v3{0, 0, -3} + {0, 0, -10 / cast(f32) (draw_index+1)} * cast(f32) (draw_index)
-                
-                draw.p           = p
-                draw.scale       = 1 / cast(f32) (draw_index+1)
-                draw.orientation = global_rotation
-                
-                draw.texture_index = textures[auto_cast (draw_index+1) % texture_count].sampled_index
-                
-                mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
-                
-                draw.mesh_index    = mesh_index
-                draw.vertex_offset = mesh.vertex_offset
-            }
         }
-        cpu_end_profile_zone()
         
         ////////////////////////////////////////////////
         

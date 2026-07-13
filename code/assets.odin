@@ -75,7 +75,8 @@ get_shader :: proc (id: Shader_Id, immediately: bool = false) -> ^Shader {
         id = Nil_Shader
     } else {
         if immediately {
-            load_all_shaders_immediately()
+            // @waste just wait for this requested id
+            load_all_shaders(immediately = true)
         }
     }
     
@@ -117,13 +118,15 @@ test_and_reset_shaders_was_modified :: proc (ids: ..Shader_Id) -> bool {
     return result
 }
 
-load_all_shaders_that_were_recompiled_and_are_done :: proc () {
+load_all_shaders :: proc (immediately := false) {
     assets := get_assets()
     if len(assets.shader_compilation_procs) == 0 { return }
     
     #reverse for &p, index in assets.shader_compilation_procs {
-        state, wait_err := os.process_wait(p, timeout = 0)
-        if wait_err == .Timeout || !state.exited { continue }
+        state, wait_err := os.process_wait(p, timeout = immediately ? os.TIMEOUT_INFINITE : 0)
+        if !immediately {
+            if wait_err == .Timeout || !state.exited { continue }
+        }
         assert(wait_err == nil)
         
         info := assets.shader_compilation_infos[index]
@@ -134,29 +137,16 @@ load_all_shaders_that_were_recompiled_and_are_done :: proc () {
         
         load_and_parse_shader(info)
         
-        unordered_remove(&assets.shader_compilation_procs, index)
-        unordered_remove(&assets.shader_compilation_infos, index)
+        if !immediately {
+            unordered_remove(&assets.shader_compilation_procs, index)
+            unordered_remove(&assets.shader_compilation_infos, index)
+        }
     }
-}
-
-load_all_shaders_immediately :: proc () {
-    assets := get_assets()
-    if len(assets.shader_compilation_procs) == 0 { return }
     
-    for &p, index in assets.shader_compilation_procs {
-        state, wait_err := os.process_wait(p)
-        assert(wait_err == nil)
-        
-        info := assets.shader_compilation_infos[index]
-        if state.exit_code != 0 {
-            fmt.printfln("Shader compilation failed for %q", info.input_path)
-            continue
-        }
-        
-        load_and_parse_shader(info)
+    if immediately {
+        clear(&assets.shader_compilation_procs)
+        clear(&assets.shader_compilation_infos)    
     }
-    clear(&assets.shader_compilation_procs)
-    clear(&assets.shader_compilation_infos)
 }
 
 load_and_parse_shader :: proc (info: Shader_Compilation) {
