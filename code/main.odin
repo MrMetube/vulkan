@@ -243,19 +243,19 @@ main :: proc () {
     profiler.init_os_metrics()
     cpu_end_profile_zone()
     
-    gpu: Gpu
+    gpu := &Gpu {}
     {
         cpu_scoped_profile_zone("GPU Init")
         props     := sdl.GetWindowProperties(window)
         hinstance := sdl.GetPointerProperty(props, sdl.PROP_WINDOW_WIN32_INSTANCE_POINTER, nil)
-        gpu = gpu_init(hinstance, debug.vsync)
+        gpu^ = gpu_init(hinstance, debug.vsync)
     }
     
     cpu_begin_profile_zone("Create Swapchain")
     
     stuff: Render_Targets_And_Stuff
     stuff.depth_buffer.format = .D32_SFLOAT
-    recreate_stuff(&gpu, &stuff)
+    recreate_stuff(gpu, &stuff)
     
     cpu_end_profile_zone()
     
@@ -266,13 +266,13 @@ main :: proc () {
     
     // @todo draws change per frame and could also be placed in the per frame bump allocator, as we just need a gpu address
     // All the geometry data can just live in the gpu
-    vb_view,  vertex_buffer          := gpu_allocate(&gpu, [] Vertex,  256 * Megabyte / size_of(Vertex),  memory = memory)
-    mlb_view, meshlet_buffer         := gpu_allocate(&gpu, [] Meshlet, 256 * Megabyte / size_of(Meshlet), memory = memory)
-    mdb_view, meshlet_data_buffer    := gpu_allocate(&gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = memory)
-    mb_view,  mesh_buffer            := gpu_allocate(&gpu, [] Mesh,    256 * Megabyte / size_of(Mesh),    memory = memory)
+    vb_view,  vertex_buffer          := gpu_allocate(gpu, [] Vertex,  256 * Megabyte / size_of(Vertex),  memory = memory)
+    mlb_view, meshlet_buffer         := gpu_allocate(gpu, [] Meshlet, 256 * Megabyte / size_of(Meshlet), memory = memory)
+    mdb_view, meshlet_data_buffer    := gpu_allocate(gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = memory)
+    mb_view,  mesh_buffer            := gpu_allocate(gpu, [] Mesh,    256 * Megabyte / size_of(Mesh),    memory = memory)
     
-    db_view,  draw_buffer            := gpu_allocate(&gpu, [] Draw,    256 * Megabyte / size_of(Draw),    memory = memory)
-    dvb_view, draw_visibility_buffer := gpu_allocate(&gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = memory, usage = vk.BufferUsageFlags { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
+    db_view,  draw_buffer            := gpu_allocate(gpu, [] Draw,    256 * Megabyte / size_of(Draw),    memory = memory)
+    dvb_view, draw_visibility_buffer := gpu_allocate(gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = memory, usage = vk.BufferUsageFlags { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
     
     dvb_cleared := false
     
@@ -328,17 +328,17 @@ main :: proc () {
     texture_count :: 3
     textures: [texture_count] Image
     
-    descriptor_heap := create_descriptor_heap(&gpu)
+    descriptor_heap := create_descriptor_heap(gpu)
     
     {
         cpu_scoped_profile_zone("Texture Upload")
         
-        upload_bump := bump_allocator_make_temporary(&gpu, 256 * Megabyte, usage = { .TRANSFER_SRC })
-        defer bump_allocator_delete(&gpu, &upload_bump)
+        upload_bump := bump_allocator_make_temporary(gpu, 256 * Megabyte, usage = { .TRANSFER_SRC })
+        defer bump_allocator_delete(gpu, &upload_bump)
         
-        cmd := gpu_begin_command_recording(&gpu, gpu.transfer_command_pool, gpu.transfer_queue)
-        upload_semaphore := gpu_create_timeline_semaphore(&gpu, 0)
-        defer gpu_destroy_semaphore(&gpu, upload_semaphore)
+        cmd := gpu_begin_command_recording(gpu, gpu.transfer_command_pool, gpu.transfer_queue)
+        upload_semaphore := gpu_create_timeline_semaphore(gpu, 0)
+        defer gpu_destroy_semaphore(gpu, upload_semaphore)
         
         for &texture, index in textures {
             filename := fmt.tprintf("tutorial/suzanne%v.ktx", index)
@@ -350,7 +350,7 @@ main :: proc () {
             description.format  = auto_cast loaded_texture.format
             description.usage   = { .TRANSFER_DST, .SAMPLED }
             
-            texture = gpu_allocate_texture(&gpu, description)
+            texture = gpu_allocate_texture(gpu, description)
             
             // @waste we should have loaded all data into here if possible
             cpu_data, gpu_data := bump_allocate(&upload_bump, cast(u32) len(loaded_texture.data), alignment = 32)
@@ -366,21 +366,21 @@ main :: proc () {
         gpu_barrier(cmd, { .ALL_TRANSFER }, { .ALL_GRAPHICS })
         
         gpu_submit(gpu.transfer_queue, { { upload_semaphore, { .ALL_COMMANDS }, 1} }, cmd)
-        gpu_wait_semaphore(&gpu, upload_semaphore, 1)
+        gpu_wait_semaphore(gpu, upload_semaphore, 1)
      }
     
     ////////////////////////////////////////////////
     
     cpu_begin_profile_zone("Setup other gpu resources")
     
-    gpu_profile_init(&gpu)
+    gpu_profile_init(gpu)
     
     stats_count: u32 = 3
-    stats_pool := create_query_pool(&gpu, stats_count, .MESH_PRIMITIVES_GENERATED_EXT)
+    stats_pool := create_query_pool(gpu, stats_count, .MESH_PRIMITIVES_GENERATED_EXT)
     
     absolute_frame_index: u64
     next_frame := cast(u64) MaxFramesInFlight+1
-    frame_semaphore := gpu_create_timeline_semaphore(&gpu, MaxFramesInFlight)
+    frame_semaphore := gpu_create_timeline_semaphore(gpu, MaxFramesInFlight)
     
     cpu_end_profile_zone()
     
@@ -389,7 +389,7 @@ main :: proc () {
     cpu_begin_profile_zone("Allocate GPU Bumps")
     frame_bump_allocators: [MaxFramesInFlight] Bump_Allocator
     for &bump in frame_bump_allocators {
-        bump = bump_allocator_make_temporary(&gpu, 256 * Megabyte, usage = { .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER })
+        bump = bump_allocator_make_temporary(gpu, 256 * Megabyte, usage = { .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER })
     }
     
     cpu_end_profile_zone()
@@ -517,20 +517,20 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         cpu_begin_profile_zone("Frame Sleep")
-        gpu_wait_semaphore(&gpu, frame_semaphore, next_frame - MaxFramesInFlight)
+        gpu_wait_semaphore(gpu, frame_semaphore, next_frame - MaxFramesInFlight)
         cpu_end_profile_zone()
         
         frame_index := absolute_frame_index % MaxFramesInFlight
         absolute_frame_index += 1
         
-        if gpu_recreate_swapchain_if_needed(&gpu, debug.vsync, vsync_changed) {
-            ok := get_next_image(&gpu, frame_semaphore, frame_index)
+        if gpu_recreate_swapchain_if_needed(gpu, debug.vsync, vsync_changed) {
+            ok := get_next_image(gpu, frame_semaphore, frame_index)
             assert(ok)
         }
         
         if gpu.swapchain_state == .Was_Resized {
             gpu.swapchain_state = .Ok
-            recreate_stuff(&gpu, &stuff)
+            recreate_stuff(gpu, &stuff)
         }
         
         assert(gpu.swapchain_state != .Dirty)
@@ -554,23 +554,23 @@ main :: proc () {
         reloaded_cull_shader := test_and_reset_shaders_was_modified(cull_shader)
         // @todo Think about when shaders should be loaded immediatly and when not
         if !pipeline_is_valid(early_cull_pipeline) || reloaded_cull_shader {
-            destroy_pipeline(&gpu, early_cull_pipeline)
+            destroy_pipeline(gpu, early_cull_pipeline)
             immediately := !pipeline_is_valid(early_cull_pipeline)
-            early_cull_pipeline = gpu_create_compute_pipeline(&gpu, get_shader(cull_shader, immediately), descriptor_heap, constants = { /* late = */ { b = false } })
+            early_cull_pipeline = gpu_create_compute_pipeline(gpu, get_shader(cull_shader, immediately), descriptor_heap, constants = { /* late = */ { b = false } })
             fmt.printfln("Recreated early_cull_pipeline.")
         }
         
         if !pipeline_is_valid(late_cull_pipeline) || reloaded_cull_shader {
-            destroy_pipeline(&gpu, late_cull_pipeline)
+            destroy_pipeline(gpu, late_cull_pipeline)
             immediately := !pipeline_is_valid(late_cull_pipeline)
-            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, get_shader(cull_shader, immediately), descriptor_heap, constants = { /* late = */ { b = true } })
+            late_cull_pipeline = gpu_create_compute_pipeline(gpu, get_shader(cull_shader, immediately), descriptor_heap, constants = { /* late = */ { b = true } })
             fmt.printfln("Recreated late_cull_pipeline.")
         }
         
         if !pipeline_is_valid(depth_pipeline) || test_and_reset_shaders_was_modified(depth_reduce_shader) {
-            destroy_pipeline(&gpu, depth_pipeline)
+            destroy_pipeline(gpu, depth_pipeline)
             immediately := !pipeline_is_valid(depth_pipeline)
-            depth_pipeline = gpu_create_compute_pipeline(&gpu, get_shader(depth_reduce_shader, immediately), descriptor_heap)
+            depth_pipeline = gpu_create_compute_pipeline(gpu, get_shader(depth_reduce_shader, immediately), descriptor_heap)
             fmt.printfln("Recreated depth_pipeline.")
         }
         
@@ -585,9 +585,9 @@ main :: proc () {
             
             task, mesh, frag := meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader
             
-            destroy_pipeline(&gpu, meshlet_pipeline)
+            destroy_pipeline(gpu, meshlet_pipeline)
             immediately := !pipeline_is_valid(meshlet_pipeline)
-            meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, get_shader(task, immediately), get_shader(mesh, immediately), get_shader(frag, immediately), raster_description, descriptor_heap)
+            meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(gpu, get_shader(task, immediately), get_shader(mesh, immediately), get_shader(frag, immediately), raster_description, descriptor_heap)
             fmt.printfln("Recreated meshlet_pipeline.")
         }
         
@@ -602,9 +602,9 @@ main :: proc () {
             raster_description.blendstate.src_alpha_factor = .ONE
             raster_description.blendstate.dst_alpha_factor = .ONE_MINUS_SRC_ALPHA
             
-            destroy_pipeline(&gpu, ui_pipeline)
+            destroy_pipeline(gpu, ui_pipeline)
             immediately := !pipeline_is_valid(ui_pipeline)
-            ui_pipeline = gpu_create_graphics_pipeline(&gpu, get_shader(ui_vert_shader, immediately), get_shader(ui_frag_shader, immediately), raster_description, descriptor_heap)
+            ui_pipeline = gpu_create_graphics_pipeline(gpu, get_shader(ui_vert_shader, immediately), get_shader(ui_frag_shader, immediately), raster_description, descriptor_heap)
             fmt.printfln("Recreated ui_pipeline.")
         }
         
@@ -622,37 +622,37 @@ main :: proc () {
                 // @cleanup who should keep which data, and how often do we actually need to write this (atleast when the swapchain
                 // is recreated).
                 // @todo add a null texture, which is a bright debug color so that uninitialized indices(0) are easy to find
-                write_texture_to_heap(&gpu, &descriptor_heap, frame_descriptor.descriptor_offset, textures[0], .SAMPLED_IMAGE)
+                write_texture_to_heap(gpu, &descriptor_heap, frame_descriptor.descriptor_offset, textures[0], .SAMPLED_IMAGE)
                 textures[0].sampled_index = frame_descriptor.descriptor_offset
                 frame_descriptor.descriptor_offset += 1
                 
-                write_texture_to_heap(&gpu, &descriptor_heap, frame_descriptor.descriptor_offset, textures[1], .SAMPLED_IMAGE)
+                write_texture_to_heap(gpu, &descriptor_heap, frame_descriptor.descriptor_offset, textures[1], .SAMPLED_IMAGE)
                 textures[1].sampled_index = frame_descriptor.descriptor_offset
                 frame_descriptor.descriptor_offset += 1
                 
-                write_texture_to_heap(&gpu, &descriptor_heap, frame_descriptor.descriptor_offset, textures[2], .SAMPLED_IMAGE)
+                write_texture_to_heap(gpu, &descriptor_heap, frame_descriptor.descriptor_offset, textures[2], .SAMPLED_IMAGE)
                 textures[2].sampled_index = frame_descriptor.descriptor_offset
                 frame_descriptor.descriptor_offset += 1
                 
-                write_texture_to_heap(&gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_buffer, .SAMPLED_IMAGE)
+                write_texture_to_heap(gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_buffer, .SAMPLED_IMAGE)
                 stuff.depth_buffer.sampled_index = frame_descriptor.descriptor_offset
                 frame_descriptor.descriptor_offset += 1
                 
-                write_texture_to_heap(&gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_pyramid, .SAMPLED_IMAGE)
+                write_texture_to_heap(gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_pyramid, .SAMPLED_IMAGE)
                 stuff.depth_pyramid.sampled_index = frame_descriptor.descriptor_offset
                 frame_descriptor.descriptor_offset += 1
                 
-                write_texture_to_heap(&gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_pyramid, .STORAGE_IMAGE)
+                write_texture_to_heap(gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_pyramid, .STORAGE_IMAGE)
                 stuff.depth_pyramid.storage_index = frame_descriptor.descriptor_offset
                 frame_descriptor.descriptor_offset += 1
                 
                 
                 for &mip, mip_level in stuff.depth_pyramid_mips {
-                    write_texture_to_heap(&gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_pyramid, .SAMPLED_IMAGE, cast(u32) mip_level, 1)
+                    write_texture_to_heap(gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_pyramid, .SAMPLED_IMAGE, cast(u32) mip_level, 1)
                     mip.sampled_index = frame_descriptor.descriptor_offset
                     frame_descriptor.descriptor_offset += 1
                     
-                    write_texture_to_heap(&gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_pyramid, .STORAGE_IMAGE, cast(u32) mip_level, 1)
+                    write_texture_to_heap(gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_pyramid, .STORAGE_IMAGE, cast(u32) mip_level, 1)
                     mip.storage_index = frame_descriptor.descriptor_offset
                     frame_descriptor.descriptor_offset += 1
                 }
@@ -756,9 +756,9 @@ main :: proc () {
         
         check(vk.ResetCommandPool(gpu.device, gpu.command_pools[frame_index], {}))
         // @api expecting the user to pass the frame index is a source for mistakes
-        cmd := gpu_begin_command_recording(&gpu, gpu.command_pools[frame_index], gpu.general_queue)
+        cmd := gpu_begin_command_recording(gpu, gpu.command_pools[frame_index], gpu.general_queue)
         
-        gpu_profile_frame_begin(&gpu, cmd)
+        gpu_profile_frame_begin(gpu, cmd)
         
         gpu_set_active_heap(cmd, &descriptor_heap)
         
@@ -821,7 +821,7 @@ main :: proc () {
             
             gpu_barrier(cmd, { .BOTTOM_OF_PIPE, .COMPUTE_SHADER }, { .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS })
             
-            begin_meshlet_rendering(&gpu, cmd, &stuff, {0.07, 0.07, 0.07, 1}, early = true)
+            begin_meshlet_rendering(gpu, cmd, &stuff, {0.07, 0.07, 0.07, 1}, early = true)
                 
                 gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
                 gpu_set_scissor(cmd,  size = gpu.swapchain_size)
@@ -939,7 +939,7 @@ main :: proc () {
                 { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS },
             )
             
-            begin_meshlet_rendering(&gpu, cmd, &stuff, {}, early = false)
+            begin_meshlet_rendering(gpu, cmd, &stuff, {}, early = false)
                 
                 gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
                 gpu_set_scissor(cmd,  size = gpu.swapchain_size)
@@ -1024,7 +1024,7 @@ main :: proc () {
             desc := Render_Pass_Desc {
                 color_targets = { { texture = stuff.color_buffer, view = stuff.color_view, load_op = .LOAD, store_op = .STORE } },
             }
-            gpu_begin_render_pass(&gpu, cmd, desc)
+            gpu_begin_render_pass(gpu, cmd, desc)
                 
                 gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
                 gpu_set_scissor(cmd,  size = gpu.swapchain_size)
@@ -1081,7 +1081,7 @@ main :: proc () {
             { gpu.render_completes[gpu.image_index],     { .ALL_COMMANDS }, 0 },
             { frame_semaphore,                           { .ALL_COMMANDS }, next_frame },
         }, cmd)
-        gpu_present(&gpu, gpu.general_queue, gpu.render_completes[gpu.image_index])
+        gpu_present(gpu, gpu.general_queue, gpu.render_completes[gpu.image_index])
         
         next_frame += 1
         cpu_end_profile_zone()
@@ -1105,13 +1105,13 @@ main :: proc () {
                 }
             }
             
-            gpu_profile_collate_times(&gpu, print_profile_and_stats)
+            gpu_profile_collate_times(gpu, print_profile_and_stats)
             
-            gpu_delta             := gpu_profile_get_zone_duration(&gpu, "Frame")
-            early_rendering_delta := gpu_profile_get_zone_duration(&gpu, "early rendering pass")
-            late_rendering_delta  := gpu_profile_get_zone_duration(&gpu, "late rendering pass")
-            early_cull_delta      := gpu_profile_get_zone_duration(&gpu, "early culling")
-            late_cull_delta       := gpu_profile_get_zone_duration(&gpu, "late culling")
+            gpu_delta             := gpu_profile_get_zone_duration(gpu, "Frame")
+            early_rendering_delta := gpu_profile_get_zone_duration(gpu, "early rendering pass")
+            late_rendering_delta  := gpu_profile_get_zone_duration(gpu, "late rendering pass")
+            early_cull_delta      := gpu_profile_get_zone_duration(gpu, "early culling")
+            late_cull_delta       := gpu_profile_get_zone_duration(gpu, "late culling")
             
             blend_factor_k := time_smoothed_blend_factor(7, cpu_delta)
             
@@ -1199,36 +1199,36 @@ main :: proc () {
     
 	check(vk.DeviceWaitIdle(gpu.device))
     
-    gpu_free(&gpu, vertex_buffer)
-    gpu_free(&gpu, meshlet_buffer)
-    gpu_free(&gpu, meshlet_data_buffer)
-    gpu_free(&gpu, mesh_buffer)
-    gpu_free(&gpu, draw_buffer)
-    gpu_free(&gpu, draw_visibility_buffer)
+    gpu_free(gpu, vertex_buffer)
+    gpu_free(gpu, meshlet_buffer)
+    gpu_free(gpu, meshlet_data_buffer)
+    gpu_free(gpu, mesh_buffer)
+    gpu_free(gpu, draw_buffer)
+    gpu_free(gpu, draw_visibility_buffer)
     
     for &bump in frame_bump_allocators {
-        bump_allocator_delete(&gpu, &bump)
+        bump_allocator_delete(gpu, &bump)
     }
     
-    destroy_pipeline(&gpu, meshlet_pipeline)
-    destroy_pipeline(&gpu, early_cull_pipeline)
-    destroy_pipeline(&gpu, late_cull_pipeline)
-    destroy_pipeline(&gpu, depth_pipeline)
-    destroy_pipeline(&gpu, ui_pipeline)
+    destroy_pipeline(gpu, meshlet_pipeline)
+    destroy_pipeline(gpu, early_cull_pipeline)
+    destroy_pipeline(gpu, late_cull_pipeline)
+    destroy_pipeline(gpu, depth_pipeline)
+    destroy_pipeline(gpu, ui_pipeline)
     
     for texture in textures {
-        gpu_free_image(&gpu, texture)
+        gpu_free_image(gpu, texture)
     }
     
-    destroy_descriptor_heap(&gpu, descriptor_heap)
+    destroy_descriptor_heap(gpu, descriptor_heap)
     
-    destroy_stuff(&gpu, &stuff)
+    destroy_stuff(gpu, &stuff)
     
     vk.DestroySemaphore(gpu.device, frame_semaphore, nil)
     vk.DestroyQueryPool(gpu.device, stats_pool, nil)
     vk.DestroyQueryPool(gpu.device, the_gpu_profiler.pool, nil)
     
-    gpu_deinit(&gpu)
+    gpu_deinit(gpu)
 }
 
 ////////////////////////////////////////////////
