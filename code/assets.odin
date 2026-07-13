@@ -67,17 +67,14 @@ make_shader :: proc () -> (Shader_Id, ^Shader_Info) {
     return id, info
 }
 
-get_shader :: proc (id: Shader_Id, immediately: bool = false) -> ^Shader {
+get_shader :: proc (id: Shader_Id, immediately: bool = true) -> ^Shader {
     assets := get_assets()
     
     id := id
     if id >= auto_cast len(assets.shaders) {
         id = Nil_Shader
     } else {
-        if immediately {
-            // @waste just wait for this requested id
-            load_all_shaders(immediately = true)
-        }
+        load_compiled_shader(id, immediately)
     }
     
     result := &assets.shaders[id]
@@ -118,7 +115,34 @@ test_and_reset_shaders_was_modified :: proc (ids: ..Shader_Id) -> bool {
     return result
 }
 
-load_all_shaders :: proc (immediately := false) {
+load_compiled_shader :: proc (id: Shader_Id, immediately := false) {
+    assets := get_assets()
+    if len(assets.shader_compilation_procs) == 0 { return }
+    
+    for &p, index in assets.shader_compilation_procs {
+        info := assets.shader_compilation_infos[index]
+        if info.id != id { continue }
+        
+        state, wait_err := os.process_wait(p, timeout = immediately ? os.TIMEOUT_INFINITE : 0)
+        if !immediately {
+            if wait_err == .Timeout || !state.exited { continue }
+        }
+        assert(wait_err == nil)
+        
+        if state.exit_code != 0 {
+            fmt.printfln("Shader compilation failed for %q", info.input_path)
+            continue
+        }
+        
+        load_and_parse_shader(info)
+        
+        unordered_remove(&assets.shader_compilation_procs, index)
+        unordered_remove(&assets.shader_compilation_infos, index)
+        break
+    }
+}
+
+load_all_compiled_shaders :: proc (immediately := false) {
     assets := get_assets()
     if len(assets.shader_compilation_procs) == 0 { return }
     

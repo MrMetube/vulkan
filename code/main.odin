@@ -198,6 +198,13 @@ Vertex :: struct { // :Shader:
 ////////////////////////////////////////////////
 
 main :: proc () {
+    the_cpu_profiler = new(profiler.Event_Table, context.allocator)
+    the_cpu_profile_zones := make([dynamic] profiler.Zone, context.allocator)
+    profiler.set_recording(the_cpu_profiler, true)
+    
+    cpu_begin_profile_zone("Setup")
+    
+    cpu_begin_profile_zone("SDL Window Creation")
     if !sdl.InitSubSystem({ .VIDEO }) { print_sdl_error_and_exit() }
     defer sdl.Quit()
     defer sdl.QuitSubSystem({ .VIDEO })
@@ -205,6 +212,7 @@ main :: proc () {
     window := sdl.CreateWindow("Vulkan Renderer", 1280, 720, sdl.WINDOW_VULKAN | sdl.WINDOW_RESIZABLE)
     if window == nil { print_sdl_error_and_exit () }
     defer sdl.DestroyWindow(window)
+    cpu_end_profile_zone()
     
     ////////////////////////////////////////////////
     
@@ -231,21 +239,29 @@ main :: proc () {
         occlusion_enabled = true,
     }
     
+    cpu_begin_profile_zone("OS Metrics sleep")
     profiler.init_os_metrics()
+    cpu_end_profile_zone()
+    
     gpu: Gpu
     {
-        props := sdl.GetWindowProperties(window)
+        cpu_scoped_profile_zone("GPU Init")
+        props     := sdl.GetWindowProperties(window)
         hinstance := sdl.GetPointerProperty(props, sdl.PROP_WINDOW_WIN32_INSTANCE_POINTER, nil)
         gpu = gpu_init(hinstance, debug.vsync)
     }
+    
+    cpu_begin_profile_zone("Create Swapchain")
     
     stuff: Render_Targets_And_Stuff
     stuff.depth_buffer.format = .D32_SFLOAT
     recreate_stuff(&gpu, &stuff)
     
+    cpu_end_profile_zone()
+    
     ////////////////////////////////////////////////
-    // @speed most of these buffer could be move the GPU local memory
-    // 200.000 suzannes: Default = 38.3 ms | GPU = 35.5 ms
+    // @speed most of these buffer could be moved to GPU local memory
+    cpu_begin_profile_zone("Allocate buffers")
     memory := Memory_Kind.Default
     
     // @todo draws change per frame and could also be placed in the per frame bump allocator, as we just need a gpu address
@@ -262,9 +278,12 @@ main :: proc () {
     
     // @todo this signifies that we dont need these to be cpu-visible memory
     unused(dvb_view)
+    cpu_end_profile_zone()
     
     geometry: Geometry
     {
+        cpu_scoped_profile_zone("Geometry loading")
+        
         paths := [?] string {
             "tutorial/suzanne.obj",
             // "models/bunny.obj",
@@ -285,6 +304,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
+    cpu_begin_profile_zone("Init shaders")
     watchers := make([dynamic] Watcher, context.allocator)
     
     init_assets(context.allocator)
@@ -301,6 +321,8 @@ main :: proc () {
     ui_vert_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/ui.vert")
     ui_frag_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/ui.frag")
     
+    cpu_end_profile_zone()
+    
     ////////////////////////////////////////////////
     
     texture_count :: 3
@@ -309,6 +331,8 @@ main :: proc () {
     descriptor_heap := create_descriptor_heap(&gpu)
     
     {
+        cpu_scoped_profile_zone("Texture Upload")
+        
         upload_bump := bump_allocator_make_temporary(&gpu, 256 * Megabyte, usage = { .TRANSFER_SRC })
         defer bump_allocator_delete(&gpu, &upload_bump)
         
@@ -347,12 +371,28 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    gpu_profile_init(&gpu)
+    cpu_begin_profile_zone("Setup other gpu resources")
     
-    ////////////////////////////////////////////////
+    gpu_profile_init(&gpu)
     
     stats_count: u32 = 3
     stats_pool := create_query_pool(&gpu, stats_count, .MESH_PRIMITIVES_GENERATED_EXT)
+    
+    absolute_frame_index: u64
+    next_frame := cast(u64) MaxFramesInFlight+1
+    frame_semaphore := gpu_create_timeline_semaphore(&gpu, MaxFramesInFlight)
+    
+    cpu_end_profile_zone()
+    
+    ////////////////////////////////////////////////
+    
+    cpu_begin_profile_zone("Allocate GPU Bumps")
+    frame_bump_allocators: [MaxFramesInFlight] Bump_Allocator
+    for &bump in frame_bump_allocators {
+        bump = bump_allocator_make_temporary(&gpu, 256 * Megabyte, usage = { .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER })
+    }
+    
+    cpu_end_profile_zone()
     
     ////////////////////////////////////////////////
     
@@ -361,12 +401,6 @@ main :: proc () {
     depth_pipeline:      Pipeline
     meshlet_pipeline:    Pipeline
     ui_pipeline:         Pipeline
-    
-    ////////////////////////////////////////////////
-    
-    absolute_frame_index: u64
-    next_frame := cast(u64) MaxFramesInFlight+1
-    frame_semaphore := gpu_create_timeline_semaphore(&gpu, MaxFramesInFlight)
     
     ////////////////////////////////////////////////
     
@@ -383,17 +417,7 @@ main :: proc () {
     quit: bool
     last_time := time.tick_now()
     
-    
-    frame_bump_allocators: [MaxFramesInFlight] Bump_Allocator
-    for &bump in frame_bump_allocators {
-        bump = bump_allocator_make_temporary(&gpu, 256 * Megabyte, usage = { .STORAGE_BUFFER, .TRANSFER_DST, .INDIRECT_BUFFER })
-    }
-    
-    the_cpu_profiler = new(profiler.Event_Table, context.allocator)
-    the_cpu_profile_zones := make([dynamic] profiler.Zone, context.allocator)
-    profiler.set_recording(the_cpu_profiler, true)
-    
-    load_all_shaders(immediately = true)
+    cpu_end_profile_zone()
     
     mouse_p: v2
     for !quit {
@@ -408,10 +432,11 @@ main :: proc () {
         
         // @speed similarly the timestamps should only be collected if we need them. As we currently only look at the last rendered frame, we should only take them if we then also print them. In the future we may want to store more than one frame, but for now this would be better.
         print_profile_and_stats: bool
+        if absolute_frame_index == 0 { print_profile_and_stats = true }
         
         mouse_delta: v2
         mouse_wheel_delta: f32
-        @(static) left_down: bool
+        @(static) left_down:  bool
         @(static) space_down: bool
         
         cpu_begin_profile_zone("Input Events")
@@ -523,25 +548,29 @@ main :: proc () {
         recompile_shaders_if_needed(watchers, meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader)
         recompile_shaders_if_needed(watchers, ui_vert_shader, ui_frag_shader)
         
-        load_all_shaders(immediately = false)
+        // @todo the work of loading the bytes and parsing them could be moved to a thread. The modified flag then needs to be expanded into a state { Invalid, Loading, Valid }
+        load_all_compiled_shaders(immediately = false)
         
         reloaded_cull_shader := test_and_reset_shaders_was_modified(cull_shader)
-        
+        // @todo Think about when shaders should be loaded immediatly and when not
         if !pipeline_is_valid(early_cull_pipeline) || reloaded_cull_shader {
             destroy_pipeline(&gpu, early_cull_pipeline)
-            early_cull_pipeline = gpu_create_compute_pipeline(&gpu, get_shader(cull_shader), descriptor_heap, constants = { /* late = */ { b = false } })
+            immediately := !pipeline_is_valid(early_cull_pipeline)
+            early_cull_pipeline = gpu_create_compute_pipeline(&gpu, get_shader(cull_shader, immediately), descriptor_heap, constants = { /* late = */ { b = false } })
             fmt.printfln("Recreated early_cull_pipeline.")
         }
         
         if !pipeline_is_valid(late_cull_pipeline) || reloaded_cull_shader {
             destroy_pipeline(&gpu, late_cull_pipeline)
-            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, get_shader(cull_shader), descriptor_heap, constants = { /* late = */ { b = true } })
+            immediately := !pipeline_is_valid(late_cull_pipeline)
+            late_cull_pipeline = gpu_create_compute_pipeline(&gpu, get_shader(cull_shader, immediately), descriptor_heap, constants = { /* late = */ { b = true } })
             fmt.printfln("Recreated late_cull_pipeline.")
         }
         
         if !pipeline_is_valid(depth_pipeline) || test_and_reset_shaders_was_modified(depth_reduce_shader) {
             destroy_pipeline(&gpu, depth_pipeline)
-            depth_pipeline = gpu_create_compute_pipeline(&gpu, get_shader(depth_reduce_shader), descriptor_heap)
+            immediately := !pipeline_is_valid(depth_pipeline)
+            depth_pipeline = gpu_create_compute_pipeline(&gpu, get_shader(depth_reduce_shader, immediately), descriptor_heap)
             fmt.printfln("Recreated depth_pipeline.")
         }
         
@@ -557,7 +586,8 @@ main :: proc () {
             task, mesh, frag := meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader
             
             destroy_pipeline(&gpu, meshlet_pipeline)
-            meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, get_shader(task), get_shader(mesh), get_shader(frag), raster_description, descriptor_heap)
+            immediately := !pipeline_is_valid(meshlet_pipeline)
+            meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(&gpu, get_shader(task, immediately), get_shader(mesh, immediately), get_shader(frag, immediately), raster_description, descriptor_heap)
             fmt.printfln("Recreated meshlet_pipeline.")
         }
         
@@ -573,7 +603,8 @@ main :: proc () {
             raster_description.blendstate.dst_alpha_factor = .ONE_MINUS_SRC_ALPHA
             
             destroy_pipeline(&gpu, ui_pipeline)
-            ui_pipeline = gpu_create_graphics_pipeline(&gpu, get_shader(ui_vert_shader), get_shader(ui_frag_shader), raster_description, descriptor_heap)
+            immediately := !pipeline_is_valid(ui_pipeline)
+            ui_pipeline = gpu_create_graphics_pipeline(&gpu, get_shader(ui_vert_shader, immediately), get_shader(ui_frag_shader, immediately), raster_description, descriptor_heap)
             fmt.printfln("Recreated ui_pipeline.")
         }
         
@@ -1187,19 +1218,24 @@ main :: proc () {
             
             fmt.printfln("---------------------\nCPU profile:")
             root := zones[0]
+            total_time := profiler.clocks_to_seconds(root.duration_with_children)
             link: u32
             for {
                 zone := zones[link]
                 depth := zone.depth_of_the_event
             
-                xx :: proc (seconds: f64) -> time.Duration { return cast(time.Duration) (seconds * cast(f64) time.Second) }
-            
                 for _ in 0..<depth { fmt.printf("    ") }
-                fmt.printf("%v: %v", zone.name, xx(profiler.clocks_to_seconds(zone.duration)))
                 
+                seconds               := profiler.clocks_to_seconds(zone.duration)
+                seconds_with_children := profiler.clocks_to_seconds(zone.duration_with_children)
+                
+                xx :: proc (seconds: f64) -> time.Duration { return cast(time.Duration) (seconds * cast(f64) time.Second) }
+                fmt.printf(" %v", view_percentage(seconds_with_children/total_time))
+                fmt.printf(" %v", xx(seconds))
                 if zone.duration_with_children != zone.duration {
-                    fmt.printf(" (with children %v)", xx(profiler.clocks_to_seconds(zone.duration_with_children)))
+                    fmt.printf(" (with children %v)", xx(seconds_with_children))
                 }
+                fmt.printf(" - %v", zone.name)
                 fmt.printfln("")
                 
                 link = zone.depth_next_event
@@ -1265,11 +1301,11 @@ cpu_end_scoped_profile_zone :: proc (_: string) {
     profiler.record_event(the_cpu_profiler, read_cycle_counter(), .EndZone, "")
 }
 
-@(deferred_in=cpu_end_procedure_profile_zone)
+@(deferred_in=cpu_procedure_end_profile_zone)
 cpu_procedure_profile_zone :: proc (loc := #caller_location) {
     profiler.record_event(the_cpu_profiler, read_cycle_counter(), .BeginZone, loc.procedure)
 }
-cpu_end_procedure_profile_zone :: proc (_ := #caller_location) {
+cpu_procedure_end_profile_zone :: proc (_ := #caller_location) {
     profiler.record_event(the_cpu_profiler, read_cycle_counter(), .EndZone, "")
 }
 

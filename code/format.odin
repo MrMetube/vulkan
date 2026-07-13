@@ -99,7 +99,7 @@ view_percentage_division :: proc (dividend: $T, denominator: T) -> View_Percenta
 View_Percentage_Formatter :: proc (info: ^fmt.Info, arg: any, verb: rune) -> bool {
     view := cast(^View_Percentage) arg.data
     
-    info.width = 2
+    info.width = 5
     info.width_set = true
     info.space = true
     info.prec = 2

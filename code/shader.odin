@@ -205,7 +205,7 @@ recompile_shaders_if_needed :: proc (watchers: [dynamic] Watcher, shaders_ids: .
         info := get_shader_info(id)^
         
         if watcher_modified(watchers, info.source, info.common) {
-            shader := get_shader(id)
+            shader := get_shader(id, immediately = false)
             
             watcher_set_up_to_date(watchers, info.source, info.common)
             
