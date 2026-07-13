@@ -610,8 +610,6 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        cpu_begin_profile_zone("Setup Descriptor Heap")
-        
         frame_descriptor: Frame_Descriptor
         {
             cpu_scoped_profile_zone("Setup Descriptor Heap")
@@ -808,64 +806,39 @@ main :: proc () {
                 vertex_buffer       = vertex_buffer.p,
             }
             
-            gpu_labeled_region_begin(cmd, "early culling", {0.0, 0.6, 0.8, 1.0})
-                gpu_profile_zone_begin("early culling")
-                
-                ////////////////////////////////////////////////
-                
-                gpu_barrier(cmd, { .DRAW_INDIRECT }, { .ALL_TRANSFER })
-                
-                gpu_fill_memory(cmd, draw_command_count_gpu, 0)
+            max_draw_count := cast(u32) len(draws)
+            culling_begin(cmd, early = true)
                 
                 if !dvb_cleared {
                     dvb_cleared = true
-                    gpu_fill_memory(cmd, draw_visibility_buffer, cast(u32) len(draws), 1)
+                    gpu_fill_memory(cmd, draw_visibility_buffer, max_draw_count, 1)
                 }
-                
-                ////////////////////////////////////////////////
-                
-                gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
-                
-                gpu_set_pipeline(cmd, early_cull_pipeline)
-                gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(get_shader(cull_shader), auto_cast len(draws)))
-                
-            gpu_profile_zone_end()
-            gpu_labeled_region_end(cmd)
             
-            ////////////////////////////////////////////////
-            
-            gpu_barrier(cmd, { .BOTTOM_OF_PIPE, .COMPUTE_SHADER }, { .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS })
+            culling_end(cmd, early_cull_pipeline, cull_shader, &frame_descriptor, cull_globals_gpu, draw_command_count_gpu, max_draw_count, early = true)
             
             ////////////////////////////////////////////////
             // early render - render objects that were visible last frame
             
-            gpu_profile_zone_begin("early rendering pass")
-            gpu_labeled_region_begin(cmd, "early rendering pass", {0.6, 0.1, 07, 1.0})
+            gpu_barrier(cmd, { .BOTTOM_OF_PIPE, .COMPUTE_SHADER }, { .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS })
+            
+            begin_meshlet_rendering(&gpu, cmd, &stuff, {0.07, 0.07, 0.07, 1}, early = true)
                 
-                color, depth := begin_meshlet_rendering(&stuff, {0.07, 0.07, 0.07, 1}, early = true)
-                desc: Render_Pass_Desc
-                desc.color_targets = { color }
-                desc.depth_target  = depth
-                gpu_begin_render_pass(&gpu, cmd, desc)
+                gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
+                gpu_set_scissor(cmd,  size = gpu.swapchain_size)
+                
+                vk.CmdBeginQuery(cmd, stats_pool, stats_pool_query_index, {})
+                
+                gpu_set_pipeline(cmd, meshlet_pipeline)
+                gpu_draw_meshlets_indirect_count(cmd, &frame_descriptor,
+                    draw_command_gpu, draw_command_count_gpu, 
+                    auto_cast len(draws), offset_of(Draw_Command, command),
+                    draw_globals_gpu,
+                )
                     
-                    gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
-                    gpu_set_scissor(cmd,  size = gpu.swapchain_size)
-                    
-                    vk.CmdBeginQuery(cmd, stats_pool, stats_pool_query_index, {})
-                    
-                    gpu_set_pipeline(cmd, meshlet_pipeline)
-                    gpu_draw_meshlets_indirect_count(cmd, &frame_descriptor,
-                        draw_command_gpu, draw_command_count_gpu, 
-                        auto_cast len(draws), offset_of(Draw_Command, command),
-                        draw_globals_gpu,
-                    )
-                        
-                    vk.CmdEndQuery(cmd, stats_pool, stats_pool_query_index)
-                    stats_pool_query_index += 1
-                    
-                gpu_end_render_pass(cmd)
-            gpu_labeled_region_end(cmd)
-            gpu_profile_zone_end()
+                vk.CmdEndQuery(cmd, stats_pool, stats_pool_query_index)
+                stats_pool_query_index += 1
+                
+            end_meshlet_rendering(cmd)
         }
         
         ////////////////////////////////////////////////
@@ -955,21 +928,8 @@ main :: proc () {
                 vertex_buffer       = vertex_buffer.p,
             }
             
-            gpu_labeled_region_begin(cmd, "late culling", {0.0, 0.6, 0.8, 1.0})
-                gpu_profile_zone_begin("late culling")
-                
-                gpu_barrier(cmd, { .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }, { .ALL_TRANSFER })
-                
-                gpu_fill_memory(cmd, draw_command_count_gpu, 0)
-                
-                // depth pyramid = compute + draw command count = transfer
-                gpu_barrier(cmd, { .ALL_TRANSFER, .COMPUTE_SHADER }, { .COMPUTE_SHADER })
-                
-                gpu_set_pipeline(cmd, late_cull_pipeline)
-                gpu_dispatch(cmd, &frame_descriptor, cull_globals_gpu, get_group_count(get_shader(cull_shader), auto_cast len(draws)))
-                    
-            gpu_profile_zone_end()
-            gpu_labeled_region_end(cmd)
+            culling_begin(cmd, early = false)
+            culling_end(cmd, late_cull_pipeline, cull_shader, &frame_descriptor, cull_globals_gpu, draw_command_count_gpu, cast(u32) len(draws), early = false)
             
             ////////////////////////////////////////////////
             // late rendering - render objects that are visible this frame but weren't drawn in the early pass
@@ -979,34 +939,24 @@ main :: proc () {
                 { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS },
             )
             
-            gpu_profile_zone_begin("late rendering pass")
-            gpu_labeled_region_begin(cmd, "late rendering pass", {0.6, 0.1, 07, 1.0})
+            begin_meshlet_rendering(&gpu, cmd, &stuff, {}, early = false)
                 
-                color, depth := begin_meshlet_rendering(&stuff, {}, early = false)
-                desc: Render_Pass_Desc
-                desc.color_targets = { color }
-                desc.depth_target  = depth
-                gpu_begin_render_pass(&gpu, cmd, desc)
+                gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
+                gpu_set_scissor(cmd,  size = gpu.swapchain_size)
+                
+                vk.CmdBeginQuery(cmd, stats_pool, stats_pool_query_index, {})
+                
+                gpu_set_pipeline(cmd, meshlet_pipeline)
+                gpu_draw_meshlets_indirect_count(cmd, &frame_descriptor,
+                    draw_command_gpu, draw_command_count_gpu, 
+                    auto_cast len(draws), offset_of(Draw_Command, command),
+                    draw_globals_gpu,
+                )
+                
+                vk.CmdEndQuery(cmd, stats_pool, stats_pool_query_index)
+                stats_pool_query_index += 1
                     
-                    gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
-                    gpu_set_scissor(cmd,  size = gpu.swapchain_size)
-                    
-                    vk.CmdBeginQuery(cmd, stats_pool, stats_pool_query_index, {})
-                    
-                    gpu_set_pipeline(cmd, meshlet_pipeline)
-                    gpu_draw_meshlets_indirect_count(cmd, &frame_descriptor,
-                        draw_command_gpu, draw_command_count_gpu, 
-                        auto_cast len(draws), offset_of(Draw_Command, command),
-                        draw_globals_gpu,
-                    )
-                    
-                    vk.CmdEndQuery(cmd, stats_pool, stats_pool_query_index)
-                    stats_pool_query_index += 1
-                        
-                gpu_end_render_pass(cmd)
-                    
-            gpu_labeled_region_end(cmd)
-            gpu_profile_zone_end()
+            end_meshlet_rendering(cmd)
         }
         
         ////////////////////////////////////////////////
@@ -1223,14 +1173,14 @@ main :: proc () {
             for {
                 zone := zones[link]
                 depth := zone.depth_of_the_event
-            
-                for _ in 0..<depth { fmt.printf("    ") }
                 
                 seconds               := profiler.clocks_to_seconds(zone.duration)
                 seconds_with_children := profiler.clocks_to_seconds(zone.duration_with_children)
                 
                 xx :: proc (seconds: f64) -> time.Duration { return cast(time.Duration) (seconds * cast(f64) time.Second) }
-                fmt.printf(" %v", view_percentage(seconds_with_children/total_time))
+                
+                fmt.printf("  %v", view_percentage(seconds_with_children/total_time))
+                for _ in 0..<depth { fmt.printf("    ") }
                 fmt.printf(" %v", xx(seconds))
                 if zone.duration_with_children != zone.duration {
                     fmt.printf(" (with children %v)", xx(seconds_with_children))
@@ -1330,16 +1280,16 @@ get_next_image :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, frame_index: u64) ->
     return true
 }
 
-begin_meshlet_rendering :: proc (stuff: ^Render_Targets_And_Stuff, clear_color: v4, early: bool) -> (color, depth: Render_Target) {
-    color = { 
+begin_meshlet_rendering :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stuff: ^Render_Targets_And_Stuff, clear_color: v4, early: bool) {
+    desc: Render_Pass_Desc
+    desc.color_targets = { { 
         texture     = stuff.color_buffer,
         view        = stuff.color_view,
         load_op     = early ? .CLEAR : .LOAD,
         store_op    = .STORE,
         clear_color = clear_color,
-    }
-    
-    depth = { // :ViewSpace: 0 is the maximal depth value
+    } }
+    desc.depth_target  = { // :ViewSpace: 0 is the maximal depth value
         texture     = stuff.depth_buffer,
         view        = stuff.depth_view,
         load_op     = early ? .CLEAR : .LOAD,
@@ -1347,7 +1297,54 @@ begin_meshlet_rendering :: proc (stuff: ^Render_Targets_And_Stuff, clear_color: 
         clear_depth = 0,
     }
     
-    return color, depth
+    if early {
+        gpu_profile_zone_begin("early rendering pass")
+        gpu_labeled_region_begin(cmd, "early rendering pass", {0.6, 0.1, 07, 1.0})
+    } else {
+        gpu_profile_zone_begin("late rendering pass")
+        gpu_labeled_region_begin(cmd, "late rendering pass", {0.6, 0.1, 07, 1.0})
+    }
+    gpu_begin_render_pass(gpu, cmd, desc)
+    // ...
+}
+
+end_meshlet_rendering :: proc (cmd: vk.CommandBuffer) {
+    // ...
+    gpu_end_render_pass(cmd)
+    gpu_labeled_region_end(cmd)
+    gpu_profile_zone_end()
+}
+
+culling_begin :: proc (cmd: vk.CommandBuffer, early: bool) {
+    label: cstring = early ? "early culling" : "late_culling"
+    before_fill := vk.PipelineStageFlags2 { .DRAW_INDIRECT }
+    if !early {
+        before_fill += { .PRE_RASTERIZATION_SHADERS }
+    }
+    
+    gpu_labeled_region_begin(cmd, label, {0.0, 0.6, 0.8, 1.0})
+    gpu_profile_zone_begin(cast(string) label)
+        gpu_barrier(cmd, before_fill, { .ALL_TRANSFER })
+        // ...
+}
+
+culling_end :: proc (cmd: vk.CommandBuffer, cull_pipeline: Pipeline, cull_shader: Shader_Id, frame_descriptor: ^Frame_Descriptor, cull_globals_gpu: GpuAddress(Cull_Globals), draw_command_count_gpu: GpuAddress(u32), max_draw_count: u32, early: bool) {
+    
+    before_dispatch := vk.PipelineStageFlags2 { .ALL_TRANSFER  }
+    if !early {
+        before_dispatch += { .COMPUTE_SHADER } // depth pyramid
+    }
+    
+        // ...
+        gpu_fill_memory(cmd, draw_command_count_gpu, 0)
+        
+        gpu_barrier(cmd, before_dispatch, { .COMPUTE_SHADER })
+        
+        gpu_set_pipeline(cmd, cull_pipeline)
+        gpu_dispatch(cmd, frame_descriptor, cull_globals_gpu, get_group_count(get_shader(cull_shader), max_draw_count))
+        
+    gpu_profile_zone_end()
+    gpu_labeled_region_end(cmd)
 }
 
 ////////////////////////////////////////////////
