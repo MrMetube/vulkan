@@ -2,7 +2,6 @@
 
 #extension GL_EXT_shader_explicit_arithmetic_types: require
 #extension GL_EXT_mesh_shader: require
-#extension GL_NV_explicit_typecast: require // @todo remove once TaskMode is default
 
 #include "common.glsl"
 
@@ -22,6 +21,9 @@ layout(push_constant) uniform Push_Data {
 
 layout(local_size_x = TaskWidth, local_size_y = 1, local_size_z = 1) in;
 
+layout(constant_id = 0) const bool Late     = false; // @todo unused for now
+layout(constant_id = 1) const bool TaskMode = false;
+
 taskPayloadSharedEXT Task_Result task_result;
 
 #define BackfaceCulling 1 // @todo remove this define
@@ -31,25 +33,54 @@ shared int shared_count;
 #endif // BackfaceCulling
 
 void main() {
-    uint meshlet_group_index = gl_WorkGroupID.x;
-    uint meshlet_group_size  = gl_WorkGroupSize.x;
-    Draw_Command_p command   = data.draw_command_buffer[gl_DrawID];
-    uint draw_index          = command.v.draw_id;
-    uint meshlet_index       = gl_GlobalInvocationID.x + command.v.meshlet_offset;
+    uint draw_index;
+    uint meshlet_group_index;
+    uint meshlet_offset;
+    uint meshlet_count;
+    if (TaskMode) {
+        Task_Command_p command = data.task_command_buffer[gl_WorkGroupID.x];
+        
+        draw_index     = command.v.draw_index;
+        meshlet_offset = command.v.meshlet_offset;
+        meshlet_count  = command.v.meshlet_count;
+        // @todo read late_draw_visibiliy from the command.v.late_draw_visibility
+        
+        meshlet_group_index = gl_LocalInvocationID.x;
+    } else {
+        Draw_Command_p command   = data.draw_command_buffer[gl_DrawID];
+        
+        draw_index     = command.v.draw_id;
+        meshlet_offset = command.v.meshlet_offset;
+        meshlet_count  = command.v.meshlet_count;
+        
+        meshlet_group_index = gl_GlobalInvocationID.x;
+    }
+    
     
     Draw_p draw = data.draw_buffer[draw_index];
+    
+    uint meshlet_index = meshlet_group_index + meshlet_offset;
+    uint meshlet_visibility_index;
+    if (TaskMode) { // @cleanup
+        Task_Command_p command = data.task_command_buffer[gl_WorkGroupID.x];
+        
+        meshlet_visibility_index = meshlet_group_index + command.v.meshlet_visibility_offset;
+    } else {
+        // meshlet_visibility_index = meshlet_group_index + draw.v.meshlet_visibility_offset;
+    }
+    
     Mesh_p mesh = data.mesh_buffer[draw.v.mesh_index];
     
     task_result.draw_index     = draw_index;
-    task_result.meshlet_offset = command.v.meshlet_offset;
+    task_result.meshlet_offset = meshlet_offset;
     
     #if BackfaceCulling
-    
+        
         shared_count = 0;
         barrier();
         
         bool visible = false;
-        if (meshlet_index < (command.v.meshlet_count + command.v.meshlet_offset)) {
+        if (meshlet_index < (meshlet_count + meshlet_offset)) {
             Meshlet_p meshlet = data.meshlet_buffer[meshlet_index];
             
             vec3 cone_axis = vec3(int(meshlet.v.cone_axis[0]), int(meshlet.v.cone_axis[1]), int(meshlet.v.cone_axis[2])) / 127.0;
@@ -72,7 +103,7 @@ void main() {
             visible = visible && view_center.z * data.data.frustum[1] - abs(view_center.x) * data.data.frustum[0] > -radius;
             visible = visible && view_center.z * data.data.frustum[3] - abs(view_center.y) * data.data.frustum[2] > -radius;
             // the near/far plane culling uses camera space Z directly, but the camera looks down -z :ViewSpace:
-            visible = visible && view_center.z + radius < -globals.data.near_z && view_center.z - radius > -globals.data.far_z;
+            visible = visible && view_center.z + radius < -data.data.near_z && view_center.z - radius > -data.data.far_z;
         }
         
         if (visible) {
@@ -85,12 +116,17 @@ void main() {
         EmitMeshTasksEXT(shared_count, 1, 1);
         
     #else // BackfaceCulling
-    
+    {
+        uint meshlet_group_index = gl_WorkGroupID.x;
+        uint meshlet_group_size  = gl_WorkGroupSize.x;
+        
         uint thread_index = gl_LocalInvocationIndex;
         task_result.indices[thread_index] = meshlet_index;
+        
         uint meshlet_index_of_thread_0 = meshlet_group_index * meshlet_group_size + 0;
-        uint count = min(meshlet_group_size, command.v.meshlet_count - (meshlet_index_of_thread_0));
+        uint count = min(meshlet_group_size, meshlet_count - (meshlet_index_of_thread_0));
         EmitMeshTasksEXT(count, 1, 1);
+    }
         
     #endif // BackfaceCulling
     

@@ -497,7 +497,7 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
                 multiDrawIndirect = true, // supported on NVidia since the GTX 1080
                 samplerAnisotropy = true, // required since 1.4
                 shaderInt16       = true, // required since 1.4
-                shaderInt64       = true,
+                shaderInt64       = true, // @todo is this still used by any shader?
                 
                 pipelineStatisticsQuery = true,
             },
@@ -1121,41 +1121,41 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: ^Shader, heap: Descript
     return result
 }
 
-gpu_create_graphics_pipeline :: proc (gpu: ^Gpu, vertex, fragment: ^Shader, info: Raster_Desc, heap: Descriptor_Heap) -> Pipeline {
+gpu_create_graphics_pipeline :: proc (gpu: ^Gpu, vertex, fragment: ^Shader, info: Raster_Desc, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil) -> Pipeline {
     assert(vertex.stage   == .VERTEX)
     assert(fragment.stage == .FRAGMENT)
     
     result: Pipeline
-    gpu_create_graphics_pipeline_common(gpu, &result, info, heap, vertex, fragment)
+    gpu_create_graphics_pipeline_common(gpu, &result, info, heap, { vertex, fragment }, constants)
     
     return result
 }
 
 gpu_create_graphics_meshlet_pipeline :: proc { gpu_create_graphics_meshlet_pipeline_mesh, gpu_create_graphics_meshlet_pipeline_task }
-gpu_create_graphics_meshlet_pipeline_task :: proc (gpu: ^Gpu, task, mesh, frag: ^Shader, info: Raster_Desc, heap: Descriptor_Heap) -> Pipeline {
+gpu_create_graphics_meshlet_pipeline_task :: proc (gpu: ^Gpu, task, mesh, frag: ^Shader, info: Raster_Desc, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil) -> Pipeline {
     assert(task.stage == .TASK_EXT)
     assert(mesh.stage == .MESH_EXT)
     assert(frag.stage == .FRAGMENT)
     
     result: Pipeline
-    gpu_create_graphics_pipeline_common(gpu, &result, info, heap, task, mesh, frag)
+    gpu_create_graphics_pipeline_common(gpu, &result, info, heap, { task, mesh, frag }, constants)
     
     return result
 }
 
-gpu_create_graphics_meshlet_pipeline_mesh :: proc (gpu: ^Gpu, mesh, frag: ^Shader, info: Raster_Desc, heap: Descriptor_Heap) -> Pipeline {
+gpu_create_graphics_meshlet_pipeline_mesh :: proc (gpu: ^Gpu, mesh, frag: ^Shader, info: Raster_Desc, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil) -> Pipeline {
     assert(mesh.stage == .MESH_EXT)
     assert(frag.stage == .FRAGMENT)
     
     result: Pipeline
-    gpu_create_graphics_pipeline_common(gpu, &result, info, heap, mesh, frag)
+    gpu_create_graphics_pipeline_common(gpu, &result, info, heap, { mesh, frag }, constants)
     
     return result
 }
 
-gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info: Raster_Desc, heap: Descriptor_Heap, shaders: ..^Shader) {
+gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info: Raster_Desc, heap: Descriptor_Heap, shaders: [] ^Shader, constants: [] Specialization_Constant) {
     pipeline_info: Pipeline_Info
-    make_pipeline_info(&pipeline_info, gpu, heap, shaders, {})
+    make_pipeline_info(&pipeline_info, gpu, heap, shaders, constants)
     
     result.bind_point = .GRAPHICS
     
@@ -1486,10 +1486,10 @@ gpu_copy_from_texture :: proc (cmd: vk.CommandBuffer, destination: vk.DeviceAddr
 }
 
 gpu_fill_memory :: proc { gpu_fill_memory_address, gpu_fill_memory_slice }
-gpu_fill_memory_address :: proc (cmd: vk.CommandBuffer, destination: Gpu_Pointer($T), value: T) {
-    buffer, offset := gpu_reflect_get_buffer(destination.p)
-    size := cast(vk.DeviceSize) size_of(T)
-    vk.CmdFillBuffer(cmd, buffer, offset, size, value)
+gpu_fill_memory_address :: proc (cmd: vk.CommandBuffer, destination: Gpu_Pointer($T), value: u32, size := size_of(T), offset: vk.DeviceSize = 0) {
+    buffer, buffer_offset := gpu_reflect_get_buffer(destination.p)
+    size := cast(vk.DeviceSize) size
+    vk.CmdFillBuffer(cmd, buffer, buffer_offset + offset, size, value)
 }
 gpu_fill_memory_slice   :: proc (cmd: vk.CommandBuffer, destination: Gpu_Slice($T), count: u32, value: T) {
     buffer, offset := gpu_reflect_get_buffer(destination.gpu.p)
@@ -1637,7 +1637,6 @@ gpu_end_rendering :: proc (cmd: vk.CommandBuffer) {
 // void gpuDrawIndexedInstancedIndirectMulti(GpuCommandBuffer cb, void* dataVxGpu, uint32 vxStride, void* dataPxGpu, uint32 pxStride, void* argsGpu, void* drawCountGpu);
 
 // void gpuDrawMeshlets(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, uvec3 dim);
-// void gpuDrawMeshletsIndirect(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, void *dimGpu);
 
 // @api we may want to allow the pipeline to have a push constant per stage. For that we need the shaders to each declare the push data to be N pointers to their respective data. Then the pipeline layout and this command both needs to declare the correct size of 3 pointers and their offsets in the push data.
 gpu_push_constants :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, push_constant: Gpu_Pointer($T), heap := false) {
@@ -1669,14 +1668,20 @@ gpu_draw_indexed_instanced_indirect :: proc (cmd: vk.CommandBuffer, frame_descri
     vk.CmdDrawIndexedIndirect(cmd, draws, draws_base_offset + cast(vk.DeviceSize) draw_offset, max_count, size_of(D))
 }
 
-gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, commands: Gpu_Pointer($C), count: Gpu_Pointer(u32), max_count: u32, command_offset: umm, push_constant: Gpu_Pointer($T)) {
+// @speed The extension device_address_commands would remove the need to ever have a vk.Buffer for any command.
+// But its not supported on my RTX 3070 ._.
+gpu_draw_mesh_tasks_indirect :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, group_count: Gpu_Pointer(uv3), draw_count: u32, push_constant: Gpu_Pointer($T)) {
     gpu_push_constants(cmd, frame_descriptor, push_constant)
     
-    // @speed The extension device_address_commands would remove the need to ever have a vk.Buffer for any command.
-    // But its not supported on my RTX 3070 ._.
+    group_count, offset := gpu_reflect_get_buffer(group_count.p)
+    vk.CmdDrawMeshTasksIndirectEXT(cmd, group_count, offset, draw_count, size_of(uv3))
+
+}
+gpu_draw_mesh_tasks_indirect_count :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, commands: Gpu_Pointer($C), count: Gpu_Pointer(u32), max_count: u32, command_offset: umm, push_constant: Gpu_Pointer($T)) {
+    gpu_push_constants(cmd, frame_descriptor, push_constant)
+    
     commands, commands_base_offset := gpu_reflect_get_buffer(commands.p)
     count,    count_offset         := gpu_reflect_get_buffer(count.p)
-    
     vk.CmdDrawMeshTasksIndirectCountEXT(cmd, commands, commands_base_offset + cast(vk.DeviceSize) command_offset, count, count_offset, max_count, size_of(C))
 }
 
