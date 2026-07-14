@@ -1001,7 +1001,7 @@ main :: proc () {
         ////////////////////////////////////////////////
         // UI pass
         
-        {
+        if false {
             @(static) xx: f32 // @cleanup
             xx += delta_time
             

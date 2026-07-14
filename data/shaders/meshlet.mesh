@@ -1,27 +1,10 @@
 #version 460
 
 #extension GL_EXT_shader_explicit_arithmetic_types: require
-#extension GL_ARB_shader_draw_parameters: require
 #extension GL_EXT_mesh_shader: require
 #extension GL_NV_explicit_typecast: require
 
 #include "common.glsl"
-
-#define MeshWidth 32
-
-#define Cull 1
-
-////////////////////////////////////////////////
-
-// @volatile
-#define MaxVertices  64
-#define MaxTriangles 126
-
-layout(push_constant) uniform Push_Data {
-    Draw_Globals globals;
-};
-
-taskPayloadSharedEXT Task_Result task_result;
 
 ////////////////////////////////////////////////
 
@@ -37,11 +20,23 @@ uint hash(uint a) {
 
 ////////////////////////////////////////////////
 
+// @volatile
+#define MaxVertices   64
+#define MaxTriangles 126
+
+layout(push_constant) uniform Push_Data {
+    Draw_Globals globals;
+};
+
+taskPayloadSharedEXT Task_Result task_result;
+
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 layout(triangles, max_vertices = MaxVertices, max_primitives = MaxTriangles) out;
 
 layout(location = 0) flat   out uint               draw_index[];
 layout(location = 1) smooth out Mesh_Result mesh_result_smooth[];
+
+#define Cull 1 // @todo which cull? remove this define.
 
 #if Cull
 shared vec3 vertex_screen[MaxVertices];
