@@ -81,7 +81,7 @@ void main() {
         #endif // Debug
         
         #if Cull_Backfacing_and_Small_Triangles
-            vertex_screen[i] = vec3(screen_p.xy / screen_p.w, screen_p.w);
+            vertex_screen[i] = vec3((screen_p.xy / screen_p.w * 0.5 + 0.5) * globals.data.screen_size, screen_p.w);
         #endif // Cull_Backfacing_and_Small_Triangles
         
         gl_MeshVerticesEXT[i].gl_Position = screen_p;
@@ -119,8 +119,8 @@ void main() {
             culled = culled || (signed_triangle_area <= 0);
             
             // small primitive culling
-            vec2 b_min = (min(a, min(b, c)) * 0.5 + 0.5) * globals.data.screen_size;
-            vec2 b_max = (max(a, max(b, c)) * 0.5 + 0.5) * globals.data.screen_size;
+            vec2 b_min = min(a, min(b, c));
+            vec2 b_max = max(a, max(b, c));
             float subpixel_precision = 1 / 256.0; // This can be set to 1 / 2^subpixelPrecisionBits
             
             // This is slightly imprecise, as in it doesn't fully match hardware behaviour and is both too loose and too strict.

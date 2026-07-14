@@ -82,7 +82,7 @@ void main() {
         // represent command count as X*64*1; X has a max of 65535 (per EXT_mesh_shader limits), so this allows us to reach ~4M commands
         // note that EXT_mesh_shader doesn't guarantee support for >4M commands anyway, but 4M commands ~= 16B triangles which is surely enough
         //
-    
+        
         uint draw_command_index = atomicAdd(globals.draw_group_count.v.x, task_group_count);
         
         // @todo fill this!
@@ -117,24 +117,30 @@ bool project_sphere_onto_screen(vec3 view_center, float radius, float p00, float
     vec2 cx = -view_center.xz;
     vec2 cy = -view_center.yz;
     
-    float cx_dot = dot(cx, cx);
-    float cy_dot = dot(cy, cy);
+    float zz_rr = view_center.z * view_center.z - radius * radius;
     
     // (cos, sin) of angle theta between c and x/y tangent vector
-    vec2 vx = vec2(sqrt(cx_dot - (radius * radius)), radius);
-    vec2 vy = vec2(sqrt(cy_dot - (radius * radius)), radius);
+    float vx = square_root(square(view_center.x) + zz_rr);
+    float vy = square_root(square(view_center.y) + zz_rr);
+    
+    vec3  rc = radius * view_center;
+    
+    float vxx = vx * -view_center.x;
+    float vyy = vy * -view_center.y;
+    float vxz = vx * -view_center.z;
+    float vyz = vy * -view_center.z;
     
     // In the x/y-z reference frame
     // Transform back to camera space
-    float min_x = -p00 * dot(vec2(vx.x,  vx.y), cx) / dot(vec2(-vx.y, vx.x), cx);
-    float max_x = -p00 * dot(vec2(vx.x, -vx.y), cx) / dot(vec2( vx.y, vx.x), cx);
-    float min_y = p11 * dot(vec2(vy.x,  vy.y), cy) / dot(vec2(-vy.y, vy.x), cy);
-    float max_y = p11 * dot(vec2(vy.x, -vy.y), cy) / dot(vec2( vy.y, vy.x), cy); 
+    float min_x = p00 * (vxx - rc.z) / (vxz + rc.x);
+    float max_x = p00 * (vxx + rc.z) / (vxz - rc.x);
+    float min_y = p11 * (vyy - rc.z) / (vyz + rc.y);
+    float max_y = p11 * (vyy + rc.z) / (vyz - rc.y);
     
     result = vec4(min_x, min_y, max_x, max_y);
     
     // transform to clip space
-    result = result.xwzy * vec4(.5, -.5, .5, -.5) + .5;
+    result = result.xwzy * -0.5 + 0.5;
     
     return true;
 }
