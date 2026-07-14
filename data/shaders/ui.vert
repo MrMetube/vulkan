@@ -2,7 +2,7 @@
 
 #include "common.glsl"
 
-layout(push_constant) uniform Push_Data { UI_Data data; };
+layout(push_constant) uniform _ { UI_Data data; };
 
 layout(location = 0) flat out uint draw_index;
 

@@ -58,7 +58,7 @@ generate_shader_api :: proc (output_file: string) {
     collect_types(&simple_types, &reference_types, Draw_Globals)
     collect_types(&simple_types, &reference_types, Depth_Data)
     collect_types(&simple_types, &reference_types, UI_Data)
-    reference_types["uint8_t"]      = {}
+    reference_types["uint8_t"] = {}
     append_reference_types(&builder, reference_types)
     
     // nested structs

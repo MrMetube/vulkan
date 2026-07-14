@@ -4,7 +4,7 @@
 
 layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
 
-layout(push_constant) uniform Push_Data { Depth_Data data; };
+layout(push_constant) uniform _ { Depth_Data data; };
 
 layout(descriptor_heap) uniform texture2D Textures[];
 layout(descriptor_heap) uniform sampler   Samplers[];

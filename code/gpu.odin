@@ -1670,11 +1670,11 @@ gpu_draw_indexed_instanced_indirect :: proc (cmd: vk.CommandBuffer, frame_descri
 
 // @speed The extension device_address_commands would remove the need to ever have a vk.Buffer for any command.
 // But its not supported on my RTX 3070 ._.
-gpu_draw_mesh_tasks_indirect :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, group_count: Gpu_Pointer(uv3), draw_count: u32, push_constant: Gpu_Pointer($T)) {
+gpu_draw_mesh_tasks_indirect :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, group_count: Gpu_Pointer($C), draw_count: u32, push_constant: Gpu_Pointer($T), group_count_offset: umm = 0) {
     gpu_push_constants(cmd, frame_descriptor, push_constant)
     
     group_count, offset := gpu_reflect_get_buffer(group_count.p)
-    vk.CmdDrawMeshTasksIndirectEXT(cmd, group_count, offset, draw_count, size_of(uv3))
+    vk.CmdDrawMeshTasksIndirectEXT(cmd, group_count, offset + cast(vk.DeviceSize) group_count_offset, draw_count, size_of(C))
 
 }
 gpu_draw_mesh_tasks_indirect_count :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, commands: Gpu_Pointer($C), count: Gpu_Pointer(u32), max_count: u32, command_offset: umm, push_constant: Gpu_Pointer($T)) {

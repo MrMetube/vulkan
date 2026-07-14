@@ -782,24 +782,24 @@ main :: proc () {
         // early cull - frustum cull & fill objects that *were* visible last frame
         
         {
-            draw_commands         := bump_allocate_slice(bump, [] Draw_Command, auto_cast len(draws))
-            draw_task_group_count := bump_allocate_type(bump, uv3)
+            draw_commands    := bump_allocate(bump, [] Draw_Command, auto_cast len(draws))
+            draw_group_count := bump_allocate(bump, uv3)
             
-            cull_globals := bump_allocate_type(bump, Cull_Globals)
-            cull_globals.cpu^ = Cull_Globals {
+            cull_globals := bump_allocate(bump, Cull_Globals)
+            cull_globals.cpu^ = {
                 draw_buffer            = draw_buffer.gpu.p,
                 mesh_buffer            = mesh_buffer.gpu.p,
                 draw_visibility_buffer = draw_visibility_buffer.gpu.p,
                 draw_command_buffer    = draw_commands.gpu.p,
-                draw_group_count       = draw_task_group_count.gpu.p,
+                draw_group_count       = draw_group_count.gpu.p,
                 
                 depth_pyramid_index = stuff.depth_pyramid.sampled_index,
                 
                 data = cull_data,
             }
             
-            draw_globals := bump_allocate_type(bump, Draw_Globals)
-            draw_globals.cpu^ = Draw_Globals {
+            draw_globals := bump_allocate(bump, Draw_Globals)
+            draw_globals.cpu^ = {
                 data = draw_data,
                 
                 draw_buffer         = draw_buffer.gpu.p,
@@ -818,13 +818,7 @@ main :: proc () {
                 gpu_fill_memory(cmd, draw_visibility_buffer, max_draw_count, 1)
             }
             
-            { // @cleanup
-                // group.x = 0
-                gpu_fill_memory(cmd, draw_task_group_count.gpu, 0, size_of(draw_task_group_count.cpu.x),  0)
-                // group.yz = 1
-                gpu_fill_memory(cmd, draw_task_group_count.gpu, 1, size_of(draw_task_group_count.cpu.yz), size_of(draw_task_group_count.cpu.x))
-            }
-            culling_end(cmd, cull_pipelines[.early], cull_shader, &frame_descriptor, cull_globals, max_draw_count, early = true)
+            culling_end(cmd, cull_pipelines[.early], cull_shader, &frame_descriptor, cull_globals, draw_group_count, max_draw_count, early = true)
             
             ////////////////////////////////////////////////
             // early render - render objects that were visible last frame
@@ -839,7 +833,7 @@ main :: proc () {
                 vk.CmdBeginQuery(cmd, stats_pool, stats_pool_query_index, {})
                 
                 gpu_set_pipeline(cmd, meshlet_pipeline)
-                gpu_draw_mesh_tasks_indirect(cmd, &frame_descriptor, draw_task_group_count.gpu, 1, draw_globals.gpu)
+                gpu_draw_mesh_tasks_indirect(cmd, &frame_descriptor, draw_group_count.gpu, 1, draw_globals.gpu)
                 
                 vk.CmdEndQuery(cmd, stats_pool, stats_pool_query_index)
                 stats_pool_query_index += 1
@@ -859,7 +853,7 @@ main :: proc () {
             gpu_set_pipeline(cmd, depth_pipeline)
             
             for mip, mip_level in stuff.depth_pyramid_mips {
-                depth_globals := bump_allocate_type(bump, Depth_Data)
+                depth_globals := bump_allocate(bump, Depth_Data)
                 depth_globals.cpu^ = Depth_Data { 
                     size = cast(v2) mip.size,
                 }
@@ -904,11 +898,11 @@ main :: proc () {
             // On the other hand with this arrangement we have two disjoint buffer pairs, and can therefore overlap the second filling of the 
             // command data with the creation or drawing of the first, as long as there are no other dependencies between them.
             
-            draw_commands    := bump_allocate_slice(bump, [] Draw_Command, auto_cast len(draws))
-            draw_group_count := bump_allocate_type(bump, uv3)
+            draw_commands    := bump_allocate(bump, [] Draw_Command, auto_cast len(draws))
+            draw_group_count := bump_allocate(bump, uv3)
             
-            cull_globals := bump_allocate_type(bump, Cull_Globals)
-            cull_globals.cpu^ = Cull_Globals {
+            cull_globals := bump_allocate(bump, Cull_Globals)
+            cull_globals.cpu^ = {
                 draw_buffer            = draw_buffer.gpu.p,
                 mesh_buffer            = mesh_buffer.gpu.p,
                 draw_visibility_buffer = draw_visibility_buffer.gpu.p,
@@ -920,8 +914,8 @@ main :: proc () {
                 data = cull_data,
             }
             
-            draw_globals := bump_allocate_type(bump, Draw_Globals)
-            draw_globals.cpu^ = Draw_Globals {
+            draw_globals := bump_allocate(bump, Draw_Globals)
+            draw_globals.cpu^ = {
                 data = draw_data,
                 
                 draw_buffer         = draw_buffer.gpu.p,
@@ -933,14 +927,7 @@ main :: proc () {
             }
             
             culling_begin(cmd, early = false)
-            {
-                // group.x = 0
-                gpu_fill_memory_address(cmd, draw_group_count.gpu, 0, size_of(draw_group_count.cpu.x),  0)
-                // group.yz = 1
-                gpu_fill_memory_address(cmd, draw_group_count.gpu, 1, size_of(draw_group_count.cpu.yz), size_of(draw_group_count.cpu.x))
-            }
-                
-            culling_end(cmd, cull_pipelines[.late], cull_shader, &frame_descriptor, cull_globals, cast(u32) len(draws), early = false)
+            culling_end(cmd, cull_pipelines[.late], cull_shader, &frame_descriptor, cull_globals, draw_group_count, cast(u32) len(draws), early = false)
             
             ////////////////////////////////////////////////
             // late rendering - render objects that are visible this frame but weren't drawn in the early pass
@@ -990,7 +977,7 @@ main :: proc () {
                 active_rect = hot_rect != {} ? hot_rect : {-1, -1} // invalid rect
             }
             
-            ui_draws := bump_allocate_slice(bump, [] UI_Draw, 2)
+            ui_draws := bump_allocate(bump, [] UI_Draw, 2)
             ui_draws.cpu[0] = { 
                 rect  = rect_a, 
                 color = color_a, 
@@ -1012,14 +999,14 @@ main :: proc () {
             
             ////////////////////////////////////////////////
             
-            ui_globals := bump_allocate_type(bump, UI_Data)
+            ui_globals := bump_allocate(bump, UI_Data)
             ui_globals.cpu^ = {
                 draw_buffer = ui_draws.gpu.p,
                 screen_size = cast(v2) gpu.swapchain_size,
                 mouse_p = mouse_p,
             }
             
-            ui_draw_command := bump_allocate_type(bump, UI_Draw_Command)
+            ui_draw_command := bump_allocate(bump, UI_Draw_Command)
             ui_draw_command.cpu^ = { 6, cast(u32) len(ui_draws.cpu), 0 ,0 }
             
             gpu_barrier(cmd, 
@@ -1133,7 +1120,6 @@ main :: proc () {
             }
             
             view :: proc (seconds: f64) -> time.Duration {
-                cpu_procedure_profile_zone()
                 return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
             }
             
@@ -1336,7 +1322,13 @@ culling_begin :: proc (cmd: vk.CommandBuffer, early: bool) {
         // ...
 }
 
-culling_end :: proc (cmd: vk.CommandBuffer, cull_pipeline: Pipeline, cull_shader: Shader_Id, frame_descriptor: ^Frame_Descriptor, cull_globals: Gpu_Address(Cull_Globals), max_draw_count: u32, early: bool) {
+culling_end :: proc (cmd: vk.CommandBuffer, cull_pipeline: Pipeline, cull_shader: Shader_Id, frame_descriptor: ^Frame_Descriptor, cull_globals: Gpu_Address(Cull_Globals), draw_group_count: Gpu_Address(uv3), max_draw_count: u32, early: bool) {
+     {
+        // group.x = 0
+        gpu_fill_memory(cmd, draw_group_count.gpu, 0, size_of(draw_group_count.cpu.x),  0)
+        // group.yz = 1
+        gpu_fill_memory(cmd, draw_group_count.gpu, 1, size_of(draw_group_count.cpu.yz), size_of(draw_group_count.cpu.x))
+    }
     
     before_dispatch := vk.PipelineStageFlags2 { .ALL_TRANSFER  }
     if !early {

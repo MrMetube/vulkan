@@ -11,7 +11,7 @@ layout(local_size_x = TaskWidth, local_size_y = 1, local_size_z = 1) in;
 
 layout(constant_id = 0) const bool Late = false; // @todo unused for now
 
-layout(push_constant) uniform Push_Data { Draw_Globals data; };
+layout(push_constant) uniform _ { Draw_Globals data; };
 
 taskPayloadSharedEXT Task_Result task_result;
 
@@ -25,8 +25,8 @@ bool cone_cull(vec3 center, float radius, vec3 axis, float cutoff, vec3 camera);
 
 void main() {
     uint thread_index = gl_LocalInvocationIndex;
-    
-    Draw_Command_p command = data.draw_command_buffer[gl_WorkGroupID.x];
+    uint command_index = gl_WorkGroupID.x; // :MeshShaderGroupSizeLimits:
+    Draw_Command_p command = data.draw_command_buffer[command_index];
     
     uint draw_index     = command.v.draw_index;
     uint meshlet_offset = command.v.meshlet_offset;

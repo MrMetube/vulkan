@@ -6,7 +6,7 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(constant_id = 0) const bool Late = false;
 
-layout(push_constant) uniform Push_Data { Cull_Globals globals; };
+layout(push_constant) uniform _ { Cull_Globals globals; };
 
 layout(descriptor_heap) uniform texture2D Textures[];
 layout(descriptor_heap) uniform sampler   Samplers[];
@@ -72,6 +72,17 @@ void main() {
         Mesh_LOD lod = mesh.v.lods[lod_index];
         uint task_group_count = (lod.meshlet_count + TaskWidth-1) / TaskWidth;
         
+        //
+        // :MeshShaderGroupSizeLimits:
+        // The draw_group_count.xyz fields are not guarenteed to be full 32-bit integers by vulkan. Therefore the total count can overflow 
+        // the single x-dimension if too many draw commands are emitted. A solution to this problem can be found in niagara at commit:
+        //     https://github.com/zeux/niagara/commit/0eae88480ad110d5ecabed74b4452ab6d7136881
+        //
+        // Here is its general idea:
+        // represent command count as X*64*1; X has a max of 65535 (per EXT_mesh_shader limits), so this allows us to reach ~4M commands
+        // note that EXT_mesh_shader doesn't guarantee support for >4M commands anyway, but 4M commands ~= 16B triangles which is surely enough
+        //
+    
         uint draw_command_index = atomicAdd(globals.draw_group_count.v.x, task_group_count);
         
         // @todo fill this!

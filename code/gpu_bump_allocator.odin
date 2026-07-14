@@ -29,7 +29,8 @@ bump_allocator_delete :: proc (gpu: ^Gpu, bump: ^Bump_Allocator) {
     bump^ = {}
 }
 
-bump_allocate :: proc (bump: ^Bump_Allocator, size: u32, alignment: u32 = 16) -> (cpu: [] u8, gpu: vk.DeviceAddress) {
+bump_allocate :: proc { bump_allocate_bytes, bump_allocate_type, bump_allocate_slice }
+bump_allocate_bytes :: proc (bump: ^Bump_Allocator, size: u32, alignment: u32 = 16) -> (cpu: [] u8, gpu: vk.DeviceAddress) {
     bump.offset = align(alignment, bump.offset)
     
     assert(bump.offset + size < auto_cast len(bump.data.cpu))
