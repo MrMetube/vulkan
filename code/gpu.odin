@@ -79,22 +79,26 @@ Pipeline :: struct {
 
 ////////////////////////////////////////////////
 
-GpuAddress :: struct ($T: typeid) {
-    p: vk.DeviceAddress,
+Gpu_Slice :: struct ($E: typeid) {
+    cpu: [] E,
+    gpu: Gpu_Pointer(E),
 }
 
-GpuSlice :: struct ($T: typeid) {
-    p:         vk.DeviceAddress,
-    byte_size: int,
+Gpu_Address :: struct ($T: typeid) {
+    cpu: ^T,
+    gpu: Gpu_Pointer(T),
+}
+
+Gpu_Pointer :: struct ($T: typeid) {
+    p: vk.DeviceAddress,
 }
 
 // If we had access to the address_range extension, most if not all vulkan calls that take a buffer object could be deleted.
 _the_gpu_allocations: map[vk.DeviceAddress] GpuAllocation
 GpuAllocation :: struct {
-    buffer:  vk.Buffer,
-    memory:  vk.DeviceMemory,
-    address: vk.DeviceAddress,
-    offset:  vk.DeviceSize,
+    buffer: vk.Buffer,
+    memory: vk.DeviceMemory,
+    offset: vk.DeviceSize,
 }
 
 Topology :: vk.PrimitiveTopology
@@ -201,10 +205,8 @@ Descriptor_Heap :: struct {
     // Both resources and samplers have a stride of resource_size, which is the larger or buffer and image descriptor size for the current gpu.
     // Therefore indexing needs to be done manually with [index * resource_size], whilst the written to/read from bytes of descriptors is either
     // the resource size or the sampler size, based on the resource itself.
-    resources_cpu: [] u8,
-    samplers_cpu:  [] u8,
-    resources_gpu: GpuSlice(u8),
-    samplers_gpu:  GpuSlice(u8),
+    resources: Gpu_Slice(u8),
+    samplers:  Gpu_Slice(u8),
     
     resource_size: u32,
     sampler_size:  u32,
@@ -224,6 +226,8 @@ Frame_Descriptor :: struct {
 ////////////////////////////////////////////////
 
 gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
+    cpu_procedure_profile_zone()
+    
     gpu: Gpu
     
     {
@@ -240,9 +244,12 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
         
         get_instance_proc, ok := dynlib.symbol_address(vulkan, "vkGetInstanceProcAddr", allocator = context.temp_allocator)
         assert(ok)
+        
         vk.load_proc_addresses_global(get_instance_proc)
         
         {
+            cpu_scoped_profile_zone("Vulkan Instance")
+            
             instance_extension_names: [dynamic; 16] cstring
             if ODIN_OS == .Windows {
                 append(&instance_extension_names, "VK_KHR_surface", "VK_KHR_win32_surface")
@@ -297,7 +304,9 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
                 }
             }
             
+            cpu_begin_profile_zone("Create Instance Call")
             check(vk.CreateInstance(&instance_create_info, nil, &gpu.instance))
+            cpu_end_profile_zone()
             
             vk.load_proc_addresses_instance(gpu.instance)
             
@@ -306,15 +315,17 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
         
         ////////////////////////////////////////////////
         
-        if ODIN_OS == .Windows {
-            
-            info := vk.Win32SurfaceCreateInfoKHR {
-                sType = .WIN32_SURFACE_CREATE_INFO_KHR,
-                hinstance = cast(win.HANDLE) windows_hinstance,
-                hwnd      = win.GetActiveWindow(),
-            }
-            check(vk.CreateWin32SurfaceKHR(gpu.instance, &info, nil, &gpu.surface))
-        } else { unimplemented() }
+        {
+            if ODIN_OS == .Windows {
+                
+                info := vk.Win32SurfaceCreateInfoKHR {
+                    sType = .WIN32_SURFACE_CREATE_INFO_KHR,
+                    hinstance = cast(win.HANDLE) windows_hinstance,
+                    hwnd      = win.GetActiveWindow(),
+                }
+                check(vk.CreateWin32SurfaceKHR(gpu.instance, &info, nil, &gpu.surface))
+            } else { unimplemented() }
+        }
         
         ////////////////////////////////////////////////
         
@@ -383,15 +394,13 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
         
         fmt.printfln("Selected device: %v", cast(cstring) &gpu.device_properties.properties.deviceName[0])
         assert(gpu.device_properties.properties.limits.timestampComputeAndGraphics)
-        
-        ////////////////////////////////////////////////
-        
     }
     
     ////////////////////////////////////////////////
     // Extensions
     
     {
+        cpu_scoped_profile_zone("Device")
         device_extensions := [] cstring { 
             vk.KHR_SWAPCHAIN_EXTENSION_NAME,
             vk.EXT_MESH_SHADER_EXTENSION_NAME,
@@ -540,7 +549,9 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
         ppNext^ = &f_heap; ppNext = &f_heap.pNext
         ppNext^ = &f_pointer; ppNext = &f_pointer.pNext
         
+        cpu_begin_profile_zone("Create Device Call")
         check(vk.CreateDevice(gpu.physical_device, &device_create_info, nil, &gpu.device))
+        cpu_end_profile_zone()
         
         vk.load_proc_addresses_device(gpu.device)
         
@@ -582,6 +593,7 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
     
     ////////////////////////////////////////////////
     
+    cpu_begin_profile_zone("Swapchain")
     get_swapchain_format: {
         format_count: u32
         check(vk.GetPhysicalDeviceSurfaceFormatsKHR(gpu.physical_device, gpu.surface, &format_count, nil))
@@ -608,6 +620,7 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
     
     ok := gpu_recreate_swapchain_if_needed(&gpu, vsync)
     assert(ok)
+    cpu_end_profile_zone()
     
     return gpu
 }
@@ -640,6 +653,7 @@ check :: proc (result: vk.Result, loc := #caller_location) {
 }
 
 gpu_recreate_swapchain_if_needed :: proc (gpu: ^Gpu, vsync: bool, force_recreation := false) -> (can_render: bool) {
+    cpu_procedure_profile_zone()
     if !force_recreation && gpu.swapchain_state != .Dirty && gpu.swapchain_state != .Window_Is_Minimized {
         return true
     }
@@ -699,7 +713,9 @@ gpu_recreate_swapchain_if_needed :: proc (gpu: ^Gpu, vsync: bool, force_recreati
     
     previous_image_count := cast(u32) len(gpu.swapchain_images)
     
+    cpu_begin_profile_zone("Create Swapchain Call")
     check(vk.CreateSwapchainKHR(gpu.device, &swapchain_create_info, nil, &gpu.swapchain))
+    cpu_end_profile_zone()
     
     image_count: u32
     check(vk.GetSwapchainImagesKHR(gpu.device, gpu.swapchain, &image_count, nil))
@@ -764,7 +780,7 @@ gpu_reflect_get_buffer :: proc (address: vk.DeviceAddress) -> (vk.Buffer, vk.Dev
     return alloc.buffer, alloc.offset
 }
 gpu_reflect_set_allocation :: proc (address: vk.DeviceAddress, alloc: GpuAllocation, offset: u32 = 0) {
-    _the_gpu_allocations[address] = { alloc.buffer, alloc.memory, alloc.address, alloc.offset + cast(vk.DeviceSize) offset }
+    _the_gpu_allocations[address] = { alloc.buffer, alloc.memory, alloc.offset + cast(vk.DeviceSize) offset }
 }
 
 gpu_allocate :: proc { gpu_allocate_size, gpu_allocate_slice, gpu_allocate_type }
@@ -826,27 +842,33 @@ gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Me
         sType = .BUFFER_DEVICE_ADDRESS_INFO,
         buffer = alloc.buffer,
     }
-    alloc.address = vk.GetBufferDeviceAddress(gpu.device, &adress_create_info)
-    assert(alloc.address != 0)
-    
-    gpu_result = alloc.address
+    gpu_result = vk.GetBufferDeviceAddress(gpu.device, &adress_create_info)
+    assert(gpu_result != 0)
     
     gpu_reflect_set_allocation(gpu_result, alloc)
     
     return cpu_result, gpu_result
 }
 
-gpu_allocate_slice :: proc (gpu: ^Gpu, $T: typeid/ [] $E, #any_int count: umm, alignment: umm = align_of(E), memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> ([] E, GpuSlice(E)) {
+gpu_allocate_slice :: proc (gpu: ^Gpu, $T: typeid/ [] $E, #any_int count: umm, alignment: umm = align_of(E), memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> Gpu_Slice(E) {
     size := size_of(E) * count
-    cpu_pointer, gpu_pointer := gpu_allocate_size(gpu, size, alignment, memory, usage)
-    result := slice_from_parts(E, cpu_pointer, count)
-    return result, { gpu_pointer, cast(int) size }
+    cpu, gpu := gpu_allocate_size(gpu, size, alignment, memory, usage)
+    
+    result: Gpu_Slice(E)
+    result.cpu = slice_from_parts(E, cpu, count)
+    result.gpu = { gpu }
+    
+    return result
 }
 
-gpu_allocate_type :: proc (gpu: ^Gpu, $T: typeid, alignment: umm = align_of(T), memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (^T,GpuAddress(T)) {
-    cpu_pointer, gpu_pointer := gpu_allocate_size(gpu, size_of(T), alignment, memory, usage)
-    result := cast(^T) cpu_pointer
-    return result, { gpu_pointer }
+gpu_allocate_type :: proc (gpu: ^Gpu, $T: typeid, alignment: umm = align_of(T), memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> Gpu_Address(T) {
+    cpu, gpu := gpu_allocate_size(gpu, size_of(T), alignment, memory, usage)
+    
+    result: Gpu_Address(T)
+    result.cpu = cast(^T) cpu
+    result.gpu = { gpu }
+    
+    return result
 }
 
 gpu_free :: proc { gpu_free_pointer, gpu_free_address, gpu_free_slice }
@@ -856,11 +878,11 @@ gpu_free_pointer :: proc (gpu: ^Gpu, pointer: vk.DeviceAddress) {
     vk.FreeMemory(gpu.device,    alloc.memory, nil)
     vk.DestroyBuffer(gpu.device, alloc.buffer, nil)
 }
-gpu_free_address :: proc (gpu: ^Gpu, address: GpuAddress($T)) {
-    gpu_free_pointer(gpu, address.p)
+gpu_free_address :: proc (gpu: ^Gpu, address: Gpu_Address($T)) {
+    gpu_free_pointer(gpu, address.gpu.p)
 }
-gpu_free_slice :: proc (gpu: ^Gpu, slice: GpuSlice($T)) {
-    gpu_free_pointer(gpu, slice.p)
+gpu_free_slice :: proc (gpu: ^Gpu, slice: Gpu_Slice($T)) {
+    gpu_free_pointer(gpu, slice.gpu.p)
 }
 
 
@@ -1463,16 +1485,15 @@ gpu_copy_from_texture :: proc (cmd: vk.CommandBuffer, destination: vk.DeviceAddr
     vk.CmdCopyImageToBuffer(cmd, source.image, layout, alloc.buffer, 1, &region)
 }
 
-gpu_fill_memory :: proc { gpu_fill_memory_address, gpu_fill_memory_slice, gpu_fill_memory_buffer }
-gpu_fill_memory_address :: proc (cmd: vk.CommandBuffer, destination: GpuAddress($T), value: T) {
+gpu_fill_memory :: proc { gpu_fill_memory_address, gpu_fill_memory_slice }
+gpu_fill_memory_address :: proc (cmd: vk.CommandBuffer, destination: Gpu_Pointer($T), value: T) {
     buffer, offset := gpu_reflect_get_buffer(destination.p)
-    gpu_fill_memory_buffer(cmd, buffer, offset, size_of(T), value)
+    size := cast(vk.DeviceSize) size_of(T)
+    vk.CmdFillBuffer(cmd, buffer, offset, size, value)
 }
-gpu_fill_memory_slice   :: proc (cmd: vk.CommandBuffer, destination: GpuSlice($T), count: u32, value: T) {
-    buffer, offset := gpu_reflect_get_buffer(destination.p)
-    gpu_fill_memory_buffer(cmd, buffer, offset, size_of(T) * cast(vk.DeviceSize) count, value)
-}
-gpu_fill_memory_buffer  :: proc (cmd: vk.CommandBuffer, buffer: vk.Buffer, offset: vk.DeviceSize, size: vk.DeviceSize, value: u32) {
+gpu_fill_memory_slice   :: proc (cmd: vk.CommandBuffer, destination: Gpu_Slice($T), count: u32, value: T) {
+    buffer, offset := gpu_reflect_get_buffer(destination.gpu.p)
+    size := size_of(T) * cast(vk.DeviceSize) count
     vk.CmdFillBuffer(cmd, buffer, offset, size, value)
 }
 
@@ -1555,7 +1576,7 @@ gpu_set_scissor :: proc (cmd: vk.CommandBuffer, offset: iv2 = 0, size: uv2) {
 // void gpuSetDepthStencilState(GpuCommandBuffer cb, GpuDepthStencilState state);
 // void gpuSetBlendState(GpuCommandBuffer cb, GpuBlendState state); 
 
-gpu_begin_render_pass :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, desc: Render_Pass_Desc) {
+gpu_begin_rendering :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, desc: Render_Pass_Desc) {
     render_size := gpu.swapchain_size
     
     color_attachments: [dynamic; 64] vk.RenderingAttachmentInfo
@@ -1606,7 +1627,7 @@ gpu_begin_render_pass :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, desc: Render_Pa
     
     vk.CmdBeginRendering(cmd, &rendering_info)
 }
-gpu_end_render_pass :: proc (cmd: vk.CommandBuffer) {
+gpu_end_rendering :: proc (cmd: vk.CommandBuffer) {
     vk.CmdEndRendering(cmd)
 }
 
@@ -1619,7 +1640,7 @@ gpu_end_render_pass :: proc (cmd: vk.CommandBuffer) {
 // void gpuDrawMeshletsIndirect(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, void *dimGpu);
 
 // @api we may want to allow the pipeline to have a push constant per stage. For that we need the shaders to each declare the push data to be N pointers to their respective data. Then the pipeline layout and this command both needs to declare the correct size of 3 pointers and their offsets in the push data.
-gpu_push_constants :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, push_constant: GpuAddress($T), heap := false) {
+gpu_push_constants :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, push_constant: Gpu_Pointer($T), heap := false) {
     push_constant := push_constant
     info := vk.PushDataInfoEXT {
         sType = .PUSH_DATA_INFO_EXT,
@@ -1628,27 +1649,27 @@ gpu_push_constants :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Desc
     vk.CmdPushDataEXT(cmd, &info)
 }
 
-gpu_dispatch :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, push_constant: GpuAddress($T), group_size: uv3) {
+gpu_dispatch :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, push_constant: Gpu_Pointer($T), group_size: uv3) {
     gpu_push_constants(cmd, frame_descriptor, push_constant)
     
     vk.CmdDispatch(cmd, **group_size)
 }
 
-gpu_draw_indirect :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, commands: GpuAddress($C), push_constant: GpuAddress($T)) {
+gpu_draw_indirect :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, commands: Gpu_Pointer($C), push_constant: Gpu_Pointer($T)) {
     gpu_push_constants(cmd, frame_descriptor, push_constant)
     
     commands, commands_base_offset := gpu_reflect_get_buffer(commands.p)
     vk.CmdDrawIndirect(cmd, commands, commands_base_offset, 1, size_of(C))
 }
 
-gpu_draw_indexed_instanced_indirect :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, draws: GpuSlice($D), max_count: u32, push_constant: GpuAddress($T)) {
+gpu_draw_indexed_instanced_indirect :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, draws: Gpu_Pointer($D), max_count: u32, push_constant: Gpu_Pointer($T)) {
     gpu_push_constants(cmd, frame_descriptor, push_constant)
     
     draws, draws_base_offset := gpu_reflect_get_buffer(draws.p)
     vk.CmdDrawIndexedIndirect(cmd, draws, draws_base_offset + cast(vk.DeviceSize) draw_offset, max_count, size_of(D))
 }
 
-gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, commands: GpuSlice($C), count: GpuAddress(u32), max_count: u32, command_offset: umm, push_constant: GpuAddress($T)) {
+gpu_draw_meshlets_indirect_count :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, commands: Gpu_Pointer($C), count: Gpu_Pointer(u32), max_count: u32, command_offset: umm, push_constant: Gpu_Pointer($T)) {
     gpu_push_constants(cmd, frame_descriptor, push_constant)
     
     // @speed The extension device_address_commands would remove the need to ever have a vk.Buffer for any command.
@@ -1679,8 +1700,8 @@ create_descriptor_heap :: proc (gpu: ^Gpu) -> Descriptor_Heap {
     sampler_total_size := sampler_reserved + sampler_size * sampler_count
     
     result: Descriptor_Heap
-    result.resources_cpu, result.resources_gpu = gpu_allocate_slice(gpu, [] u8, auto_cast resource_total_size, alignment = cast(umm) resource_alignment, usage = { .DESCRIPTOR_HEAP_EXT } )
-    result.samplers_cpu,  result.samplers_gpu  = gpu_allocate_slice(gpu, [] u8, auto_cast sampler_total_size,  alignment = cast(umm) sampler_alignment,  usage = { .DESCRIPTOR_HEAP_EXT } )
+    result.resources = gpu_allocate_slice(gpu, [] u8, auto_cast resource_total_size, alignment = cast(umm) resource_alignment, usage = { .DESCRIPTOR_HEAP_EXT } )
+    result.samplers  = gpu_allocate_slice(gpu, [] u8, auto_cast sampler_total_size,  alignment = cast(umm) sampler_alignment,  usage = { .DESCRIPTOR_HEAP_EXT } )
     
     // @correctness we should respect the alignment, which may increase the total size
     result.resource_reserved_offset = resource_count * resource_size
@@ -1693,24 +1714,28 @@ create_descriptor_heap :: proc (gpu: ^Gpu) -> Descriptor_Heap {
     
     // :SamplerHack: fill samplers[0] with texture sampler and samplers[2] with depth sampler
     descriptor_size := resource_size // :SamplerHack:
-    write_descriptor(gpu, .LINEAR, .LINEAR,  .REPEAT,        .WEIGHTED_AVERAGE, result.samplers_cpu[0 * descriptor_size:][:sampler_size])
-    write_descriptor(gpu, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .WEIGHTED_AVERAGE, result.samplers_cpu[1 * descriptor_size:][:sampler_size])
-    write_descriptor(gpu, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .MIN,              result.samplers_cpu[2 * descriptor_size:][:sampler_size])
+    write_descriptor(gpu, .LINEAR, .LINEAR,  .REPEAT,        .WEIGHTED_AVERAGE, result.samplers.cpu[0 * descriptor_size:][:sampler_size])
+    write_descriptor(gpu, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .WEIGHTED_AVERAGE, result.samplers.cpu[1 * descriptor_size:][:sampler_size])
+    write_descriptor(gpu, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .MIN,              result.samplers.cpu[2 * descriptor_size:][:sampler_size])
     
     return result
 }
 
 destroy_descriptor_heap :: proc (gpu: ^Gpu, heap: Descriptor_Heap) {
-    gpu_free_pointer(gpu, heap.samplers_gpu.p)
-    gpu_free_pointer(gpu, heap.resources_gpu.p)
+    gpu_free_pointer(gpu, heap.samplers.gpu.p)
+    gpu_free_pointer(gpu, heap.resources.gpu.p)
 }
 
 gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: ^Descriptor_Heap) {
+    byte_size :: proc (s: Gpu_Slice($T)) -> vk.DeviceSize {
+        return cast(vk.DeviceSize) len(s.cpu) * size_of(T)
+    }
+    
     sampler_info := vk.BindHeapInfoEXT {
         sType = .BIND_HEAP_INFO_EXT,
         heapRange = {
-            address = heap.samplers_gpu.p,
-            size    = cast(vk.DeviceSize) heap.samplers_gpu.byte_size,
+            address = heap.samplers.gpu.p,
+            size    = byte_size(heap.samplers),
         },
         reservedRangeOffset = heap.sampler_reserved_offset,
         reservedRangeSize   = heap.sampler_reserved_size,
@@ -1719,8 +1744,8 @@ gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: ^Descriptor_Heap) {
     resource_info := vk.BindHeapInfoEXT {
         sType = .BIND_HEAP_INFO_EXT,
         heapRange = { 
-            address = heap.resources_gpu.p,
-            size    = cast(vk.DeviceSize) heap.resources_gpu.byte_size,
+            address = heap.resources.gpu.p,
+            size    = byte_size(heap.resources),
         },
         reservedRangeOffset = heap.resource_reserved_offset,
         reservedRangeSize   = heap.resource_reserved_size,
@@ -1732,7 +1757,7 @@ gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: ^Descriptor_Heap) {
 
 write_texture_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: Texture_Index, image: Image, image_type: vk.DescriptorType, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) {
     descriptor_size := heap.resource_size
-    descriptor_slot := heap.resources_cpu[cast(u32) index * descriptor_size:][:descriptor_size]
+    descriptor_slot := heap.resources.cpu[cast(u32) index * descriptor_size:][:descriptor_size]
     write_descriptor(gpu, image.image, image.format, mip_base, mip_count, image_type, descriptor_slot)
 }
 
