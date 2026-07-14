@@ -129,15 +129,18 @@ load_compiled_shader :: proc (id: Shader_Id, immediately := false) {
         }
         assert(wait_err == nil)
         
+        defer {
+            unordered_remove(&assets.shader_compilation_procs, index)
+            unordered_remove(&assets.shader_compilation_infos, index)
+        }
+        
         if state.exit_code != 0 {
             fmt.printfln("Shader compilation failed for %q", info.input_path)
-            continue
+            break
         }
         
         load_and_parse_shader(info)
         
-        unordered_remove(&assets.shader_compilation_procs, index)
-        unordered_remove(&assets.shader_compilation_infos, index)
         break
     }
 }
@@ -152,6 +155,10 @@ load_all_compiled_shaders :: proc (immediately := false) {
             if wait_err == .Timeout || !state.exited { continue }
         }
         assert(wait_err == nil)
+        defer if !immediately {
+            unordered_remove(&assets.shader_compilation_procs, index)
+            unordered_remove(&assets.shader_compilation_infos, index)
+        }
         
         info := assets.shader_compilation_infos[index]
         if state.exit_code != 0 {
@@ -160,11 +167,6 @@ load_all_compiled_shaders :: proc (immediately := false) {
         }
         
         load_and_parse_shader(info)
-        
-        if !immediately {
-            unordered_remove(&assets.shader_compilation_procs, index)
-            unordered_remove(&assets.shader_compilation_infos, index)
-        }
     }
     
     if immediately {
