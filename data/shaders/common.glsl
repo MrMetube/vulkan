@@ -9,7 +9,7 @@
 
 #define Debug false
 
-#define TaskWidth 32
+#define TaskWidth 64
 
 // @volatile
 #define Flag_FrustumCulling   (1 << 0)
@@ -38,6 +38,9 @@ struct Mesh_Result {
 };
 
 ////////////////////////////////////////////////
+
+#define square(x) (x) * (x)
+#define square_root(x) sqrt(x)
 
 vec3 rotate(vec4 q, vec3 v) {
     return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);

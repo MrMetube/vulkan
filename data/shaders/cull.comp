@@ -1,58 +1,19 @@
 #version 460
 
-#extension GL_NV_explicit_typecast: require // @todo remove once TaskMode is default
-
 #include "common.glsl"
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-layout(constant_id = 0) const bool Late     = false;
-layout(constant_id = 1) const bool TaskMode = false;
+layout(constant_id = 0) const bool Late = false;
 
-// @volatile
-layout(push_constant) uniform Push_Data {
-    Cull_Globals globals;
-};
+layout(push_constant) uniform Push_Data { Cull_Globals globals; };
 
 layout(descriptor_heap) uniform texture2D Textures[];
 layout(descriptor_heap) uniform sampler   Samplers[];
 
 ////////////////////////////////////////////////
 
-// Based on this paper: 
-//     2D Polyhedral Bounds of a Clipped, Perspective-Projected 3D Sphere. Michael Mara, Morgan McGuire. 2013
-//     https://jcgt.org/published/0002/02/05/paper.pdf
-//     :ViewSpace: is used to simplify the original calculations down to this form
-bool project_sphere_onto_screen(vec3 view_center, float radius, float p00, float p11, float near_z, out vec4 result) {
-    if (view_center.z + radius > -near_z) { // :ViewSpace:
-        return false;
-    }
-    
-    // center in the x/y-z frame
-    vec2 cx = -view_center.xz;
-    vec2 cy = -view_center.yz;
-    
-    float cx_dot = dot(cx, cx);
-    float cy_dot = dot(cy, cy);
-    
-    // (cos, sin) of angle theta between c and x/y tangent vector
-    vec2 vx = vec2(sqrt(cx_dot - (radius * radius)), radius);
-    vec2 vy = vec2(sqrt(cy_dot - (radius * radius)), radius);
-    
-    // In the x/y-z reference frame
-    // Transform back to camera space
-    float min_x = -p00 * dot(vec2(vx.x,  vx.y), cx) / dot(vec2(-vx.y, vx.x), cx);
-    float max_x = -p00 * dot(vec2(vx.x, -vx.y), cx) / dot(vec2( vx.y, vx.x), cx);
-    float min_y = p11 * dot(vec2(vy.x,  vy.y), cy) / dot(vec2(-vy.y, vy.x), cy);
-    float max_y = p11 * dot(vec2(vy.x, -vy.y), cy) / dot(vec2( vy.y, vy.x), cy); 
-    
-    result = vec4(min_x, min_y, max_x, max_y);
-    
-    // transform to clip space
-    result = result.xwzy * vec4(.5, -.5, .5, -.5) + .5;
-    
-    return true;
-}
+bool project_sphere_onto_screen(vec3 view_center, float radius, float p00, float p11, float near_z, out vec4 result);
 
 void main() {
     uint draw_index = gl_GlobalInvocationID.x;
@@ -66,9 +27,8 @@ void main() {
     bool lod_enabled             = (globals.data.flags & Flag_LevelOfDetail)    != 0;
     bool occlusion_enabled       = (globals.data.flags & Flag_OcclusionCulling) != 0;
     
-    Draw_p draw               = globals.draw_buffer[draw_index];
-    Mesh_p mesh               = globals.mesh_buffer[draw.v.mesh_index];
-    uint_p draw_command_count = globals.draw_command_count;
+    Draw_p draw = globals.draw_buffer[draw_index];
+    Mesh_p mesh = globals.mesh_buffer[draw.v.mesh_index];
     
     vec3  world_center = transform(draw.v.orientation, draw.v.scale, draw.v.p, mesh.v.center);
     float radius       = draw.v.scale * mesh.v.radius;
@@ -112,33 +72,58 @@ void main() {
         Mesh_LOD lod = mesh.v.lods[lod_index];
         uint task_group_count = (lod.meshlet_count + TaskWidth-1) / TaskWidth;
         
-        if (TaskMode) {
-            uint draw_command_index = atomicAdd(globals.draw_task_group_count.v.x, task_group_count);
+        uint draw_command_index = atomicAdd(globals.draw_group_count.v.x, task_group_count);
+        
+        // @todo fill this!
+        uint meshlet_visibility_offset/*  = draw.v.meshlet_visibility_offset */;
+        
+        // @todo ideally we would abortif draw_group_count overflows the output buffer
+        for (uint i = 0; i < task_group_count; i += 1) {
+            Draw_Command_p command = globals.draw_command_buffer[draw_command_index + i];
             
-            // @todo fill this!
-            uint meshlet_visibility_offset/*  = draw.v.meshlet_visibility_offset */;
-            
-            for (uint i = 0; i < task_group_count; i += 1) {
-                Task_Command_p task_command = globals.task_command_buffer[draw_command_index + i];
-                
-                task_command.v.draw_index = draw_index;
-                task_command.v.meshlet_offset =     lod.meshlet_offset + i * TaskWidth;
-                task_command.v.meshlet_count  = min(lod.meshlet_count  - i * TaskWidth, TaskWidth);
-                task_command.v.late_draw_visibility = was_visible_last_frame.v ? 1 : 0;
-                task_command.v.meshlet_visibility_offset = meshlet_visibility_offset + i * TaskWidth;
-            }
-            
-        } else {
-            uint draw_command_index = atomicAdd(draw_command_count.v, 1);
-            Draw_Command_p draw_command = globals.draw_command_buffer[draw_command_index];
-            
-            draw_command.v.draw_id        = draw_index;
-            draw_command.v.meshlet_count  = lod.meshlet_count;
-            draw_command.v.meshlet_offset = lod.meshlet_offset;
-            
-            draw_command.v.group = uvec3(task_group_count, 1, 1);
+            command.v.draw_index = draw_index;
+            command.v.meshlet_offset =     lod.meshlet_offset + i * TaskWidth;
+            command.v.meshlet_count  = min(lod.meshlet_count  - i * TaskWidth, TaskWidth);
+            command.v.late_draw_visibility = was_visible_last_frame.v ? 1 : 0;
+            command.v.meshlet_visibility_offset = meshlet_visibility_offset + i * TaskWidth;
         }
     }
     
     if (Late) was_visible_last_frame.v = visible;
+}
+
+
+// Based on this paper: 
+//     2D Polyhedral Bounds of a Clipped, Perspective-Projected 3D Sphere. Michael Mara, Morgan McGuire. 2013
+//     https://jcgt.org/published/0002/02/05/paper.pdf
+//     :ViewSpace: is used to simplify the original calculations down to this form
+bool project_sphere_onto_screen(vec3 view_center, float radius, float p00, float p11, float near_z, out vec4 result) {
+    if (view_center.z + radius > -near_z) { // :ViewSpace:
+        return false;
+    }
+    
+    // center in the x/y-z frame
+    vec2 cx = -view_center.xz;
+    vec2 cy = -view_center.yz;
+    
+    float cx_dot = dot(cx, cx);
+    float cy_dot = dot(cy, cy);
+    
+    // (cos, sin) of angle theta between c and x/y tangent vector
+    vec2 vx = vec2(sqrt(cx_dot - (radius * radius)), radius);
+    vec2 vy = vec2(sqrt(cy_dot - (radius * radius)), radius);
+    
+    // In the x/y-z reference frame
+    // Transform back to camera space
+    float min_x = -p00 * dot(vec2(vx.x,  vx.y), cx) / dot(vec2(-vx.y, vx.x), cx);
+    float max_x = -p00 * dot(vec2(vx.x, -vx.y), cx) / dot(vec2( vx.y, vx.x), cx);
+    float min_y = p11 * dot(vec2(vy.x,  vy.y), cy) / dot(vec2(-vy.y, vy.x), cy);
+    float max_y = p11 * dot(vec2(vy.x, -vy.y), cy) / dot(vec2( vy.y, vy.x), cy); 
+    
+    result = vec4(min_x, min_y, max_x, max_y);
+    
+    // transform to clip space
+    result = result.xwzy * vec4(.5, -.5, .5, -.5) + .5;
+    
+    return true;
 }

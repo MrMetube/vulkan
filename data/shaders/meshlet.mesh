@@ -6,41 +6,31 @@
 
 #include "common.glsl"
 
-////////////////////////////////////////////////
-
-uint hash(uint a) {
-    a = (a + 0x7ed55d16) + (a << 12);
-    a = (a ^ 0xc761c23c) ^ (a >> 19);
-    a = (a + 0x165667b1) + (a << 5);
-    a = (a + 0xd3a2646c) ^ (a << 9);
-    a = (a + 0xfd7046c5) + (a << 3);
-    a = (a ^ 0xb55a4f09) ^ (a >> 16);
-    return a;
-}
-
-////////////////////////////////////////////////
-
 // @volatile
 #define MaxVertices   64
 #define MaxTriangles 126
 
-layout(push_constant) uniform Push_Data {
-    Draw_Globals globals;
-};
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Push_Data { Draw_Globals globals; };
 
 taskPayloadSharedEXT Task_Result task_result;
-
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 layout(triangles, max_vertices = MaxVertices, max_primitives = MaxTriangles) out;
 
 layout(location = 0) flat   out uint               draw_index[];
 layout(location = 1) smooth out Mesh_Result mesh_result_smooth[];
 
-#define Cull 1 // @todo which cull? remove this define.
+////////////////////////////////////////////////
 
-#if Cull
+#define Cull_Backfacing_and_Small_Triangles 1 // @todo remove this define.
+
+#if Cull_Backfacing_and_Small_Triangles
 shared vec3 vertex_screen[MaxVertices];
-#endif // Cull
+#endif // Cull_Backfacing_and_Small_Triangles
+
+////////////////////////////////////////////////
+
+uint hash(uint a);
 
 void main() {
     uint thread_index   = gl_LocalInvocationIndex;
@@ -90,9 +80,9 @@ void main() {
             result.debug_color = vec3(float(mhash & 255), float((mhash >> 8) & 255), float((mhash >> 16) & 255)) / 255.0;
         #endif // Debug
         
-        #if Cull
+        #if Cull_Backfacing_and_Small_Triangles
             vertex_screen[i] = vec3(screen_p.xy / screen_p.w, screen_p.w);
-        #endif // Cull
+        #endif // Cull_Backfacing_and_Small_Triangles
         
         gl_MeshVerticesEXT[i].gl_Position = screen_p;
         
@@ -100,9 +90,9 @@ void main() {
         draw_index[i] = task_result.draw_index;
     }
     
-    #if Cull
+    #if Cull_Backfacing_and_Small_Triangles
         barrier();
-    #endif // Cull
+    #endif // Cull_Backfacing_and_Small_Triangles
     
     uint8_t_p meshlet_data_bytes = uint8_t_p(globals.meshlet_data_buffer);
     for (uint i = thread_index; i < triangle_count; i += group_size) {
@@ -113,7 +103,7 @@ void main() {
         uint ic = meshlet_data_bytes[offset + 2].v;
         gl_PrimitiveTriangleIndicesEXT[i] = uvec3(ia, ib, ic);
         
-        #if Cull
+        #if Cull_Backfacing_and_Small_Triangles
             bool culled = false;
             
             vec2 a = vertex_screen[ia].xy;
@@ -143,6 +133,16 @@ void main() {
             culled = culled && (vertex_screen[ia].z > 0 && vertex_screen[ib].z > 0 && vertex_screen[ic].z > 0);
             
             gl_MeshPrimitivesEXT[i].gl_CullPrimitiveEXT = culled;
-        #endif // Cull
+        #endif // Cull_Backfacing_and_Small_Triangles
     }
+}
+
+uint hash(uint a) {
+    a = (a + 0x7ed55d16) + (a << 12);
+    a = (a ^ 0xc761c23c) ^ (a >> 19);
+    a = (a + 0x165667b1) + (a << 5);
+    a = (a + 0xd3a2646c) ^ (a << 9);
+    a = (a + 0xfd7046c5) + (a << 3);
+    a = (a ^ 0xb55a4f09) ^ (a >> 16);
+    return a;
 }

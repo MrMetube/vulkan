@@ -4,15 +4,11 @@
 
 layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
 
-// @volatile
-layout(push_constant) uniform Push_Data {
-    Depth_Data data;
-};
+layout(push_constant) uniform Push_Data { Depth_Data data; };
 
 layout(descriptor_heap) uniform texture2D Textures[];
 layout(descriptor_heap) uniform sampler   Samplers[];
 layout(descriptor_heap, r32f) uniform writeonly image2D Images[];
-
 
 void main() {
     uvec2 pixel = gl_GlobalInvocationID.xy;

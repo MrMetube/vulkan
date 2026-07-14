@@ -2,11 +2,7 @@
 
 #include "common.glsl"
 
-////////////////////////////////////////////////
-
-layout(push_constant) uniform Push_Data {
-    Draw_Globals globals;
-};
+layout(push_constant) uniform Push_Data { Draw_Globals globals; };
 
 layout(location = 0) flat   in uint        draw_index;
 layout(location = 1) smooth in Mesh_Result mesh_result;

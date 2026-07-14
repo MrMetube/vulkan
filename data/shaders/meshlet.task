@@ -7,127 +7,83 @@
 
 ////////////////////////////////////////////////
 
-bool cone_cull(vec3 center, float radius, vec3 axis, float cutoff, vec3 camera) {
-    vec3 delta = center - camera;
-    return dot(delta, axis) >= cutoff * length(delta) + radius;
-}
-
-////////////////////////////////////////////////
-
-// @volatile
-layout(push_constant) uniform Push_Data {
-    Draw_Globals data;
-};
-
 layout(local_size_x = TaskWidth, local_size_y = 1, local_size_z = 1) in;
 
-layout(constant_id = 0) const bool Late     = false; // @todo unused for now
-layout(constant_id = 1) const bool TaskMode = false;
+layout(constant_id = 0) const bool Late = false; // @todo unused for now
+
+layout(push_constant) uniform Push_Data { Draw_Globals data; };
 
 taskPayloadSharedEXT Task_Result task_result;
 
-#define BackfaceCulling 1 // @todo remove this define
+////////////////////////////////////////////////
 
-#if BackfaceCulling
 shared int shared_count;
-#endif // BackfaceCulling
+
+////////////////////////////////////////////////
+
+bool cone_cull(vec3 center, float radius, vec3 axis, float cutoff, vec3 camera);
 
 void main() {
-    uint draw_index;
-    uint meshlet_group_index;
-    uint meshlet_offset;
-    uint meshlet_count;
-    if (TaskMode) {
-        Task_Command_p command = data.task_command_buffer[gl_WorkGroupID.x];
-        
-        draw_index     = command.v.draw_index;
-        meshlet_offset = command.v.meshlet_offset;
-        meshlet_count  = command.v.meshlet_count;
-        // @todo read late_draw_visibiliy from the command.v.late_draw_visibility
-        
-        meshlet_group_index = gl_LocalInvocationID.x;
-    } else {
-        Draw_Command_p command   = data.draw_command_buffer[gl_DrawID];
-        
-        draw_index     = command.v.draw_id;
-        meshlet_offset = command.v.meshlet_offset;
-        meshlet_count  = command.v.meshlet_count;
-        
-        meshlet_group_index = gl_GlobalInvocationID.x;
-    }
+    uint thread_index = gl_LocalInvocationIndex;
     
+    Draw_Command_p command = data.draw_command_buffer[gl_WorkGroupID.x];
+    
+    uint draw_index     = command.v.draw_index;
+    uint meshlet_offset = command.v.meshlet_offset;
+    uint meshlet_count  = command.v.meshlet_count;
+    // @todo read late_draw_visibiliy from the command.v.late_draw_visibility
+    
+    uint meshlet_index            = thread_index + meshlet_offset;
+    uint meshlet_visibility_index = thread_index + command.v.meshlet_visibility_offset;
     
     Draw_p draw = data.draw_buffer[draw_index];
-    
-    uint meshlet_index = meshlet_group_index + meshlet_offset;
-    uint meshlet_visibility_index;
-    if (TaskMode) { // @cleanup
-        Task_Command_p command = data.task_command_buffer[gl_WorkGroupID.x];
-        
-        meshlet_visibility_index = meshlet_group_index + command.v.meshlet_visibility_offset;
-    } else {
-        // meshlet_visibility_index = meshlet_group_index + draw.v.meshlet_visibility_offset;
-    }
-    
     Mesh_p mesh = data.mesh_buffer[draw.v.mesh_index];
     
     task_result.draw_index     = draw_index;
     task_result.meshlet_offset = meshlet_offset;
     
-    #if BackfaceCulling
-        
-        shared_count = 0;
-        barrier();
-        
-        bool visible = false;
-        if (meshlet_index < (meshlet_count + meshlet_offset)) {
-            Meshlet_p meshlet = data.meshlet_buffer[meshlet_index];
-            
-            vec3 cone_axis = vec3(int(meshlet.v.cone_axis[0]), int(meshlet.v.cone_axis[1]), int(meshlet.v.cone_axis[2])) / 127.0;
-            vec3 center    = meshlet.v.center;
-            
-            vec3  world_center    = transform(draw.v.orientation, draw.v.scale, draw.v.p, center);
-            float radius          = draw.v.scale * meshlet.v.radius;
-            vec3  world_cone_axis = rotate(draw.v.orientation, cone_axis);
-            float cone_cutoff     = float(meshlet.v.cone_cutoff) / 127.0;
-            
-            // @todo radius and cutoff might need scaling if the view_from_world matrix is more than translating
-            vec4 view_center    = data.data.view_from_world * vec4(world_center, 1);
-            vec3 view_cone_axis = mat3(data.data.view_from_world) * world_cone_axis;
-            
-            // backface cone culling
-            visible = !cone_cull(view_center.xyz, radius, view_cone_axis, cone_cutoff, vec3(0));
-            
-            // @copypasta from cull.comp
-            // the left/top/right/bottom plane culling utilizes frustum symmetry to cull against two planes at the same time
-            visible = visible && view_center.z * data.data.frustum[1] - abs(view_center.x) * data.data.frustum[0] > -radius;
-            visible = visible && view_center.z * data.data.frustum[3] - abs(view_center.y) * data.data.frustum[2] > -radius;
-            // the near/far plane culling uses camera space Z directly, but the camera looks down -z :ViewSpace:
-            visible = visible && view_center.z + radius < -data.data.near_z && view_center.z - radius > -data.data.far_z;
-        }
-        
-        if (visible) {
-            uint index = atomicAdd(shared_count, 1);
-            task_result.indices[index] = meshlet_index;
-        }
-        
-        barrier(); // for shared_count
-        
-        EmitMeshTasksEXT(shared_count, 1, 1);
-        
-    #else // BackfaceCulling
-    {
-        uint meshlet_group_index = gl_WorkGroupID.x;
-        uint meshlet_group_size  = gl_WorkGroupSize.x;
-        
-        uint thread_index = gl_LocalInvocationIndex;
-        task_result.indices[thread_index] = meshlet_index;
-        
-        uint meshlet_index_of_thread_0 = meshlet_group_index * meshlet_group_size + 0;
-        uint count = min(meshlet_group_size, meshlet_count - (meshlet_index_of_thread_0));
-        EmitMeshTasksEXT(count, 1, 1);
-    }
-        
-    #endif // BackfaceCulling
+    shared_count = 0;
     
+    barrier(); // for shared_count
+    
+    bool visible = false;
+    if (meshlet_index < (meshlet_count + meshlet_offset)) {
+        Meshlet_p meshlet = data.meshlet_buffer[meshlet_index];
+        
+        vec3 cone_axis = vec3(int(meshlet.v.cone_axis[0]), int(meshlet.v.cone_axis[1]), int(meshlet.v.cone_axis[2])) / 127.0;
+        vec3 center    = meshlet.v.center;
+        
+        vec3  world_center    = transform(draw.v.orientation, draw.v.scale, draw.v.p, center);
+        float radius          = draw.v.scale * meshlet.v.radius;
+        vec3  world_cone_axis = rotate(draw.v.orientation, cone_axis);
+        float cone_cutoff     = float(meshlet.v.cone_cutoff) / 127.0;
+        
+        // @todo radius and cutoff might need scaling if the view_from_world matrix is more than translating
+        vec4 view_center    = data.data.view_from_world * vec4(world_center, 1);
+        vec3 view_cone_axis = mat3(data.data.view_from_world) * world_cone_axis;
+        
+        // backface cone culling
+        visible = !cone_cull(view_center.xyz, radius, view_cone_axis, cone_cutoff, vec3(0));
+        
+        // @copypasta from cull.comp
+        // the left/top/right/bottom plane culling utilizes frustum symmetry to cull against two planes at the same time
+        visible = visible && view_center.z * data.data.frustum[1] - abs(view_center.x) * data.data.frustum[0] > -radius;
+        visible = visible && view_center.z * data.data.frustum[3] - abs(view_center.y) * data.data.frustum[2] > -radius;
+        // the near/far plane culling uses camera space Z directly, but the camera looks down -z :ViewSpace:
+        visible = visible && view_center.z + radius < -data.data.near_z && view_center.z - radius > -data.data.far_z;
+    }
+    
+    if (visible) {
+        uint index = atomicAdd(shared_count, 1);
+        task_result.indices[index] = meshlet_index;
+    }
+    
+    barrier(); // for shared_count
+    
+    EmitMeshTasksEXT(shared_count, 1, 1);
+}
+
+bool cone_cull(vec3 center, float radius, vec3 axis, float cutoff, vec3 camera) {
+    vec3 delta = center - camera;
+    return dot(delta, axis) >= cutoff * length(delta) + radius;
 }

@@ -3,36 +3,15 @@
 #include "common.glsl"
 #include "colors.glsl"
 
+layout(push_constant) uniform Push_Data { UI_Data data; };
+
 layout(location = 0) flat in uint draw_index;
 
 layout(location = 0) out vec4 pixel_result;
 
-#define square(x) (x) * (x)
-#define square_root(x) sqrt(x)
-
 ////////////////////////////////////////////////
 
-// Signed distance to a 2D rounded box.
-//     https://www.shadertoy.com/view/4llXD7
-//
-// List of some other 2D distances:
-//     iquilezles.org/articles/distfunctions2d
-
-// roundness = (top-right, bottom-right, top-left, bottom-left)
-float sdRoundBox( in vec2 p, in vec2 radius, in vec4 roundness) {
-    vec2 b = radius;
-    vec4 r = roundness;
-    r.xy = (p.x>0.0) ? r.xy : r.zw;
-    r.x  = (p.y>0.0) ? r.x  : r.y;
-    vec2 q = abs(p)-b+r.x;
-    return min(max(q.x,q.y),0.0) + length(max(q,0.0)) - r.x;
-}
-
-////////////////////////////////////////////////
-
-layout(push_constant) uniform Push_Data {
-    UI_Data data;
-};
+float signed_distance_round_box( in vec2 p, in vec2 radius, in vec4 roundness);
 
 void main() {
     // mouse highlight
@@ -76,8 +55,8 @@ void main() {
     vec2 inner_radius = (inner_rect.zw - inner_rect.xy) * 0.5;
     vec2 inner_center = inner_rect.xy + inner_radius;
     
-    float d_outer = sdRoundBox(pixel - outer_center, outer_radius, vec4(outer_corner_radius));
-    float d_inner = sdRoundBox(pixel - inner_center, inner_radius, vec4(inner_corner_radius));
+    float d_outer = signed_distance_round_box(pixel - outer_center, outer_radius, vec4(outer_corner_radius));
+    float d_inner = signed_distance_round_box(pixel - inner_center, inner_radius, vec4(inner_corner_radius));
     
     float aa = fwidth(d_outer);
     
@@ -88,4 +67,20 @@ void main() {
     color.a *= outer;
     
     pixel_result = color;
+}
+
+// Signed distance to a 2D rounded box.
+//     https://www.shadertoy.com/view/4llXD7
+//
+// List of some other 2D distances:
+//     iquilezles.org/articles/distfunctions2d
+
+// roundness = (top-right, bottom-right, top-left, bottom-left)
+float signed_distance_round_box( in vec2 p, in vec2 radius, in vec4 roundness) {
+    vec2 b = radius;
+    vec4 r = roundness;
+    r.xy = (p.x>0.0) ? r.xy : r.zw;
+    r.x  = (p.y>0.0) ? r.x  : r.y;
+    vec2 q = abs(p)-b+r.x;
+    return min(max(q.x,q.y),0.0) + length(max(q,0.0)) - r.x;
 }
