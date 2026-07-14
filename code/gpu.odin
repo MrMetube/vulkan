@@ -1066,7 +1066,7 @@ make_pipeline_info :: proc (info: ^Pipeline_Info, gpu: ^Gpu, heap: Descriptor_He
     // Fill specialization constants
     for constant, i in constants {
         append(&info.specialization_entries, vk.SpecializationMapEntry {
-            constantID = constant.u, 
+            constantID = cast(u32) i, 
             offset     = cast(u32) i * size_of(u32), 
             size       = size_of(u32),
         })

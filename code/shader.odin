@@ -42,7 +42,7 @@ generate_shader_api :: proc (output_file: string) {
     // :Shader: all types used by the cpu and the gpu
     
     // structs used in buffers
-    append_simple_struct(&builder, vk.DrawMeshTasksIndirectCommandEXT)
+    append_simple_struct(&builder, Task_Command)
     append_simple_struct(&builder, Draw_Command)
     append_simple_struct(&builder, Draw)
     append_simple_struct(&builder, Mesh_LOD)
@@ -59,7 +59,8 @@ generate_shader_api :: proc (output_file: string) {
     collect_types(&simple_types, &reference_types, Draw_Globals)
     collect_types(&simple_types, &reference_types, Depth_Data)
     collect_types(&simple_types, &reference_types, UI_Data)
-    reference_types["uint8_t"] = {}
+    reference_types["uint8_t"]      = {}
+    reference_types["Task_Command"] = {}
     append_reference_types(&builder, reference_types)
     
     // nested structs
@@ -90,6 +91,8 @@ generate_shader_api :: proc (output_file: string) {
         case u8:  type_name = "uint8_t"
         case u16: type_name = "uint16_t"
         case i16: type_name = "int16_t"
+        
+        case uv3: type_name = "uvec3"
         
         case v2: type_name = "vec2"
         case v3: type_name = "vec3"

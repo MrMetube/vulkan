@@ -3,7 +3,6 @@
 #extension GL_EXT_shader_explicit_arithmetic_types: require
 #extension GL_ARB_shader_draw_parameters: require
 #extension GL_EXT_mesh_shader: require
-
 #extension GL_NV_explicit_typecast: require
 
 #include "common.glsl"

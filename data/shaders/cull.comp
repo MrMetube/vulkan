@@ -4,12 +4,14 @@
 #extension GL_EXT_control_flow_attributes: require
 #extension GL_EXT_nonuniform_qualifier: require
 #extension GL_EXT_descriptor_heap: require
+#extension GL_NV_explicit_typecast: require
 
 #include "common.glsl"
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-layout(constant_id = 0) const bool Late = true; // @todo when this defaults to false occlusion isnt toggleable, but when its true we can toggle it on and off
+layout(constant_id = 0) const bool Late     = false;
+layout(constant_id = 1) const bool TaskMode = false;
 
 // @volatile
 layout(push_constant) uniform Push_Data {
@@ -103,8 +105,6 @@ void main() {
     }
     
     if (visible && (!Late || !was_visible_last_frame.v)) {
-        uint draw_command_index = atomicAdd(draw_command_count.v, 1);
-        
         uint lod_index = 0;
         if (lod_enabled) {
             // lod distance i = base * pow(step, i)
@@ -112,19 +112,39 @@ void main() {
             float lod_index_f = log2(length(view_center.xyz) / globals.data.lod_base) / log2(globals.data.lod_step);
             lod_index = min(uint(max(lod_index_f + 1, 0)), mesh.v.lod_count - 1);
         }
-        
+            
         Mesh_LOD lod = mesh.v.lods[lod_index];
-        uint meshlet_group_count = (lod.meshlet_count + TaskWidth-1) / TaskWidth;
+        uint task_group_count = (lod.meshlet_count + TaskWidth-1) / TaskWidth;
         
-        Draw_Command_p draw_command = globals.draw_command_buffer[draw_command_index];
-        
-        draw_command.v.draw_id        = draw_index;
-        draw_command.v.meshlet_count  = lod.meshlet_count;
-        draw_command.v.meshlet_offset = lod.meshlet_offset;
-        
-        draw_command.v.command.groupCountX = meshlet_group_count;
-        draw_command.v.command.groupCountY = 1;
-        draw_command.v.command.groupCountZ = 1;
+        if (TaskMode) {
+            Task_Command_p task_command_buffer = Task_Command_p(globals.draw_command_buffer);
+            uint draw_command_index = atomicAdd(draw_command_count.v, TaskWidth);
+            
+            for (uint i = 0; i < task_group_count; i += 1) {
+                Task_Command_p task_command = task_command_buffer[draw_index + i];
+                
+                uint meshlet_visibility_offset /* = draw.v.meshlet_visibility_offset */;
+                meshlet_visibility_offset += i + TaskWidth;
+                uint late_draw_visibility = was_visible_last_frame.v ? 1 : 0;
+                
+                uint packed = (late_draw_visibility << 31) | meshlet_visibility_offset;
+                
+                task_command.v.draw_id = draw_index;
+                task_command.v.task_offset =     lod.meshlet_offset + i * TaskWidth;
+                task_command.v.task_count  = min(lod.meshlet_count  - i * TaskWidth, TaskWidth);
+                task_command.v.late_draw_visibility__meshlet_visibility_offset = packed;
+            }
+            
+        } else {
+            uint draw_command_index = atomicAdd(draw_command_count.v, 1);
+            Draw_Command_p draw_command = globals.draw_command_buffer[draw_command_index];
+            
+            draw_command.v.draw_id        = draw_index;
+            draw_command.v.meshlet_count  = lod.meshlet_count;
+            draw_command.v.meshlet_offset = lod.meshlet_offset;
+            
+            draw_command.v.group = uvec3(task_group_count, 1, 1);
+        }
     }
     
     if (Late) was_visible_last_frame.v = visible;
