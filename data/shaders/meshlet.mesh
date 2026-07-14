@@ -16,7 +16,7 @@
 
 // @volatile
 #define MaxVertices  64
-#define MaxTriangles 84
+#define MaxTriangles 126
 
 layout(push_constant) uniform Push_Data {
     Draw_Globals globals;

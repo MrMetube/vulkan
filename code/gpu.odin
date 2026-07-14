@@ -1332,7 +1332,7 @@ gpu_begin_command_recording :: proc (gpu: ^Gpu, command_pool: vk.CommandPool, _:
 Semaphore_Submit :: struct {
     sema:   vk.Semaphore,
     stages: vk.PipelineStageFlags2,
-    signal_value: Maybe(u64)
+    signal_value: Maybe(u64),
 }
 
 gpu_submit :: proc (queue: vk.Queue, semaphores: [] Semaphore_Submit, cmds: ..vk.CommandBuffer) {

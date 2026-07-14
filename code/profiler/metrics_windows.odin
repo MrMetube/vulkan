@@ -5,7 +5,7 @@ import win "core:sys/windows"
 
 foreign import psapi "system:psapi.lib"
 foreign psapi {
-    GetProcessMemoryInfo :: proc "system" (Process: win.HANDLE, ppsmemCounters: ^PROCESS_MEMORY_COUNTERS, cb: win.DWORD, ) ->  win.BOOL ---
+    GetProcessMemoryInfo :: proc "system" (Process: win.HANDLE, ppsmemCounters: ^PROCESS_MEMORY_COUNTERS, cb: win.DWORD) ->  win.BOOL ---
 }
 
 PROCESS_MEMORY_COUNTERS ::  struct {

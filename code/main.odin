@@ -58,10 +58,6 @@ Depth_Mip :: struct {
 
 ////////////////////////////////////////////////
 
-// :Shader: meshlet.mesh
-MaxVertices  :: 64
-MaxTriangles :: 84
-
 Cull_Globals :: struct #all_or_none { // :Shader:
     using data: Cull_Data,
     
@@ -591,7 +587,7 @@ main :: proc () {
         if !pipeline_is_valid(ui_pipeline) || test_and_reset_shaders_was_modified(ui_vert_shader, ui_frag_shader) {
             raster_description := DefaultRasterDesc
             raster_description.color_targets = {
-                { format = stuff.color_buffer.format, write_mask = DefaulColorMask }
+                { format = stuff.color_buffer.format, write_mask = DefaulColorMask },
             }
             raster_description.blendstate = &Blend_Desc { **DefaultBlendDesc }
             raster_description.blendstate.src_color_factor = .SRC_ALPHA
@@ -1004,7 +1000,7 @@ main :: proc () {
             ui_globals.cpu^ = {
                 draw_buffer = ui_draws.gpu.p,
                 screen_size = cast(v2) gpu.swapchain_size,
-                mouse_p = mouse_p
+                mouse_p = mouse_p,
             }
             
             ui_draw_command := bump_allocate_type(bump, UI_Draw_Command)

@@ -103,17 +103,19 @@ load_mesh :: proc (geometry: ^Geometry, filepath: string, _allocator: Allocator)
 }
 
 append_meshlets :: proc (geometry: ^Geometry, mesh_vertices: [] Vertex, mesh_indices: [] u32) -> (count: u32) {
-    max_vertices  :: MaxVertices
-    max_triangles :: MaxTriangles 
-    cone_weight :: 0.5 // 0 when not culling, otherwise 0..1 
+    // :Shader: meshlet.mesh
+    MaxVertices  :: 64
+    MaxTriangles :: 126
     
-    max_meshlet_count := meshoptimizer.buildMeshletsBound(auto_cast len(mesh_indices), max_vertices, max_triangles)
+    cone_weight :: 0.25 // 0 when not culling, otherwise 0..1 
+    
+    max_meshlet_count := meshoptimizer.buildMeshletsBound(auto_cast len(mesh_indices), MaxVertices, MaxTriangles)
     
     meshlets := make([] meshoptimizer.Meshlet, max_meshlet_count, context.temp_allocator)
     vertices := make([] u32,                   len(mesh_indices), context.temp_allocator)
     indices  := make([] u8,                    len(mesh_indices), context.temp_allocator)
     
-    meshlet_count := cast(u32) meshoptimizer.buildMeshlets(&meshlets[0], &vertices[0], &indices[0], &mesh_indices[0], len(mesh_indices), cast(^f32) &mesh_vertices[0], len(mesh_vertices), size_of(mesh_vertices[0]), max_vertices, max_triangles, cone_weight)
+    meshlet_count := cast(u32) meshoptimizer.buildMeshlets(&meshlets[0], &vertices[0], &indices[0], &mesh_indices[0], len(mesh_indices), cast(^f32) &mesh_vertices[0], len(mesh_vertices), size_of(mesh_vertices[0]), MaxVertices, MaxTriangles, cone_weight)
     
     for source in meshlets[:meshlet_count] {
         dest := append_into(&geometry.meshlets)
