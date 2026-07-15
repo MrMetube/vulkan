@@ -266,14 +266,14 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
                     pApplicationName = "Vulkan Renderer",
                     apiVersion = vk.API_VERSION_1_4,
                 },
-                enabledExtensionCount   = auto_cast len(instance_extension_names),
+                enabledExtensionCount   = cast(u32) len(instance_extension_names),
                 ppEnabledExtensionNames = &instance_extension_names[0],
             }
             
             _ :: runtime
-            when Validation {
+            if Validation {
                 validation_layers := [] cstring { "VK_LAYER_KHRONOS_validation" }
-                instance_create_info.enabledLayerCount   = auto_cast len(validation_layers)
+                instance_create_info.enabledLayerCount   = cast(u32) len(validation_layers)
                 instance_create_info.ppEnabledLayerNames = raw_data(validation_layers)
                 
                 vulkan_debug_utils_callback :: proc "system" (messageSeverity: vk.DebugUtilsMessageSeverityFlagsEXT, messageTypes: vk.DebugUtilsMessageTypeFlagsEXT, pCallbackData: ^vk.DebugUtilsMessengerCallbackDataEXT, pUserData: rawptr) -> b32 {
@@ -284,11 +284,9 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
                     return false
                 }
                 
-                enabled := [?] vk.ValidationFeatureEnableEXT {
-                    .BEST_PRACTICES,
-                    .SYNCHRONIZATION_VALIDATION,
-                    // DEBUG_PRINTF // @todo enable this, if needed
-                }
+                // DEBUG_PRINTF // @todo enable this, if needed
+                enabled: [dynamic; 2] vk.ValidationFeatureEnableEXT
+                if Sync_Validation { append(&enabled, vk.ValidationFeatureEnableEXT.SYNCHRONIZATION_VALIDATION ) }
                 
                 instance_create_info.pNext = &vk.DebugUtilsMessengerCreateInfoEXT {
                     sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
@@ -298,8 +296,8 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
                     
                     pNext = &vk.ValidationFeaturesEXT {
                         sType = .VALIDATION_FEATURES_EXT,
-                        enabledValidationFeatureCount = len(enabled),
-                        pEnabledValidationFeatures    = &enabled[0],
+                        enabledValidationFeatureCount = cast(u32) len(enabled),
+                        pEnabledValidationFeatures    = raw_data(&enabled),
                     },
                 }
             }
@@ -354,7 +352,7 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
                     
                     for props, index in queue_family_properties {
                         if .GRAPHICS in props.queueFlags {
-                            family_index_with_graphics = auto_cast index
+                            family_index_with_graphics = cast(u32) index
                             break
                         }
                     }
@@ -536,7 +534,7 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
                 pQueuePriorities = raw_data([]f32{ 1, 0 }),
             },
             
-            enabledExtensionCount   = auto_cast len(device_extensions),
+            enabledExtensionCount   = cast(u32) len(device_extensions),
             ppEnabledExtensionNames = raw_data(device_extensions),
         }
         
@@ -824,7 +822,7 @@ gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Me
     alloc: GpuAllocation
     create_info := vk.BufferCreateInfo {
         sType = .BUFFER_CREATE_INFO,
-        size  = auto_cast size,
+        size  = cast(vk.DeviceSize) size,
         usage = usage,
     }
     
@@ -838,7 +836,7 @@ gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Me
     
     check(vk.BindBufferMemory(gpu.device, alloc.buffer, alloc.memory, 0))
     
-    vk.MapMemory(gpu.device, alloc.memory, 0, auto_cast size, {}, &cpu_result)
+    vk.MapMemory(gpu.device, alloc.memory, 0, cast(vk.DeviceSize) size, {}, &cpu_result)
     
     adress_create_info := vk.BufferDeviceAddressInfo {
         sType = .BUFFER_DEVICE_ADDRESS_INFO,
@@ -1207,13 +1205,13 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
             
             pNext = &pipeline_info.flags2,
             
-            colorAttachmentCount    = auto_cast len(color_formats),
+            colorAttachmentCount    = cast(u32) len(color_formats),
             pColorAttachmentFormats = raw_data(&color_formats),
             depthAttachmentFormat   = info.depth_format,
             stencilAttachmentFormat = info.stencil_format,
         },
         
-        stageCount = auto_cast len(pipeline_info.shader_stages),
+        stageCount = cast(u32) len(pipeline_info.shader_stages),
         pStages    = &pipeline_info.shader_stages[0],
         
         pInputAssemblyState = &vk.PipelineInputAssemblyStateCreateInfo {
@@ -1264,7 +1262,7 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
         
         pColorBlendState = &vk.PipelineColorBlendStateCreateInfo {
             sType = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-            attachmentCount = auto_cast len(color_attachments),
+            attachmentCount = cast(u32) len(color_attachments),
             pAttachments    = raw_data(&color_attachments),
             // @todo these field from the optional blend desc? can these be dynamic state?
             // logicOpEnable:   b32,     -> ext dynamic state
@@ -1274,7 +1272,7 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
         
         pDynamicState = &vk.PipelineDynamicStateCreateInfo {
             sType = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-            dynamicStateCount = auto_cast len(dynamic_states),
+            dynamicStateCount = cast(u32) len(dynamic_states),
             pDynamicStates    = raw_data(dynamic_states),
         },
     }
@@ -1601,8 +1599,8 @@ gpu_begin_rendering :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, desc: Render_Pass
         renderArea = { extent = { **render_size } },
         layerCount = 1,
         
-        colorAttachmentCount = auto_cast len(color_attachments),
-        pColorAttachments = raw_data(&color_attachments),
+        colorAttachmentCount = cast(u32) len(color_attachments),
+        pColorAttachments    = raw_data(&color_attachments),
     }
     
     if desc.depth_target.texture.image != 0 {
@@ -1707,8 +1705,8 @@ create_descriptor_heap :: proc (gpu: ^Gpu) -> Descriptor_Heap {
     sampler_total_size := sampler_reserved + sampler_size * sampler_count
     
     result: Descriptor_Heap
-    result.resources = gpu_allocate_slice(gpu, [] u8, auto_cast resource_total_size, alignment = cast(umm) resource_alignment, usage = { .DESCRIPTOR_HEAP_EXT } )
-    result.samplers  = gpu_allocate_slice(gpu, [] u8, auto_cast sampler_total_size,  alignment = cast(umm) sampler_alignment,  usage = { .DESCRIPTOR_HEAP_EXT } )
+    result.resources = gpu_allocate_slice(gpu, [] u8, resource_total_size, alignment = cast(umm) resource_alignment, usage = { .DESCRIPTOR_HEAP_EXT } )
+    result.samplers  = gpu_allocate_slice(gpu, [] u8, sampler_total_size,  alignment = cast(umm) sampler_alignment,  usage = { .DESCRIPTOR_HEAP_EXT } )
     
     // @correctness we should respect the alignment, which may increase the total size
     result.resource_reserved_offset = resource_count * resource_size

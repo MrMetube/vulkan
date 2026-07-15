@@ -17,6 +17,7 @@ import vk  "../lib/vulkan"
 Optimized :: ODIN_OPTIMIZATION_MODE == .Speed
 
 Validation :: false when Optimized else true
+Sync_Validation :: false && Validation
 
 ////////////////////////////////////////////////
 
