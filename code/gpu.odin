@@ -234,7 +234,7 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
         vulkan_path: string
         if ODIN_OS == .Windows {
             vulkan_path = "vulkan-1.dll"
-        } else { unimplemented() } // Linux: "libvulkan.so.1" @slop
+        } else { unimplemented() }
         
         vulkan, did_load := dynlib.load_library(vulkan_path, allocator = context.temp_allocator)
         if !did_load {
@@ -370,6 +370,8 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
                 vk.GetPhysicalDeviceProperties2(device, &properties)
                 if properties.properties.apiVersion < vk.API_VERSION_1_4 { continue }
                 
+                if properties.properties.deviceType == .CPU { continue }
+                
                 if preferred == nil && properties.properties.deviceType == .DISCRETE_GPU {
                     preferred = device
                 }
@@ -497,7 +499,7 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
                 multiDrawIndirect = true, // supported on NVidia since the GTX 1080
                 samplerAnisotropy = true, // required since 1.4
                 shaderInt16       = true, // required since 1.4
-                shaderInt64       = true, // @todo is this still used by any shader?
+                shaderInt64       = true,
                 
                 pipelineStatisticsQuery = true,
             },
