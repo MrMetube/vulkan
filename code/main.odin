@@ -306,15 +306,15 @@ main :: proc () {
     ////////////////////////////////////////////////
     // @speed most of these buffer could be moved to GPU local memory
     cpu_begin_profile_zone("Allocate buffers")
-    memory := Memory_Kind.Default
     
-    // All the geometry data can just live in the gpu
-    vertex_buffer          := gpu_allocate(gpu, [] Vertex,       256 * Megabyte / size_of(Vertex),       16, memory)
-    meshlet_buffer         := gpu_allocate(gpu, [] Meshlet,      256 * Megabyte / size_of(Meshlet),      16, memory)
-    meshlet_data_buffer    := gpu_allocate(gpu, [] u32,          256 * Megabyte / size_of(u32),          16, memory)
-    mesh_buffer            := gpu_allocate(gpu, [] Mesh,         256 * Megabyte / size_of(Mesh),         16, memory)
-    draw_buffer            := gpu_allocate(gpu, [] Draw,         256 * Megabyte / size_of(Draw),         16, memory)
-    draw_commands          := gpu_allocate(gpu, [] Draw_Command, 256 * Megabyte / size_of(Draw_Command), 16, memory)
+    // geometry data is just written and never read by the cpu
+    vertex_buffer       := gpu_allocate(gpu, [] Vertex,  256 * Megabyte / size_of(Vertex),  16, Memory_Kind.Default)
+    meshlet_buffer      := gpu_allocate(gpu, [] Meshlet, 256 * Megabyte / size_of(Meshlet), 16, Memory_Kind.Default)
+    meshlet_data_buffer := gpu_allocate(gpu, [] u32,     256 * Megabyte / size_of(u32),     16, Memory_Kind.Default)
+    mesh_buffer         := gpu_allocate(gpu, [] Mesh,    256 * Megabyte / size_of(Mesh),    16, Memory_Kind.Default)
+    
+    // This is written by the cpu every frame in the worst case.
+    draw_buffer := gpu_allocate(gpu, [] Draw, 256 * Megabyte / size_of(Draw), 16, Memory_Kind.Default)
     
     geometry: Geometry
     max_draw_visibility_count: u32
@@ -338,11 +338,13 @@ main :: proc () {
         copy(meshlet_data_buffer.cpu, geometry.meshlet_data[:])
         copy(mesh_buffer.cpu,         geometry.meshes[:])
         
+        // @todo delete geometry buffers from cpu after the upload (maybe keep handles/stats). Currently generate_draws just wants to number of meshes for its randomness.
         _, max_draw_visibility_count = generate_draws(gpu, draw_buffer, 0, textures[:], geometry)
     }
     
-    draw_visibility_buffer    := gpu_allocate(gpu, [] u32, 256 * Megabyte / size_of(u32),         16, memory, { .STORAGE_BUFFER, .TRANSFER_DST })
-    meshlet_visibility_buffer := gpu_allocate(gpu, [] u32, (max_draw_visibility_count + 31) / 32, 16, memory, { .STORAGE_BUFFER, .TRANSFER_DST })
+    draw_commands             := gpu_allocate(gpu, [] Draw_Command, 256 * Megabyte / size_of(Draw_Command), 16, Memory_Kind.GPU) 
+    draw_visibility_buffer    := gpu_allocate(gpu, [] u32,          256 * Megabyte / size_of(u32),          16, Memory_Kind.GPU, { .STORAGE_BUFFER, .TRANSFER_DST })
+    meshlet_visibility_buffer := gpu_allocate(gpu, [] u32,          (max_draw_visibility_count + 31) / 32,  16, Memory_Kind.GPU, { .STORAGE_BUFFER, .TRANSFER_DST })
     dvb_and_mvb_cleared := false
     
     cpu_end_profile_zone()
@@ -652,21 +654,16 @@ main :: proc () {
             }
         }
         
-        draws: [] Draw
-        @(static) last_draw_count: int
-        // @hack
-        @(static) last_object_rotation: v3 = -1
-        @(static) last_cam_pos: v3 = -1
-        if last_cam_pos != cam_pos || last_object_rotation != object_rotation {
-            last_cam_pos = cam_pos
-            last_object_rotation = object_rotation
-            
-            draws, _ = generate_draws(gpu, draw_buffer, object_rotation, textures[:], geometry)
-            
-            last_draw_count = len(draws)
-        } else {
-            draws = draw_buffer.cpu[:last_draw_count]
-        }
+        
+        //
+        //
+        // @hack @race_condition the draw commands should obviously not be written to by the cpu, whilst the gpu is still 
+        // processing the previous draw commands. We need atleast MaxFramesInFlight different draw_buffers to prevent this 
+        // race condition, if the draws themselves change every frame, which is likely if the objects themselves are dynamic.
+        //
+        //
+        
+        draws, _ := generate_draws(gpu, draw_buffer, object_rotation, textures[:], geometry)
         
         ////////////////////////////////////////////////
         
@@ -1316,7 +1313,7 @@ end_meshlet_rendering :: proc (cmd: vk.CommandBuffer) {
 }
 
 culling_begin :: proc (cmd: vk.CommandBuffer, early: bool) {
-    label: cstring = early ? "early culling" : "late_culling"
+    label: cstring = early ? "early culling" : "late culling"
     before_fill := vk.PipelineStageFlags2 { .DRAW_INDIRECT }
     if !early {
         before_fill += { .PRE_RASTERIZATION_SHADERS }

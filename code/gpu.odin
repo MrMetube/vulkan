@@ -811,10 +811,11 @@ gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Me
     
     */
     
+    // @todo rethink these categories and make a better heuristic for the user, when to use which kind, without needing the test every single one.
     flags := vk.MemoryPropertyFlags {}
     switch memory {
-    case .Default:  flags = { .HOST_VISIBLE, .HOST_COHERENT/* , .DEVICE_LOCAL @todo decide if this is needed here */ }
-    case .GPU:      flags = { .HOST_VISIBLE, .DEVICE_LOCAL }
+    case .Default:  flags = { .HOST_VISIBLE, .HOST_COHERENT, .DEVICE_LOCAL }
+    case .GPU:      flags = { .DEVICE_LOCAL }
     case .Readback: flags = { .HOST_VISIBLE, .HOST_COHERENT, .HOST_CACHED }
     }
     
@@ -835,7 +836,9 @@ gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Me
     
     check(vk.BindBufferMemory(gpu.device, alloc.buffer, alloc.memory, 0))
     
-    vk.MapMemory(gpu.device, alloc.memory, 0, cast(vk.DeviceSize) size, {}, &cpu_result)
+    if .HOST_VISIBLE in flags {
+        vk.MapMemory(gpu.device, alloc.memory, 0, cast(vk.DeviceSize) size, {}, &cpu_result)
+    }
     
     adress_create_info := vk.BufferDeviceAddressInfo {
         sType = .BUFFER_DEVICE_ADDRESS_INFO,
