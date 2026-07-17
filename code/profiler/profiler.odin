@@ -100,6 +100,8 @@ record_event_with_data :: proc (table: ^Event_Table_With_Data($Data), timestamp:
 ////////////////////////////////////////////////
 
 swap_active_array_and_get_events :: proc (table: ^Event_Table) -> [] Event {
+    if table == nil { return nil }
+    
     array_index := table.current_array_index == 0 ? cast(u32) 1 : 0
     state  := atomic_exchange(&table.state, { event_index = 0, array_index = array_index })
     events := table.events[state.array_index][:state.event_index]
@@ -107,6 +109,8 @@ swap_active_array_and_get_events :: proc (table: ^Event_Table) -> [] Event {
 }
 
 swap_active_array_and_get_events_with_data :: proc (table: ^Event_Table_With_Data($Data)) -> ([] Event, [] Data) {
+    if table == nil { return nil, nil }
+    
     array_index := table.current_array_index == 0 ? cast(u32) 1 : 0
     state  := atomic_exchange(&table.state, { event_index = 0, array_index = array_index })
     events := table.events[state.array_index][:state.event_index]
@@ -115,6 +119,8 @@ swap_active_array_and_get_events_with_data :: proc (table: ^Event_Table_With_Dat
 }
 
 collate_events :: proc (events: [] Event, zones: ^[dynamic] Zone, user_events: ^[dynamic] Stored_User_Event) {
+    if events == nil { return }
+    
     clear(zones)
     clear(user_events)
     

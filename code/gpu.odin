@@ -653,7 +653,6 @@ check :: proc (result: vk.Result, loc := #caller_location) {
 }
 
 gpu_recreate_swapchain_if_needed :: proc (gpu: ^Gpu, vsync: bool, force_recreation := false) -> (can_render: bool) {
-    cpu_procedure_profile_zone()
     if !force_recreation && gpu.swapchain_state != .Dirty && gpu.swapchain_state != .Window_Is_Minimized {
         return true
     }

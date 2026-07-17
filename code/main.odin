@@ -309,11 +309,12 @@ main :: proc () {
     memory := Memory_Kind.Default
     
     // All the geometry data can just live in the gpu
-    vertex_buffer          := gpu_allocate(gpu, [] Vertex,  256 * Megabyte / size_of(Vertex),  16, memory)
-    meshlet_buffer         := gpu_allocate(gpu, [] Meshlet, 256 * Megabyte / size_of(Meshlet), 16, memory)
-    meshlet_data_buffer    := gpu_allocate(gpu, [] u32,     256 * Megabyte / size_of(u32),     16, memory)
-    mesh_buffer            := gpu_allocate(gpu, [] Mesh,    256 * Megabyte / size_of(Mesh),    16, memory)
-    draw_buffer            := gpu_allocate(gpu, [] Draw,    256 * Megabyte / size_of(Draw),    16, memory)
+    vertex_buffer          := gpu_allocate(gpu, [] Vertex,       256 * Megabyte / size_of(Vertex),       16, memory)
+    meshlet_buffer         := gpu_allocate(gpu, [] Meshlet,      256 * Megabyte / size_of(Meshlet),      16, memory)
+    meshlet_data_buffer    := gpu_allocate(gpu, [] u32,          256 * Megabyte / size_of(u32),          16, memory)
+    mesh_buffer            := gpu_allocate(gpu, [] Mesh,         256 * Megabyte / size_of(Mesh),         16, memory)
+    draw_buffer            := gpu_allocate(gpu, [] Draw,         256 * Megabyte / size_of(Draw),         16, memory)
+    draw_commands          := gpu_allocate(gpu, [] Draw_Command, 256 * Megabyte / size_of(Draw_Command), 16, memory)
     
     geometry: Geometry
     max_draw_visibility_count: u32
@@ -701,9 +702,6 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        // @todo preallocate on init
-        draw_commands := bump_allocate(bump, [] Draw_Command, auto_cast len(draws))
-        
         shader_culling_flags: u32 
         if debug.culling_enabled   { shader_culling_flags |= DebugFlag_FrustumCulling   }
         if debug.lod_enabled       { shader_culling_flags |= DebugFlag_LevelOfDetail    }
@@ -764,7 +762,10 @@ main :: proc () {
         
         cpu_begin_profile_zone("Record command buffer")
         
+        cpu_begin_profile_zone("reset command pool")
         check(vk.ResetCommandPool(gpu.device, gpu.command_pools[frame_index], {}))
+        cpu_end_profile_zone()
+        
         // @api expecting the user to pass the frame index is a source for mistakes
         cmd := gpu_begin_command_recording(gpu, gpu.command_pools[frame_index], gpu.general_queue)
         
@@ -789,9 +790,11 @@ main :: proc () {
         gpu_profile_zone_end()
         
         ////////////////////////////////////////////////
-        // early cull - frustum cull & fill objects that *were* visible last frame
+        // early pass - frustum cull & fill objects that *were* visible last frame
         
         {
+            cpu_scoped_profile_zone("record early pass")
+            
             draw_group_count := bump_allocate(bump, uv3)
             
             cull_data := bump_allocate(bump, Cull_Data)
@@ -837,6 +840,8 @@ main :: proc () {
         // depth pyramid generation
         
         {
+            cpu_scoped_profile_zone("record depth pyramid")
+            
             gpu_profile_zone_begin("depth pyramid building")
             gpu_labeled_region_begin(cmd, "depth pyramid building", {0.4, 0.8, 0, 1.0})
             
@@ -872,9 +877,11 @@ main :: proc () {
         }
         
         ////////////////////////////////////////////////
-        // late cull - frustum & occlusion cull & fill objects that were *not* visible last frame
+        // late pass - frustum & occlusion cull & fill objects that were *not* visible last frame
         
         {
+            cpu_scoped_profile_zone("record late pass")
+            
             draw_group_count := bump_allocate(bump, uv3)
             
             cull_data := bump_allocate(bump, Cull_Data)
@@ -989,36 +996,40 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        gpu_profile_zone_begin("copy to swapchain")
+        {
+            cpu_scoped_profile_zone("record copy to swapchain")
             
-            source_image    := &stuff.color_buffer
-            swapchain_image := &gpu.swapchain_images[gpu.image_index]
-            
-            if debug.display_pyramid {
-                source_image = &stuff.depth_pyramid
-            }
-            
-            gpu_barrier(cmd, { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }, { .ALL_TRANSFER })
-            
-            if !debug.display_pyramid {
-                vk.CmdCopyImage(cmd, source_image.image, .GENERAL, swapchain_image.image, .GENERAL, 1, &vk.ImageCopy {
-                    srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
-                    dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
-                    extent         = { **swapchain_image.size },
-                })
-            } else {
-                mip_size  := cast(iv2) stuff.depth_pyramid_mips[debug.display_pyramid_mip_level].size
-                vk.CmdBlitImage(cmd, source_image.image, .GENERAL, swapchain_image.image, .GENERAL, 1, &vk.ImageBlit {
-                    srcSubresource = { aspectMask = { .COLOR }, layerCount = 1, mipLevel = cast(u32) debug.display_pyramid_mip_level },
-                    dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
-                    srcOffsets = { {0, 0, 0}, { mip_size.x, mip_size.y, 1 }},
-                    dstOffsets = { {0, 0, 0}, { **(cast(iv3) swapchain_image.size) }},
-                }, .NEAREST)
-            }
-            
-            gpu_image_barriers(cmd, { .BY_REGION }, create_image_barrier(swapchain_image, { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .GENERAL, {}, {}, .PRESENT_SRC_KHR))
-            
-        gpu_profile_zone_end()
+            gpu_profile_zone_begin("copy to swapchain")
+                
+                source_image    := &stuff.color_buffer
+                swapchain_image := &gpu.swapchain_images[gpu.image_index]
+                
+                if debug.display_pyramid {
+                    source_image = &stuff.depth_pyramid
+                }
+                
+                gpu_barrier(cmd, { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }, { .ALL_TRANSFER })
+                
+                if !debug.display_pyramid {
+                    vk.CmdCopyImage(cmd, source_image.image, .GENERAL, swapchain_image.image, .GENERAL, 1, &vk.ImageCopy {
+                        srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
+                        dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
+                        extent         = { **swapchain_image.size },
+                    })
+                } else {
+                    mip_size  := cast(iv2) stuff.depth_pyramid_mips[debug.display_pyramid_mip_level].size
+                    vk.CmdBlitImage(cmd, source_image.image, .GENERAL, swapchain_image.image, .GENERAL, 1, &vk.ImageBlit {
+                        srcSubresource = { aspectMask = { .COLOR }, layerCount = 1, mipLevel = cast(u32) debug.display_pyramid_mip_level },
+                        dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
+                        srcOffsets = { {0, 0, 0}, { mip_size.x, mip_size.y, 1 }},
+                        dstOffsets = { {0, 0, 0}, { **(cast(iv3) swapchain_image.size) }},
+                    }, .NEAREST)
+                }
+                
+                gpu_image_barriers(cmd, { .BY_REGION }, create_image_barrier(swapchain_image, { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .GENERAL, {}, {}, .PRESENT_SRC_KHR))
+                
+            gpu_profile_zone_end()
+        }
         
         ////////////////////////////////////////////////
         
