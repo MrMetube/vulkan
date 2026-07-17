@@ -16,7 +16,7 @@ import vk  "../lib/vulkan"
 
 Optimized :: ODIN_OPTIMIZATION_MODE == .Speed
 
-Validation :: false when Optimized else true
+Validation      :: false when Optimized else true
 Sync_Validation :: false && Validation
 
 ////////////////////////////////////////////////
@@ -257,6 +257,51 @@ main :: proc () {
     cpu_end_profile_zone()
     
     ////////////////////////////////////////////////
+    
+    textures: [3] Image
+    
+    descriptor_heap := create_descriptor_heap(gpu)
+    
+    {
+        cpu_scoped_profile_zone("Texture Upload")
+        
+        upload_bump := bump_allocator_make_temporary(gpu, 256 * Megabyte, usage = { .TRANSFER_SRC })
+        defer bump_allocator_delete(gpu, &upload_bump)
+        
+        cmd := gpu_begin_command_recording(gpu, gpu.transfer_command_pool, gpu.transfer_queue)
+        upload_semaphore := gpu_create_timeline_semaphore(gpu, 0)
+        defer gpu_destroy_semaphore(gpu, upload_semaphore)
+        
+        for &texture, index in textures {
+            filename := fmt.tprintf("tutorial/suzanne%v.ktx", index)
+            
+            loaded_texture := load_ktx_texture(filename, context.temp_allocator)
+            
+            description := default_texture_desc()
+            description.size.xy = { loaded_texture.width, loaded_texture.height }
+            description.format  = auto_cast loaded_texture.format
+            description.usage   = { .TRANSFER_DST, .SAMPLED }
+            
+            texture = gpu_allocate_texture(gpu, description)
+            
+            // @waste we should have loaded all data into here if possible
+            cpu_data, gpu_data := bump_allocate(&upload_bump, cast(u32) len(loaded_texture.data), alignment = 32)
+            copy(cpu_data, loaded_texture.data)
+            
+            gpu_image_barriers(cmd, {},
+                create_image_barrier_from_undefined(&texture, { .ALL_TRANSFER }, { .MEMORY_READ, .MEMORY_WRITE }, .GENERAL),
+            )
+            
+            gpu_copy_to_texture(cmd, texture, gpu_data)
+        }
+            
+        gpu_barrier(cmd, { .ALL_TRANSFER }, { .ALL_GRAPHICS })
+        
+        gpu_submit(gpu.transfer_queue, { { upload_semaphore, { .ALL_COMMANDS }, 1} }, cmd)
+        gpu_wait_semaphore(gpu, upload_semaphore, 1)
+     }
+    
+    ////////////////////////////////////////////////
     // @speed most of these buffer could be moved to GPU local memory
     cpu_begin_profile_zone("Allocate buffers")
     memory := Memory_Kind.Default
@@ -317,52 +362,6 @@ main :: proc () {
     ui_frag_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/ui.frag")
     
     cpu_end_profile_zone()
-    
-    ////////////////////////////////////////////////
-    
-    texture_count :: 3
-    textures: [texture_count] Image
-    
-    descriptor_heap := create_descriptor_heap(gpu)
-    
-    {
-        cpu_scoped_profile_zone("Texture Upload")
-        
-        upload_bump := bump_allocator_make_temporary(gpu, 256 * Megabyte, usage = { .TRANSFER_SRC })
-        defer bump_allocator_delete(gpu, &upload_bump)
-        
-        cmd := gpu_begin_command_recording(gpu, gpu.transfer_command_pool, gpu.transfer_queue)
-        upload_semaphore := gpu_create_timeline_semaphore(gpu, 0)
-        defer gpu_destroy_semaphore(gpu, upload_semaphore)
-        
-        for &texture, index in textures {
-            filename := fmt.tprintf("tutorial/suzanne%v.ktx", index)
-            
-            loaded_texture := load_ktx_texture(filename, context.temp_allocator)
-            
-            description := default_texture_desc()
-            description.size.xy = { loaded_texture.width, loaded_texture.height }
-            description.format  = auto_cast loaded_texture.format
-            description.usage   = { .TRANSFER_DST, .SAMPLED }
-            
-            texture = gpu_allocate_texture(gpu, description)
-            
-            // @waste we should have loaded all data into here if possible
-            cpu_data, gpu_data := bump_allocate(&upload_bump, cast(u32) len(loaded_texture.data), alignment = 32)
-            copy(cpu_data, loaded_texture.data)
-            
-            gpu_image_barriers(cmd, {},
-                create_image_barrier_from_undefined(&texture, { .ALL_TRANSFER }, { .MEMORY_READ, .MEMORY_WRITE }, .GENERAL),
-            )
-            
-            gpu_copy_to_texture(cmd, texture, gpu_data)
-        }
-            
-        gpu_barrier(cmd, { .ALL_TRANSFER }, { .ALL_GRAPHICS })
-        
-        gpu_submit(gpu.transfer_queue, { { upload_semaphore, { .ALL_COMMANDS }, 1} }, cmd)
-        gpu_wait_semaphore(gpu, upload_semaphore, 1)
-     }
     
     ////////////////////////////////////////////////
     
@@ -673,7 +672,7 @@ main :: proc () {
                     rotation        := la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
                     draw.orientation = rotation * global_rotation
                     
-                    draw.texture_index = textures[random_between_u32(&entropy, 0, texture_count-1)].sampled_index
+                    draw.texture_index = textures[random_between_u32(&entropy, 0, cast(u32) len(textures)-1)].sampled_index
                     
                     mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
                     

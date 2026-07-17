@@ -969,10 +969,10 @@ select_memory_type_and_allocate :: proc (gpu: ^Gpu, requirements: vk.MemoryRequi
 }
 
 get_image_aspect_mask :: proc (format: vk.Format) -> vk.ImageAspectFlags {
-    // :Stencil: add .STENCIL to the aspect mask
     result := vk.ImageAspectFlags { .COLOR }
     #partial switch format {
-    case .D32_SFLOAT, .D32_SFLOAT_S8_UINT, .D16_UNORM, .D16_UNORM_S8_UINT, .D24_UNORM_S8_UINT: result = { .DEPTH }
+    case .D32_SFLOAT, .D16_UNORM:                                     result = { .DEPTH }
+    case .D32_SFLOAT_S8_UINT, .D16_UNORM_S8_UINT, .D24_UNORM_S8_UINT: result = { .DEPTH, .STENCIL }
     }
     return result
 }
@@ -1486,14 +1486,13 @@ gpu_copy_from_texture :: proc (cmd: vk.CommandBuffer, destination: vk.DeviceAddr
 }
 
 gpu_fill_memory :: proc { gpu_fill_memory_address, gpu_fill_memory_slice }
-gpu_fill_memory_address :: proc (cmd: vk.CommandBuffer, destination: Gpu_Pointer($T), value: u32, size := size_of(T), offset: vk.DeviceSize = 0) {
+gpu_fill_memory_address :: proc (cmd: vk.CommandBuffer, destination: Gpu_Pointer($T), value: u32, size: vk.DeviceSize = size_of(T), offset: vk.DeviceSize = 0) {
     buffer, buffer_offset := gpu_reflect_get_buffer(destination.p)
-    size := cast(vk.DeviceSize) size
     vk.CmdFillBuffer(cmd, buffer, buffer_offset + offset, size, value)
 }
-gpu_fill_memory_slice   :: proc (cmd: vk.CommandBuffer, destination: Gpu_Slice($T), count: u32, value: T) {
+gpu_fill_memory_slice   :: proc (cmd: vk.CommandBuffer, destination: Gpu_Slice($T), #any_int count: vk.DeviceSize, value: u32) {
     buffer, offset := gpu_reflect_get_buffer(destination.gpu.p)
-    size := size_of(T) * cast(vk.DeviceSize) count
+    size := size_of(T) * count
     vk.CmdFillBuffer(cmd, buffer, offset, size, value)
 }
 

@@ -90,6 +90,7 @@ generate_shader_api :: proc (output_file: string) {
         case u16: type_name = "uint16_t"
         case i16: type_name = "int16_t"
         
+        case b8:  type_name = "uint8_t"
         case uv3: type_name = "uvec3"
         
         case v2: type_name = "vec2"

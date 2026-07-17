@@ -9,13 +9,16 @@
 
 layout(local_size_x = TaskWidth, local_size_y = 1, local_size_z = 1) in;
 
-layout(constant_id = 0) const bool Late = false; // @todo unused for now
+layout(constant_id = 0) const bool Late = false;
 
 layout(push_constant) uniform _ { Draw_Globals data; };
 
-taskPayloadSharedEXT Task_Result task_result;
+layout(descriptor_heap) uniform texture2D Textures[];
+layout(descriptor_heap) uniform sampler   Samplers[];
 
 ////////////////////////////////////////////////
+
+taskPayloadSharedEXT Task_Result task_result;
 
 shared int shared_count;
 

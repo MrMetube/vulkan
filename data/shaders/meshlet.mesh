@@ -22,7 +22,7 @@ layout(location = 1) smooth out Mesh_Result mesh_result_smooth[];
 
 ////////////////////////////////////////////////
 
-#define Cull_Backfacing_and_Small_Triangles 1 // @todo remove this define.
+#define Cull_Backfacing_and_Small_Triangles 1
 
 #if Cull_Backfacing_and_Small_Triangles
 shared vec3 vertex_screen[MaxVertices];
@@ -38,8 +38,7 @@ void main() {
     uint group_size     = gl_WorkGroupSize.x;
     uint meshlet_offset = task_result.meshlet_offset;
     
-    Draw_p draw = globals.draw_buffer[task_result.draw_index];
-    
+    Draw_p draw       = globals.draw_buffer[task_result.draw_index];
     Meshlet_p meshlet = globals.meshlet_buffer[meshlet_index];
     
     uint vertex_count   = meshlet.v.vertex_count;
