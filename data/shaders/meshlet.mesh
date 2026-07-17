@@ -54,20 +54,27 @@ void main() {
         uint vertex_index = draw.v.vertex_offset + globals.meshlet_data_buffer[vertex_offset + i].v;
         Vertex_p vertex = globals.vertex_buffer[vertex_index];
         
+        mat4 screen_from_view = mat4(
+            globals.data.s00,                0,                   0,  0,
+                           0, globals.data.s11,                   0,  0, // s11 is already inverted, to invert the y-axis
+                           0,                0,                   0, -1,
+                           0,                0, globals.data.near_z,  0  // look down -z
+        );
+        
         vec3 model_p = vertex.v.p;
         vec3 world_p = transform(draw.v.orientation, draw.v.scale, draw.v.p, model_p);
         vec4 view_p = globals.data.view_from_world * vec4(world_p, 1.0);
-        vec4 screen_p = globals.data.screen_from_view * view_p;
+        vec4 screen_p = screen_from_view * view_p;
         
         vec3 model_n = vec3(vertex.v.n[0], vertex.v.n[1], vertex.v.n[2]) / 127.5 - 1;
         vec3 world_n = rotate(draw.v.orientation, model_n);
         vec3 view_n  = mat3(globals.data.view_from_world) * world_n;
         Mesh_Result result;
         
-        for (int li = 0; li < 4; li++) {
-            vec4 world_light_p  = vec4(globals.data.light_pos[li].xyz, 1);
+        {
+            vec4 world_light_p  = vec4(globals.data.light_pos, 1);
             vec4 view_light_p   = globals.data.view_from_world * world_light_p;
-            result.light_vec[li] =  view_light_p.xyz - view_p.xyz;
+            result.light_vec    =  view_light_p.xyz - view_p.xyz;
         }
         result.view_vec = -view_p.xyz;
         result.uv     = vertex.v.uv;

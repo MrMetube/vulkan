@@ -28,7 +28,7 @@ struct Task_Result {
 };
 
 struct Mesh_Result {
-    vec3 light_vec[4];
+    vec3 light_vec;
     vec3 normal;
     vec3 view_vec;
     vec2 uv;

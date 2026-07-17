@@ -74,7 +74,7 @@ Cull_Globals :: struct #all_or_none { // :Shader:
 Cull_Data :: struct #all_or_none { // :Shader:
     view_from_world: m4,
     
-    p00, p11, near_z, far_z: f32,
+    s00, s11, near_z, far_z: f32,
     frustum: [4] f32,
     
     pyramid_size: v2,
@@ -100,16 +100,22 @@ Draw_Globals :: struct #all_or_none { // :Shader:
     meshlet_buffer:      vk.DeviceAddress "Meshlet",
     meshlet_data_buffer: vk.DeviceAddress "uint",
     vertex_buffer:       vk.DeviceAddress "Vertex",
+    
+    meshlet_visibility_buffer: vk.DeviceAddress "uint8_t",
+    depth_pyramid_index: Texture_Index,
 }
 
-Draw_Data :: struct { // :Shader:
-    view_from_world:  m4,
-    screen_from_view: m4,
-    light_pos:        [4] v4,
+Draw_Data :: struct #all_or_none { // :Shader:
+    view_from_world:  m4, // @todo alignment requirements
+    light_pos:        v3,
     
     screen_size: v2,
+    flags: u32,
+    
+    s00, s11:      f32,
     near_z, far_z: f32,
-    frustum: [4] f32,
+    pyramid_size:  v2,
+    frustum:       [4] f32,
 }
 
 Depth_Data :: struct { // :Shader:
@@ -147,9 +153,10 @@ Draw :: struct { // :Shader:
     p:           v3,
     scale:       f32,
     
+    texture_index: Texture_Index,
     mesh_index:    u32,
     vertex_offset: u32,
-    texture_index: Texture_Index,
+    meshlet_visibility_offset: u32,
 }
 
 Mesh :: struct { // :Shader:
@@ -172,8 +179,8 @@ Draw_Command :: struct { // :Shader:
     draw_index:  u32,
     meshlet_offset: u32,
     meshlet_count:  u32,
-    late_draw_visibility:      u32,
-    meshlet_visibility_offset: u32,
+    mesh_was_visible_last_frame: b32,
+    meshlet_visibility_offset:   u32,
 }
 
 Meshlet :: struct { // :Shader:
@@ -306,21 +313,15 @@ main :: proc () {
     cpu_begin_profile_zone("Allocate buffers")
     memory := Memory_Kind.Default
     
-    // @todo draws change per frame and could also be placed in the per frame bump allocator, as we just need a gpu address
     // All the geometry data can just live in the gpu
-    vertex_buffer          := gpu_allocate(gpu, [] Vertex,  256 * Megabyte / size_of(Vertex),  memory = memory)
-    meshlet_buffer         := gpu_allocate(gpu, [] Meshlet, 256 * Megabyte / size_of(Meshlet), memory = memory)
-    meshlet_data_buffer    := gpu_allocate(gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = memory)
-    mesh_buffer            := gpu_allocate(gpu, [] Mesh,    256 * Megabyte / size_of(Mesh),    memory = memory)
-    
-    draw_buffer            := gpu_allocate(gpu, [] Draw,    256 * Megabyte / size_of(Draw),    memory = memory)
-    draw_visibility_buffer := gpu_allocate(gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = memory, usage = vk.BufferUsageFlags { .STORAGE_BUFFER, .INDIRECT_BUFFER, .TRANSFER_DST })
-    
-    dvb_cleared := false
-    
-    cpu_end_profile_zone()
+    vertex_buffer          := gpu_allocate(gpu, [] Vertex,  256 * Megabyte / size_of(Vertex),  16, memory)
+    meshlet_buffer         := gpu_allocate(gpu, [] Meshlet, 256 * Megabyte / size_of(Meshlet), 16, memory)
+    meshlet_data_buffer    := gpu_allocate(gpu, [] u32,     256 * Megabyte / size_of(u32),     16, memory)
+    mesh_buffer            := gpu_allocate(gpu, [] Mesh,    256 * Megabyte / size_of(Mesh),    16, memory)
+    draw_buffer            := gpu_allocate(gpu, [] Draw,    256 * Megabyte / size_of(Draw),    16, memory)
     
     geometry: Geometry
+    max_draw_visibility_count: u32
     {
         cpu_scoped_profile_zone("Geometry loading")
         
@@ -340,7 +341,15 @@ main :: proc () {
         copy(meshlet_buffer.cpu,      geometry.meshlets[:])
         copy(meshlet_data_buffer.cpu, geometry.meshlet_data[:])
         copy(mesh_buffer.cpu,         geometry.meshes[:])
+        
+        _, max_draw_visibility_count = generate_draws(gpu, draw_buffer, 0, textures[:], geometry)
     }
+    
+    draw_visibility_buffer    := gpu_allocate(gpu, [] u32, 256 * Megabyte / size_of(u32), 16, memory, { .STORAGE_BUFFER, .TRANSFER_DST })
+    meshlet_visibility_buffer := gpu_allocate(gpu, []  b8, max_draw_visibility_count,     16, memory, { .STORAGE_BUFFER, .TRANSFER_DST })
+    dvb_and_mvb_cleared := false
+    
+    cpu_end_profile_zone()
     
     ////////////////////////////////////////////////
     
@@ -391,20 +400,14 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     Stage :: enum { early, late }
-    cull_pipelines:   [Stage] Pipeline
-    depth_pipeline:   Pipeline
-    meshlet_pipeline: Pipeline
-    ui_pipeline:      Pipeline
+    cull_pipelines:    [Stage] Pipeline
+    depth_pipeline:    Pipeline
+    meshlet_pipelines: [Stage] Pipeline
+    ui_pipeline:       Pipeline
     
     ////////////////////////////////////////////////
     
-    draw_data: Draw_Data
-    
-    for &pos, index in draw_data.light_pos {
-        t := clamp_01_to_range(cast(f32) 0, cast(f32) len(draw_data.light_pos), cast(f32) index)
-        pos.xyz = v3{0, 10, 10}
-        pos.xz += arm(t * Tau)
-    }
+    light_pos := v3{0, 10, 10}
     
     cam_pos := v3{ 0, 0, 0}
     object_rotation: v3
@@ -564,23 +567,26 @@ main :: proc () {
             fmt.printfln("Recreated depth_pipeline.")
         }
         
-        if !pipeline_is_valid(meshlet_pipeline) || test_and_reset_shaders_was_modified(meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader) {
-            raster_description := DefaultRasterDesc
-            raster_description.depth_format = stuff.depth_buffer.format
-            raster_description.color_targets = {
-                { format = stuff.color_buffer.format, write_mask = DefaulColorMask },
+        reloaded_meshlet_shaders := test_and_reset_shaders_was_modified(meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader)
+        for &meshlet_pipeline, stage in meshlet_pipelines {
+            if !pipeline_is_valid(meshlet_pipeline) || reloaded_meshlet_shaders {
+                raster_description := DefaultRasterDesc
+                raster_description.depth_format = stuff.depth_buffer.format
+                raster_description.color_targets = {
+                    { format = stuff.color_buffer.format, write_mask = DefaulColorMask },
+                }
+                raster_description.blendstate = &Blend_Desc{ **DefaultBlendDesc }
+                // :Stencil: 
+                
+                task, mesh, frag := meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader
+                
+                destroy_pipeline(gpu, meshlet_pipeline)
+                immediately := !pipeline_is_valid(meshlet_pipeline)
+                constants := [] Specialization_Constant { /* late = */ { b = stage == .late } }
+                meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(gpu, get_shader(task, immediately), get_shader(mesh, immediately), get_shader(frag, immediately), raster_description, descriptor_heap, constants)
+                fmt.printfln("Recreated %v meshlet_pipeline.", stage)
             }
-            raster_description.blendstate = &Blend_Desc{ **DefaultBlendDesc }
-            // :Stencil: 
-            
-            task, mesh, frag := meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader
-            
-            destroy_pipeline(gpu, meshlet_pipeline)
-            immediately := !pipeline_is_valid(meshlet_pipeline)
-            constants := [] Specialization_Constant { /* late = */ { b = false } }
-            meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(gpu, get_shader(task, immediately), get_shader(mesh, immediately), get_shader(frag, immediately), raster_description, descriptor_heap, constants)
-            fmt.printfln("Recreated meshlet_pipeline.")
-        }
+        }    
         
         if !pipeline_is_valid(ui_pipeline) || test_and_reset_shaders_was_modified(ui_vert_shader, ui_frag_shader) {
             raster_description := DefaultRasterDesc
@@ -651,35 +657,19 @@ main :: proc () {
         }
         
         draws: [] Draw
-        {
-            cpu_scoped_profile_zone("Generate Draws")
-            draws = draw_buffer.cpu[:50_000]
+        @(static) last_draw_count: int
+        // @hack
+        @(static) last_object_rotation: v3 = -1
+        @(static) last_cam_pos: v3 = -1
+        if last_cam_pos != cam_pos || last_object_rotation != object_rotation {
+            last_cam_pos = cam_pos
+            last_object_rotation = object_rotation
             
-            // @hack
-            @(static) last_object_rotation: v3 = -1
-            @(static) last_cam_pos: v3 = -1
-            if last_cam_pos != cam_pos || last_object_rotation != object_rotation {
-                last_cam_pos = cam_pos
-                last_object_rotation = object_rotation
-                
-                entropy := seed_random_series(545114)
-                global_rotation := la.quaternion_from_euler_angles_f32(**(object_rotation * random_unilateral(&entropy, v3)), .XYX)
-                for &draw in draws {
-                    p := random_bilateral(&entropy, v3) * {10, 10, 10} + {0, 0, -10}
-                    
-                    draw.p           = p
-                    draw.scale       = linear_blend(cast(f32) .05, .8, power(random_unilateral(&entropy, f32), 8)) / 2
-                    rotation        := la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
-                    draw.orientation = rotation * global_rotation
-                    
-                    draw.texture_index = textures[random_between_u32(&entropy, 0, cast(u32) len(textures)-1)].sampled_index
-                    
-                    mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
-                    
-                    draw.mesh_index    = mesh_index
-                    draw.vertex_offset = mesh.vertex_offset
-                }
-            }
+            draws, _ = generate_draws(gpu, draw_buffer, object_rotation, textures[:], geometry)
+            
+            last_draw_count = len(draws)
+        } else {
+            draws = draw_buffer.cpu[:last_draw_count]
         }
         
         ////////////////////////////////////////////////
@@ -716,36 +706,42 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        cull_data_flags: u32 
-        if debug.culling_enabled   { cull_data_flags |= DebugFlag_FrustumCulling   }
-        if debug.lod_enabled       { cull_data_flags |= DebugFlag_LevelOfDetail    }
-        if debug.occlusion_enabled { cull_data_flags |= DebugFlag_OcclusionCulling }
+        shader_culling_flags: u32 
+        if debug.culling_enabled   { shader_culling_flags |= DebugFlag_FrustumCulling   }
+        if debug.lod_enabled       { shader_culling_flags |= DebugFlag_LevelOfDetail    }
+        if debug.occlusion_enabled { shader_culling_flags |= DebugFlag_OcclusionCulling }
         cull_data := Cull_Data {
             view_from_world = view_from_world,
             
-            p00 = screen_from_view[0,0],
-            p11 = screen_from_view[1,1],
+            pyramid_size = cast(v2) stuff.depth_pyramid.size.xy,
+            s00 = screen_from_view[0,0],
+            s11 = screen_from_view[1,1],
             near_z = near_z,
             far_z  = draw_distance,
-            
             frustum = frustum,
             
-            pyramid_size = cast(v2) stuff.depth_pyramid.size.xy,
-            
             draw_count = auto_cast len(draws),
-            flags      = cull_data_flags,
+            flags      = shader_culling_flags,
             
             lod_base = 10,
             lod_step = 1.5,
         }
         
-        draw_data.screen_size = cast(v2) gpu.swapchain_size
-        draw_data.near_z = near_z
-        draw_data.far_z  = draw_distance
-        draw_data.frustum = frustum
-        
-        draw_data.screen_from_view = screen_from_view
-        draw_data.view_from_world  = view_from_world
+        draw_data := Draw_Data {
+            pyramid_size = cast(v2) stuff.depth_pyramid.size.xy,
+            s00 = screen_from_view[0,0],
+            s11 = screen_from_view[1,1],
+            near_z = near_z,
+            far_z  = draw_distance,
+            frustum = frustum,
+            
+            flags = shader_culling_flags,
+            
+            screen_size  = cast(v2) gpu.swapchain_size,
+            view_from_world = view_from_world,
+            
+            light_pos = light_pos,
+        }
         
         ////////////////////////////////////////////////
         ////////////////////////////////////////////////
@@ -808,14 +804,19 @@ main :: proc () {
                 meshlet_data_buffer = meshlet_data_buffer.gpu.p,
                 vertex_buffer       = vertex_buffer.gpu.p,
                 draw_command_buffer = draw_commands.gpu.p,
+                
+                meshlet_visibility_buffer = meshlet_visibility_buffer.gpu.p,
+                depth_pyramid_index = stuff.depth_buffer.sampled_index,
             }
             
             max_draw_count := cast(u32) len(draws)
             culling_begin(cmd, early = true)
             
-            if !dvb_cleared {
-                dvb_cleared = true
-                gpu_fill_memory(cmd, draw_visibility_buffer, max_draw_count, 1)
+            // @todo this is stupidly redundant
+            if !dvb_and_mvb_cleared {
+                dvb_and_mvb_cleared = true
+                gpu_fill_memory(cmd, draw_visibility_buffer,    max_draw_count, 0)
+                gpu_fill_memory(cmd, meshlet_visibility_buffer, len(meshlet_visibility_buffer.cpu), 0)
             }
             
             culling_end(cmd, cull_pipelines[.early], cull_shader, &frame_descriptor, cull_globals, draw_group_count, max_draw_count, early = true)
@@ -832,7 +833,7 @@ main :: proc () {
                 
                 vk.CmdBeginQuery(cmd, stats_pool, stats_pool_query_index, {})
                 
-                gpu_set_pipeline(cmd, meshlet_pipeline)
+                gpu_set_pipeline(cmd, meshlet_pipelines[.early])
                 gpu_draw_mesh_tasks_indirect(cmd, &frame_descriptor, draw_group_count.gpu, 1, draw_globals.gpu)
                 
                 vk.CmdEndQuery(cmd, stats_pool, stats_pool_query_index)
@@ -924,6 +925,9 @@ main :: proc () {
                 meshlet_data_buffer = meshlet_data_buffer.gpu.p,
                 vertex_buffer       = vertex_buffer.gpu.p,
                 draw_command_buffer = draw_commands.gpu.p,
+                
+                meshlet_visibility_buffer = meshlet_visibility_buffer.gpu.p,
+                depth_pyramid_index = stuff.depth_buffer.sampled_index,
             }
             
             culling_begin(cmd, early = false)
@@ -944,7 +948,7 @@ main :: proc () {
                 
                 vk.CmdBeginQuery(cmd, stats_pool, stats_pool_query_index, {})
                 
-                gpu_set_pipeline(cmd, meshlet_pipeline)
+                gpu_set_pipeline(cmd, meshlet_pipelines[.late])
                 gpu_draw_mesh_tasks_indirect(cmd, &frame_descriptor, draw_group_count.gpu, 1, draw_globals.gpu)
                 
                 vk.CmdEndQuery(cmd, stats_pool, stats_pool_query_index)
@@ -1198,13 +1202,14 @@ main :: proc () {
     gpu_free(gpu, mesh_buffer)
     gpu_free(gpu, draw_buffer)
     gpu_free(gpu, draw_visibility_buffer)
+    gpu_free(gpu, meshlet_visibility_buffer)
     
     for &bump in frame_bump_allocators {
         bump_allocator_delete(gpu, &bump)
     }
     
-    destroy_pipeline(gpu, meshlet_pipeline)
     for stage in Stage {
+        destroy_pipeline(gpu, meshlet_pipelines[stage])
         destroy_pipeline(gpu, cull_pipelines[stage])
     }
     destroy_pipeline(gpu, depth_pipeline)
@@ -1223,6 +1228,44 @@ main :: proc () {
     vk.DestroyQueryPool(gpu.device, the_gpu_profiler.pool, nil)
     
     gpu_deinit(gpu)
+}
+
+////////////////////////////////////////////////
+
+generate_draws :: proc (gpu: ^Gpu, draw_buffer: Gpu_Slice(Draw), object_rotation: v3, textures: [] Image, geometry: Geometry) -> ([] Draw, u32) {
+    cpu_scoped_profile_zone("Generate Draws")
+    draws := draw_buffer.cpu[:50_000]
+    
+    meshlet_visibility_count: u32
+    
+    entropy := seed_random_series(545114)
+    global_rotation := la.quaternion_from_euler_angles_f32(**(object_rotation * random_unilateral(&entropy, v3)), .XYX)
+    for &draw in draws {
+        p := random_bilateral(&entropy, v3) * {10, 10, 10} + {0, 0, -10}
+        
+        draw.p           = p
+        draw.scale       = linear_blend(cast(f32) .05, .8, power(random_unilateral(&entropy, f32), 8)) / 2
+        rotation        := la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
+        draw.orientation = rotation * global_rotation
+        
+        draw.texture_index = textures[random_between_u32(&entropy, 0, cast(u32) len(textures)-1)].sampled_index
+        
+        mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
+        
+        draw.mesh_index    = mesh_index
+        draw.vertex_offset = mesh.vertex_offset
+        
+        // @speed just ensure that the base lod has the most meshlets
+        meshlet_count: u32
+        for lod in mesh.lods[:mesh.lod_count] {
+            meshlet_count = max(meshlet_count, lod.meshlet_count)
+        }
+        
+        draw.meshlet_visibility_offset = meshlet_visibility_count
+        meshlet_visibility_count      += meshlet_count
+    }
+    
+    return draws, meshlet_visibility_count
 }
 
 ////////////////////////////////////////////////

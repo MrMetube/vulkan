@@ -19,11 +19,11 @@ void main() {
     // Phong lighting
     vec3 n = normalize(mesh_result.normal);
     vec3 v = normalize(mesh_result.view_vec);
-    for (int li = 0; li < 4; li++) {
-        vec3 l = normalize(mesh_result.light_vec[li]);
+    {
+        vec3 l = normalize(mesh_result.light_vec);
         vec3 r = reflect(-l, n);
-        diffuse  += max(dot(n, l), 0.0025);
-        specular += pow(max(dot(r, v), 0.0), 16.0) * 0.75;
+        diffuse  += 3 * max(dot(n, l), 0.0025);
+        specular += 3 * pow(max(dot(r, v), 0.0), 16.0) * 0.75;
     }
     
     uint texture_index = globals.draw_buffer[draw_index].v.texture_index;

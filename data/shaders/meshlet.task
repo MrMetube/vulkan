@@ -27,58 +27,99 @@ shared int shared_count;
 bool cone_cull(vec3 center, float radius, vec3 axis, float cutoff, vec3 camera);
 
 void main() {
-    uint thread_index = gl_LocalInvocationIndex;
+    uint thread_index  = gl_LocalInvocationIndex;
     uint command_index = gl_WorkGroupID.x; // :MeshShaderGroupSizeLimits:
-    Draw_Command_p command = data.draw_command_buffer[command_index];
     
-    uint draw_index     = command.v.draw_index;
-    uint meshlet_offset = command.v.meshlet_offset;
-    uint meshlet_count  = command.v.meshlet_count;
-    // @todo read late_draw_visibiliy from the command.v.late_draw_visibility
+    Draw_Command command = data.draw_command_buffer[command_index].v;
+    uint draw_index                  = command.draw_index;
+    uint meshlet_offset              = command.meshlet_offset;
+    bool mesh_was_visible_last_frame = command.mesh_was_visible_last_frame;
+    
+    Draw draw = data.draw_buffer[draw_index].v;
     
     uint meshlet_index            = thread_index + meshlet_offset;
-    uint meshlet_visibility_index = thread_index + command.v.meshlet_visibility_offset;
+    uint meshlet_visibility_index = thread_index + command.meshlet_visibility_offset;
     
-    Draw_p draw = data.draw_buffer[draw_index];
-    Mesh_p mesh = data.mesh_buffer[draw.v.mesh_index];
+    bool frustum_culling_enabled = (data.data.flags & Flag_FrustumCulling)   != 0;
+    bool occlusion_enabled       = (data.data.flags & Flag_OcclusionCulling) != 0;
+    
+    
     
     task_result.draw_index     = draw_index;
     task_result.meshlet_offset = meshlet_offset;
     
-    shared_count = 0;
-    
+    shared_count = 0; 
     barrier(); // for shared_count
     
-    bool visible = false;
-    if (meshlet_index < (meshlet_count + meshlet_offset)) {
+    
+    
+    if (thread_index < command.meshlet_count) {
+        uint8_t_p meshlet_was_visible_last_frame = data.meshlet_visibility_buffer[meshlet_visibility_index];
+        
+        bool visible = true;
+        bool skip    = false;
+        // If we disabled occlusion culling, the cull status of draw calls with Late=false is never updated, because they are skipped
+        if (!Late && meshlet_was_visible_last_frame.v == 0 && occlusion_enabled)           visible = false;
+        if ( Late && meshlet_was_visible_last_frame.v == 1 && mesh_was_visible_last_frame) skip    = true;
+        
         Meshlet_p meshlet = data.meshlet_buffer[meshlet_index];
         
         vec3 cone_axis = vec3(int(meshlet.v.cone_axis[0]), int(meshlet.v.cone_axis[1]), int(meshlet.v.cone_axis[2])) / 127.0;
         vec3 center    = meshlet.v.center;
         
-        vec3  world_center    = transform(draw.v.orientation, draw.v.scale, draw.v.p, center);
-        float radius          = draw.v.scale * meshlet.v.radius;
-        vec3  world_cone_axis = rotate(draw.v.orientation, cone_axis);
+        vec3  world_center    = transform(draw.orientation, draw.scale, draw.p, center);
+        float radius          = draw.scale * meshlet.v.radius;
+        vec3  world_cone_axis = rotate(draw.orientation, cone_axis);
         float cone_cutoff     = float(meshlet.v.cone_cutoff) / 127.0;
         
         // @todo radius and cutoff might need scaling if the view_from_world matrix is more than translating
         vec4 view_center    = data.data.view_from_world * vec4(world_center, 1);
         vec3 view_cone_axis = mat3(data.data.view_from_world) * world_cone_axis;
         
+        
+            
         // backface cone culling
-        visible = !cone_cull(view_center.xyz, radius, view_cone_axis, cone_cutoff, vec3(0));
+        visible = visible && !cone_cull(view_center.xyz, radius, view_cone_axis, cone_cutoff, vec3(0));
         
         // @copypasta from cull.comp
-        // the left/top/right/bottom plane culling utilizes frustum symmetry to cull against two planes at the same time
-        visible = visible && view_center.z * data.data.frustum[1] - abs(view_center.x) * data.data.frustum[0] > -radius;
-        visible = visible && view_center.z * data.data.frustum[3] - abs(view_center.y) * data.data.frustum[2] > -radius;
-        // the near/far plane culling uses camera space Z directly, but the camera looks down -z :ViewSpace:
-        visible = visible && view_center.z + radius < -data.data.near_z && view_center.z - radius > -data.data.far_z;
-    }
-    
-    if (visible) {
-        uint index = atomicAdd(shared_count, 1);
-        task_result.indices[index] = meshlet_index;
+        if (frustum_culling_enabled) {
+            // the left/top/right/bottom plane culling utilizes frustum symmetry to cull against two planes at the same time
+            visible = visible && view_center.z * data.data.frustum[1] - abs(view_center.x) * data.data.frustum[0] > -radius;
+            visible = visible && view_center.z * data.data.frustum[3] - abs(view_center.y) * data.data.frustum[2] > -radius;
+            // the near/far plane culling uses camera space Z directly, but the camera looks down -z :ViewSpace:
+            visible = visible && view_center.z + radius < -data.data.near_z && view_center.z - radius > -data.data.far_z;
+        }
+        
+        // @copypasta from cull.comp
+        if (Late && occlusion_enabled && visible) {
+            float s00    = data.data.s00;
+            float s11    = data.data.s11;
+            float near_z = data.data.near_z;
+            vec2  size   = data.data.pyramid_size;
+            
+            vec4 rect;
+            if (project_sphere_onto_screen(view_center.xyz, radius, s00, s11, near_z, rect)) {
+                vec2 size_in_pixels = (rect.zw - rect.xy) * size;
+                
+                // Because we only consider 2x2 pixels, we need to make sure we are sampling from a mip that reduces the rectangle to 1x1 texel or smaller.
+                // Due to the rectangle being arbitrarily offset, a 1x1 rectangle may cover 2x2 texel area. Using floor() here would require sampling 4 corners
+                // of AABB (using bilinear fetch), which is a little slower. - by zeux
+                float level = ceil(log2(max(size_in_pixels.x, size_in_pixels.y)));
+                vec2  rect_center = (rect.xy + rect.zw) * 0.5;
+                
+                float depth = textureLod(sampler2D(Textures[data.depth_pyramid_index], Samplers[Sampler_Depth]), rect_center, level).x;
+                float min_sphere_depth = -near_z / (view_center.z + radius); // :ViewSpace:
+                
+                visible = visible && (min_sphere_depth > depth);
+            }
+        }
+        
+        if (Late) meshlet_was_visible_last_frame.v = uint8_t(visible ? 1 : 0);
+        
+        if (visible && !skip) {
+            uint index = atomicAdd(shared_count, 1);
+            task_result.indices[index] = meshlet_index;
+        }
     }
     
     barrier(); // for shared_count

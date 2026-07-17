@@ -6,7 +6,7 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(constant_id = 0) const bool Late = false;
 
-layout(push_constant) uniform _ { Cull_Globals globals; };
+layout(push_constant) uniform _ { Cull_Globals data; };
 
 layout(descriptor_heap) uniform texture2D Textures[];
 layout(descriptor_heap) uniform sampler   Samplers[];
@@ -16,54 +16,69 @@ layout(descriptor_heap) uniform sampler   Samplers[];
 void main() {
     uint draw_index = gl_GlobalInvocationID.x;
     
-    if (draw_index >= globals.data.draw_count) return;
+    if (draw_index >= data.data.draw_count) return;
     
-    bool_p was_visible_last_frame = globals.draw_visibility_buffer[draw_index];
+    bool_p was_visible_last_frame = data.draw_visibility_buffer[draw_index];
     if (!Late && !was_visible_last_frame.v) return;
     
-    bool frustum_culling_enabled = (globals.data.flags & Flag_FrustumCulling)   != 0;
-    bool lod_enabled             = (globals.data.flags & Flag_LevelOfDetail)    != 0;
-    bool occlusion_enabled       = (globals.data.flags & Flag_OcclusionCulling) != 0;
+    bool frustum_culling_enabled = (data.data.flags & Flag_FrustumCulling)   != 0;
+    bool lod_enabled             = (data.data.flags & Flag_LevelOfDetail)    != 0;
+    bool occlusion_enabled       = (data.data.flags & Flag_OcclusionCulling) != 0;
     
-    Draw_p draw = globals.draw_buffer[draw_index];
-    Mesh_p mesh = globals.mesh_buffer[draw.v.mesh_index];
+    Draw_p draw = data.draw_buffer[draw_index];
+    Mesh_p mesh = data.mesh_buffer[draw.v.mesh_index];
+    
+    uint meshlet_visibility_offset = draw.v.meshlet_visibility_offset;
     
     vec3  world_center = transform(draw.v.orientation, draw.v.scale, draw.v.p, mesh.v.center);
     float radius       = draw.v.scale * mesh.v.radius;
     
-    vec4 view_center = globals.data.view_from_world * vec4(world_center, 1);
+    vec4 view_center = data.data.view_from_world * vec4(world_center, 1);
     // @todo scale radius by view_from_world?
     
     bool visible = true;
     if (frustum_culling_enabled) {
         // the left/top/right/bottom plane culling utilizes frustum symmetry to cull against two planes at the same time
-        visible = visible && view_center.z * globals.data.frustum[1] - abs(view_center.x) * globals.data.frustum[0] > -radius;
-        visible = visible && view_center.z * globals.data.frustum[3] - abs(view_center.y) * globals.data.frustum[2] > -radius;
+        visible = visible && view_center.z * data.data.frustum[1] - abs(view_center.x) * data.data.frustum[0] > -radius;
+        visible = visible && view_center.z * data.data.frustum[3] - abs(view_center.y) * data.data.frustum[2] > -radius;
         // the near/far plane culling uses camera space Z directly, but the camera looks down -z :ViewSpace:
-        visible = visible && view_center.z + radius < -globals.data.near_z && view_center.z - radius > -globals.data.far_z;
+        visible = visible && view_center.z + radius < -data.data.near_z && view_center.z - radius > -data.data.far_z;
     }
     
     if (Late && occlusion_enabled && visible) {
+        float s00    = data.data.s00;
+        float s11    = data.data.s11;
+        float near_z = data.data.near_z;
+        vec2  size   = data.data.pyramid_size;
+        
         vec4 rect;
-        if (project_sphere_onto_screen(view_center.xyz, radius, globals.data.p00, globals.data.p11, globals.data.near_z, rect)) {
-            vec2 size_in_pixels = (rect.zw - rect.xy) * globals.data.pyramid_size;
+        if (project_sphere_onto_screen(view_center.xyz, radius, s00, s11, near_z, rect)) {
+            vec2 size_in_pixels = (rect.zw - rect.xy) * size;
             
-            float level = floor(log2(max(size_in_pixels.x, size_in_pixels.y)));
+            // Because we only consider 2x2 pixels, we need to make sure we are sampling from a mip that reduces the rectangle to 1x1 texel or smaller.
+			// Due to the rectangle being arbitrarily offset, a 1x1 rectangle may cover 2x2 texel area. Using floor() here would require sampling 4 corners
+			// of AABB (using bilinear fetch), which is a little slower. - by zeux
+            float level = ceil(log2(max(size_in_pixels.x, size_in_pixels.y)));
             vec2  rect_center = (rect.xy + rect.zw) * 0.5;
             
-            float depth = textureLod(sampler2D(Textures[globals.depth_pyramid_index], Samplers[Sampler_Depth]), rect_center, level).x;
-            float min_sphere_depth = -globals.data.near_z / (view_center.z + radius); // :ViewSpace:
+            float depth = textureLod(sampler2D(Textures[data.depth_pyramid_index], Samplers[Sampler_Depth]), rect_center, level).x;
+            float min_sphere_depth = -near_z / (view_center.z + radius); // :ViewSpace:
             
             visible = visible && (min_sphere_depth > depth);
         }
     }
     
-    if (visible && (!Late || !was_visible_last_frame.v)) {
+    //
+    // With meshlet occlusion culling, we actually need to append the draw command in the Late pass, 
+    // even if we have already done so in the Early pass. This ensures that previously-invisible 
+    // meshlets which are now-visible of a now-visible mesh are drawn by the task/mesh shaders.
+    //
+    if (visible && (!Late || !was_visible_last_frame.v || occlusion_enabled)) {
         uint lod_index = 0;
         if (lod_enabled) {
             // lod distance i = base * pow(step, i)
             // i = log2(distance / base) / log2(step)
-            float lod_index_f = log2(length(view_center.xyz) / globals.data.lod_base) / log2(globals.data.lod_step);
+            float lod_index_f = log2(length(view_center.xyz) / data.data.lod_base) / log2(data.data.lod_step);
             lod_index = min(uint(max(lod_index_f + 1, 0)), mesh.v.lod_count - 1);
         }
             
@@ -81,20 +96,18 @@ void main() {
         // note that EXT_mesh_shader doesn't guarantee support for >4M commands anyway, but 4M commands ~= 16B triangles which is surely enough
         //
         
-        uint draw_command_index = atomicAdd(globals.draw_group_count.v.x, task_group_count);
+        uint draw_command_index = atomicAdd(data.draw_group_count.v.x, task_group_count);
         
-        // @todo fill this!
-        uint meshlet_visibility_offset/*  = draw.v.meshlet_visibility_offset */;
-        
-        // @todo ideally we would abortif draw_group_count overflows the output buffer
+        // @todo ideally we would abort if draw_group_count overflows the output buffer
         for (uint i = 0; i < task_group_count; i += 1) {
-            Draw_Command_p command = globals.draw_command_buffer[draw_command_index + i];
+            Draw_Command_p command = data.draw_command_buffer[draw_command_index + i];
             
             command.v.draw_index = draw_index;
             command.v.meshlet_offset =     lod.meshlet_offset + i * TaskWidth;
             command.v.meshlet_count  = min(lod.meshlet_count  - i * TaskWidth, TaskWidth);
-            command.v.late_draw_visibility = was_visible_last_frame.v ? 1 : 0;
-            command.v.meshlet_visibility_offset = meshlet_visibility_offset + i * TaskWidth;
+            
+            command.v.mesh_was_visible_last_frame = was_visible_last_frame.v;
+            command.v.meshlet_visibility_offset   = meshlet_visibility_offset + i * TaskWidth;
         }
     }
     
