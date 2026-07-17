@@ -338,7 +338,7 @@ main :: proc () {
         copy(meshlet_data_buffer.cpu, geometry.meshlet_data[:])
         copy(mesh_buffer.cpu,         geometry.meshes[:])
         
-        // @todo delete geometry buffers from cpu after the upload (maybe keep handles/stats). Currently generate_draws just wants to number of meshes for its randomness.
+        // @todo clearly separate what is temporary and what is kepts outside the temp allocator Currently generate_draws just wants to number of meshes for its randomness.
         _, max_draw_visibility_count = generate_draws(gpu, draw_buffer, 0, textures[:], geometry)
     }
     

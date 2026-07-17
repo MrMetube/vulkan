@@ -60,9 +60,11 @@ void main() {
         
         bool visible = true;
         bool skip    = false;
-        // If we disabled occlusion culling, the cull status of draw calls with Late=false is never updated, because they are skipped
-        if (!Late && meshlet_was_visible_last_frame == 0 && occlusion_enabled)           visible = false;
-        if ( Late && meshlet_was_visible_last_frame != 0 && mesh_was_visible_last_frame) skip    = true;
+        if (occlusion_enabled) {
+            // If we disabled occlusion culling, the cull status of draw calls with Late=false is never updated, because they are skipped
+            if (!Late && meshlet_was_visible_last_frame == 0)                                visible = false;
+            if ( Late && meshlet_was_visible_last_frame != 0 && mesh_was_visible_last_frame) skip    = true;
+        }
         
         Meshlet_p meshlet = data.meshlet_buffer[meshlet_index];
         
@@ -112,7 +114,7 @@ void main() {
             }
         }
         
-        if (Late) {
+        if (Late && occlusion_enabled) {
             // @speed If we ensure that all threads/lanes write to the same two 32-bit slot and don't straddle 3 slots
             // in the buffer, then we can use atomics to built the whole slots new value in shared memory and then
             // write it once into the buffer. This requires that draw.meshlet_visibility_offset is aligned to 32.
