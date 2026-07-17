@@ -2,7 +2,7 @@
 
 #include "common.glsl"
 
-layout(push_constant) uniform _ { Draw_Globals globals; };
+layout(push_constant) uniform _ { Draw_Data data; };
 
 layout(location = 0) flat   in uint        draw_index;
 layout(location = 1) smooth in Mesh_Result mesh_result;
@@ -26,7 +26,7 @@ void main() {
         specular += 3 * pow(max(dot(r, v), 0.0), 16.0) * 0.75;
     }
     
-    uint texture_index = globals.draw_buffer[draw_index].v.texture_index;
+    uint texture_index = data.draw_buffer[draw_index].v.texture_index;
     vec2 uv = mesh_result.uv;
     
     vec3 albedo = texture(sampler2D(Textures[texture_index], Samplers[Sampler_Texture]), uv).rgb;

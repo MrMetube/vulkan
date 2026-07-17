@@ -59,19 +59,8 @@ Depth_Mip :: struct {
 
 ////////////////////////////////////////////////
 
-Cull_Globals :: struct #all_or_none { // :Shader:
-    using data: Cull_Data,
-    
-    draw_buffer:            vk.DeviceAddress "Draw",
-    mesh_buffer:            vk.DeviceAddress "Mesh",
-    draw_visibility_buffer: vk.DeviceAddress "bool",
-    draw_group_count:       vk.DeviceAddress "uvec3",
-    draw_command_buffer:    vk.DeviceAddress "Draw_Command",
-    
-    depth_pyramid_index: Texture_Index,
-}
-
 Cull_Data :: struct #all_or_none { // :Shader:
+    // data
     view_from_world: m4,
     
     s00, s11, near_z, far_z: f32,
@@ -83,27 +72,23 @@ Cull_Data :: struct #all_or_none { // :Shader:
     
     lod_base: f32,
     lod_step: f32,
-    _: v2,
+    
+    _: f32,
+    
+    // bindings
+    depth_pyramid_index: Texture_Index,
+    
+    draw_visibility_buffer: vk.DeviceAddress "bool",
+    draw_buffer:            vk.DeviceAddress "Draw",
+    mesh_buffer:            vk.DeviceAddress "Mesh",
+    draw_group_count:       vk.DeviceAddress "uvec3",
+    draw_command_buffer:    vk.DeviceAddress "Draw_Command",
 }
 
 // @volatile Cull_Data.flags
 DebugFlag_FrustumCulling   :: (1 << 0)
 DebugFlag_LevelOfDetail    :: (1 << 1)
 DebugFlag_OcclusionCulling :: (1 << 2)
-
-Draw_Globals :: struct #all_or_none { // :Shader:
-    using data: Draw_Data,
-    
-    draw_command_buffer: vk.DeviceAddress "Draw_Command",
-    draw_buffer:         vk.DeviceAddress "Draw",
-    mesh_buffer:         vk.DeviceAddress "Mesh",
-    meshlet_buffer:      vk.DeviceAddress "Meshlet",
-    meshlet_data_buffer: vk.DeviceAddress "uint",
-    vertex_buffer:       vk.DeviceAddress "Vertex",
-    
-    meshlet_visibility_buffer: vk.DeviceAddress "uint",
-    depth_pyramid_index: Texture_Index,
-}
 
 Draw_Data :: struct #all_or_none { // :Shader:
     view_from_world:  m4, // @todo alignment requirements
@@ -116,6 +101,16 @@ Draw_Data :: struct #all_or_none { // :Shader:
     near_z, far_z: f32,
     pyramid_size:  v2,
     frustum:       [4] f32,
+    
+    // bindings
+    depth_pyramid_index: Texture_Index,
+    
+    draw_command_buffer:       vk.DeviceAddress "Draw_Command", // task
+    meshlet_visibility_buffer: vk.DeviceAddress "uint",         // task
+    draw_buffer:               vk.DeviceAddress "Draw",         // task, mesh, frag
+    meshlet_buffer:            vk.DeviceAddress "Meshlet",      // task, mesh
+    meshlet_data_buffer:       vk.DeviceAddress "uint",         // mesh
+    vertex_buffer:             vk.DeviceAddress "Vertex",       // mesh
 }
 
 Depth_Data :: struct { // :Shader:
@@ -128,24 +123,6 @@ UI_Data :: struct #all_or_none { // :Shader:
     draw_buffer: vk.DeviceAddress "UI_Draw",
     screen_size: v2,
     mouse_p:     v2,
-}
-
-UI_Draw_Command :: struct {
-    vertex_count:   u32,
-    instance_count: u32,
-    first_vertex:   u32,
-    first_instance: u32,
-}
-
-UI_Draw :: struct { // :Shader:
-    rect:  Rectangle2,
-    color: v4,
-    
-    border_color:     v4,
-    border_thickness: f32,
-    
-    corner_radius: f32,
-    highlight:     bool,
 }
 
 Draw :: struct { // :Shader:
@@ -198,6 +175,24 @@ Vertex :: struct { // :Shader:
     p:  v3,      p_pad: f32,
     n:  [3] u8,  n_pad: u8,
     uv: v2,
+}
+
+UI_Draw_Command :: struct {
+    vertex_count:   u32,
+    instance_count: u32,
+    first_vertex:   u32,
+    first_instance: u32,
+}
+
+UI_Draw :: struct { // :Shader:
+    rect:  Rectangle2,
+    color: v4,
+    
+    border_color:     v4,
+    border_thickness: f32,
+    
+    corner_radius: f32,
+    highlight:     bool,
 }
 
 ////////////////////////////////////////////////
@@ -706,11 +701,15 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
+        // @todo preallocate on init
+        draw_commands := bump_allocate(bump, [] Draw_Command, auto_cast len(draws))
+        
         shader_culling_flags: u32 
         if debug.culling_enabled   { shader_culling_flags |= DebugFlag_FrustumCulling   }
         if debug.lod_enabled       { shader_culling_flags |= DebugFlag_LevelOfDetail    }
         if debug.occlusion_enabled { shader_culling_flags |= DebugFlag_OcclusionCulling }
-        cull_data := Cull_Data {
+        
+        common_cull_data := Cull_Data {
             view_from_world = view_from_world,
             
             pyramid_size = cast(v2) stuff.depth_pyramid.size.xy,
@@ -725,9 +724,16 @@ main :: proc () {
             
             lod_base = 10,
             lod_step = 1.5,
+            
+            depth_pyramid_index = stuff.depth_pyramid.sampled_index,
+            draw_buffer            = draw_buffer.gpu.p,
+            mesh_buffer            = mesh_buffer.gpu.p,
+            draw_visibility_buffer = draw_visibility_buffer.gpu.p,
+            draw_command_buffer    = draw_commands.gpu.p,
+            draw_group_count       = {}, // @volatile must be assigned later when its allocated from the frame bump
         }
         
-        draw_data := Draw_Data {
+        common_draw_data := Draw_Data {
             pyramid_size = cast(v2) stuff.depth_pyramid.size.xy,
             s00 = screen_from_view[0,0],
             s11 = screen_from_view[1,1],
@@ -741,6 +747,14 @@ main :: proc () {
             view_from_world = view_from_world,
             
             light_pos = light_pos,
+            
+            depth_pyramid_index = stuff.depth_pyramid.sampled_index,
+            draw_command_buffer       = draw_commands.gpu.p,
+            draw_buffer               = draw_buffer.gpu.p,
+            meshlet_buffer            = meshlet_buffer.gpu.p,
+            meshlet_data_buffer       = meshlet_data_buffer.gpu.p,
+            vertex_buffer             = vertex_buffer.gpu.p,
+            meshlet_visibility_buffer = meshlet_visibility_buffer.gpu.p,
         }
         
         ////////////////////////////////////////////////
@@ -778,36 +792,14 @@ main :: proc () {
         // early cull - frustum cull & fill objects that *were* visible last frame
         
         {
-            draw_commands    := bump_allocate(bump, [] Draw_Command, auto_cast len(draws))
             draw_group_count := bump_allocate(bump, uv3)
             
-            cull_globals := bump_allocate(bump, Cull_Globals)
-            cull_globals.cpu^ = {
-                draw_buffer            = draw_buffer.gpu.p,
-                mesh_buffer            = mesh_buffer.gpu.p,
-                draw_visibility_buffer = draw_visibility_buffer.gpu.p,
-                draw_command_buffer    = draw_commands.gpu.p,
-                draw_group_count       = draw_group_count.gpu.p,
-                
-                depth_pyramid_index = stuff.depth_pyramid.sampled_index,
-                
-                data = cull_data,
-            }
+            cull_data := bump_allocate(bump, Cull_Data)
+            cull_data.cpu^ = common_cull_data
+            cull_data.cpu.draw_group_count = draw_group_count.gpu.p
             
-            draw_globals := bump_allocate(bump, Draw_Globals)
-            draw_globals.cpu^ = {
-                data = draw_data,
-                
-                draw_buffer         = draw_buffer.gpu.p,
-                mesh_buffer         = mesh_buffer.gpu.p,
-                meshlet_buffer      = meshlet_buffer.gpu.p,
-                meshlet_data_buffer = meshlet_data_buffer.gpu.p,
-                vertex_buffer       = vertex_buffer.gpu.p,
-                draw_command_buffer = draw_commands.gpu.p,
-                
-                meshlet_visibility_buffer = meshlet_visibility_buffer.gpu.p,
-                depth_pyramid_index = stuff.depth_buffer.sampled_index,
-            }
+            draw_data := bump_allocate(bump, Draw_Data)
+            draw_data.cpu^ = common_draw_data
             
             max_draw_count := cast(u32) len(draws)
             culling_begin(cmd, early = true)
@@ -819,10 +811,9 @@ main :: proc () {
                 gpu_fill_memory(cmd, meshlet_visibility_buffer, len(meshlet_visibility_buffer.cpu), 0)
             }
             
-            culling_end(cmd, cull_pipelines[.early], cull_shader, &frame_descriptor, cull_globals, draw_group_count, max_draw_count, early = true)
+            culling_end(cmd, cull_pipelines[.early], cull_shader, &frame_descriptor, cull_data, draw_group_count, max_draw_count, early = true)
             
             ////////////////////////////////////////////////
-            // early render - render objects that were visible last frame
             
             gpu_barrier(cmd, { .BOTTOM_OF_PIPE, .COMPUTE_SHADER }, { .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS })
             
@@ -834,7 +825,7 @@ main :: proc () {
                 vk.CmdBeginQuery(cmd, stats_pool, stats_pool_query_index, {})
                 
                 gpu_set_pipeline(cmd, meshlet_pipelines[.early])
-                gpu_draw_mesh_tasks_indirect(cmd, &frame_descriptor, draw_group_count.gpu, 1, draw_globals.gpu)
+                gpu_draw_mesh_tasks_indirect(cmd, &frame_descriptor, draw_group_count.gpu, 1, draw_data.gpu)
                 
                 vk.CmdEndQuery(cmd, stats_pool, stats_pool_query_index)
                 stats_pool_query_index += 1
@@ -854,22 +845,22 @@ main :: proc () {
             gpu_set_pipeline(cmd, depth_pipeline)
             
             for mip, mip_level in stuff.depth_pyramid_mips {
-                depth_globals := bump_allocate(bump, Depth_Data)
-                depth_globals.cpu^ = Depth_Data { 
+                depth_data := bump_allocate(bump, Depth_Data)
+                depth_data.cpu^ = Depth_Data { 
                     size = cast(v2) mip.size,
                 }
                 if mip_level == 0 {
-                    depth_globals.cpu.input_index  = stuff.depth_buffer.sampled_index
-                    depth_globals.cpu.output_index = stuff.depth_pyramid.storage_index
+                    depth_data.cpu.input_index  = stuff.depth_buffer.sampled_index
+                    depth_data.cpu.output_index = stuff.depth_pyramid.storage_index
                 } else if mip_level == 1 {
-                    depth_globals.cpu.input_index  = stuff.depth_pyramid.sampled_index
-                    depth_globals.cpu.output_index = mip.storage_index
+                    depth_data.cpu.input_index  = stuff.depth_pyramid.sampled_index
+                    depth_data.cpu.output_index = mip.storage_index
                 } else {
-                    depth_globals.cpu.input_index  = stuff.depth_pyramid_mips[mip_level-1].sampled_index
-                    depth_globals.cpu.output_index = mip.storage_index
+                    depth_data.cpu.input_index  = stuff.depth_pyramid_mips[mip_level-1].sampled_index
+                    depth_data.cpu.output_index = mip.storage_index
                 }
                 
-                gpu_dispatch(cmd, &frame_descriptor, depth_globals.gpu, get_group_count(get_shader(depth_reduce_shader), **mip.size))
+                gpu_dispatch(cmd, &frame_descriptor, depth_data.gpu, get_group_count(get_shader(depth_reduce_shader), **mip.size))
                 
                 gpu_barrier(cmd, { .COMPUTE_SHADER }, { .COMPUTE_SHADER })
             }
@@ -884,57 +875,19 @@ main :: proc () {
         // late cull - frustum & occlusion cull & fill objects that were *not* visible last frame
         
         {
-            // @todo these dont need to be cpu visible if that would improve performance 
-            // @todo Now that each cull+render pass has its own data instead of sharing it, the memory usage has doubled in the worst case.
-            // But atleast this avoids needing to predeclare these two buffers and ensuring barriers and clears are correctly setup before reuse.
-            // We cannot clear the bump allocator in between passes to reuse the memory after the first pass is done, as that is asynchronous.
-            // 
-            // We now dont need to synchronize between the first and the second cull dispatch, as they can fill different buffers.
-            // 
-            // In general it seems the bump allocator is great for push data/uniforms per shader/pipeline. But the command and count buffers
-            // do actually share a lifetime and are specifically used in *all* indirect draw calls. Maybe instead of moving them into the bump
-            // they should have been unified with indirect draw calls, so that any further call can just also make use of them. That would 
-            // require any pair of indirect draw calls to be serialized and not parallel, but as long as both draw into the same color/depth 
-            // buffers that should already be the case.
-            // On the other hand with this arrangement we have two disjoint buffer pairs, and can therefore overlap the second filling of the 
-            // command data with the creation or drawing of the first, as long as there are no other dependencies between them.
-            
-            draw_commands    := bump_allocate(bump, [] Draw_Command, auto_cast len(draws))
             draw_group_count := bump_allocate(bump, uv3)
             
-            cull_globals := bump_allocate(bump, Cull_Globals)
-            cull_globals.cpu^ = {
-                draw_buffer            = draw_buffer.gpu.p,
-                mesh_buffer            = mesh_buffer.gpu.p,
-                draw_visibility_buffer = draw_visibility_buffer.gpu.p,
-                draw_command_buffer    = draw_commands.gpu.p,
-                draw_group_count       = draw_group_count.gpu.p,
-                
-                depth_pyramid_index = stuff.depth_pyramid.sampled_index,
-                
-                data = cull_data,
-            }
+            cull_data := bump_allocate(bump, Cull_Data)
+            cull_data.cpu^ = common_cull_data
+            cull_data.cpu.draw_group_count = draw_group_count.gpu.p
             
-            draw_globals := bump_allocate(bump, Draw_Globals)
-            draw_globals.cpu^ = {
-                data = draw_data,
-                
-                draw_buffer         = draw_buffer.gpu.p,
-                mesh_buffer         = mesh_buffer.gpu.p,
-                meshlet_buffer      = meshlet_buffer.gpu.p,
-                meshlet_data_buffer = meshlet_data_buffer.gpu.p,
-                vertex_buffer       = vertex_buffer.gpu.p,
-                draw_command_buffer = draw_commands.gpu.p,
-                
-                meshlet_visibility_buffer = meshlet_visibility_buffer.gpu.p,
-                depth_pyramid_index = stuff.depth_buffer.sampled_index,
-            }
+            draw_data := bump_allocate(bump, Draw_Data)
+            draw_data.cpu^ = common_draw_data
             
             culling_begin(cmd, early = false)
-            culling_end(cmd, cull_pipelines[.late], cull_shader, &frame_descriptor, cull_globals, draw_group_count, cast(u32) len(draws), early = false)
+            culling_end(cmd, cull_pipelines[.late], cull_shader, &frame_descriptor, cull_data, draw_group_count, cast(u32) len(draws), early = false)
             
             ////////////////////////////////////////////////
-            // late rendering - render objects that are visible this frame but weren't drawn in the early pass
             
             gpu_barrier(cmd, 
                 { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS,  .COMPUTE_SHADER }, 
@@ -949,7 +902,7 @@ main :: proc () {
                 vk.CmdBeginQuery(cmd, stats_pool, stats_pool_query_index, {})
                 
                 gpu_set_pipeline(cmd, meshlet_pipelines[.late])
-                gpu_draw_mesh_tasks_indirect(cmd, &frame_descriptor, draw_group_count.gpu, 1, draw_globals.gpu)
+                gpu_draw_mesh_tasks_indirect(cmd, &frame_descriptor, draw_group_count.gpu, 1, draw_data.gpu)
                 
                 vk.CmdEndQuery(cmd, stats_pool, stats_pool_query_index)
                 stats_pool_query_index += 1
@@ -1003,8 +956,8 @@ main :: proc () {
             
             ////////////////////////////////////////////////
             
-            ui_globals := bump_allocate(bump, UI_Data)
-            ui_globals.cpu^ = {
+            ui_data := bump_allocate(bump, UI_Data)
+            ui_data.cpu^ = {
                 draw_buffer = ui_draws.gpu.p,
                 screen_size = cast(v2) gpu.swapchain_size,
                 mouse_p = mouse_p,
@@ -1028,7 +981,7 @@ main :: proc () {
                 gpu_set_scissor(cmd,  size = gpu.swapchain_size)
                 
                 gpu_set_pipeline(cmd, ui_pipeline)
-                gpu_draw_indirect(cmd, &frame_descriptor, ui_draw_command.gpu, ui_globals.gpu)
+                gpu_draw_indirect(cmd, &frame_descriptor, ui_draw_command.gpu, ui_data.gpu)
                 
             gpu_end_rendering(cmd)
         }
@@ -1129,11 +1082,10 @@ main :: proc () {
             
             cpu_begin_profile_zone("Update window title")
             sb := strings.builder_make(context.temp_allocator)
-            fmt.sbprintf(&sb, "%v tri, cpu: %.3v, gpu: %.3v, culling: early %.3v / late %.3v, rendering: early %.3v / late %.3v", 
-                view_magnitude(cast(u64) (cast(f64) triangle_count/*  / debug.gpu_time */), kind = .Count),
+            fmt.sbprintf(&sb, "%v tri, cpu: %.3v, gpu: %.3v (early cull %.3v, early render %.3v, late cull %.3v, late render %.3v)", 
+                view_magnitude(triangle_count, kind = .Count),
                 view(debug.cpu_time), view(debug.gpu_time), 
-                view(debug.early_cull_time), view(debug.late_cull_time),
-                view(debug.early_rendering_time), view(debug.late_rendering_time),
+                view(debug.early_cull_time), view(debug.early_rendering_time), view(debug.late_cull_time), view(debug.late_rendering_time),
             )
             fmt.sbprintf(&sb, ", Features: ")
             if debug.vsync {
@@ -1365,7 +1317,7 @@ culling_begin :: proc (cmd: vk.CommandBuffer, early: bool) {
         // ...
 }
 
-culling_end :: proc (cmd: vk.CommandBuffer, cull_pipeline: Pipeline, cull_shader: Shader_Id, frame_descriptor: ^Frame_Descriptor, cull_globals: Gpu_Address(Cull_Globals), draw_group_count: Gpu_Address(uv3), max_draw_count: u32, early: bool) {
+culling_end :: proc (cmd: vk.CommandBuffer, cull_pipeline: Pipeline, cull_shader: Shader_Id, frame_descriptor: ^Frame_Descriptor, cull_data: Gpu_Address(Cull_Data), draw_group_count: Gpu_Address(uv3), max_draw_count: u32, early: bool) {
      {
         // group.x = 0
         gpu_fill_memory(cmd, draw_group_count.gpu, 0, size_of(draw_group_count.cpu.x),  0)
@@ -1382,7 +1334,7 @@ culling_end :: proc (cmd: vk.CommandBuffer, cull_pipeline: Pipeline, cull_shader
         gpu_barrier(cmd, before_dispatch, { .COMPUTE_SHADER })
         
         gpu_set_pipeline(cmd, cull_pipeline)
-        gpu_dispatch(cmd, frame_descriptor, cull_globals.gpu, get_group_count(get_shader(cull_shader), max_draw_count))
+        gpu_dispatch(cmd, frame_descriptor, cull_data.gpu, get_group_count(get_shader(cull_shader), max_draw_count))
         
     gpu_profile_zone_end()
     gpu_labeled_region_end(cmd)

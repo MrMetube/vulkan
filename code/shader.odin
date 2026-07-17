@@ -53,9 +53,9 @@ generate_shader_api :: proc (output_file: string) {
     reference_types := make(map[string] struct {}, context.temp_allocator)
     simple_types    := make(map[typeid] struct {}, context.temp_allocator)
     
-    // structs used in push constants
-    collect_types(&simple_types, &reference_types, Cull_Globals)
-    collect_types(&simple_types, &reference_types, Draw_Globals)
+    // anything with a vk.DeviceAddress member
+    collect_types(&simple_types, &reference_types, Cull_Data)
+    collect_types(&simple_types, &reference_types, Draw_Data)
     collect_types(&simple_types, &reference_types, Depth_Data)
     collect_types(&simple_types, &reference_types, UI_Data)
     reference_types["uint8_t"] = {}
@@ -66,9 +66,9 @@ generate_shader_api :: proc (output_file: string) {
         append_simple_struct(&builder, simple_type)
     }
     
-    // push constants again
-    append_buffer_reference_struct(&builder, Cull_Globals)
-    append_buffer_reference_struct(&builder, Draw_Globals)
+    // push constants
+    append_buffer_reference_struct(&builder, Cull_Data)
+    append_buffer_reference_struct(&builder, Draw_Data)
     append_buffer_reference_struct(&builder, Depth_Data)
     append_buffer_reference_struct(&builder, UI_Data)
     

@@ -6,7 +6,7 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(constant_id = 0) const bool Late = false;
 
-layout(push_constant) uniform _ { Cull_Globals data; };
+layout(push_constant) uniform _ { Cull_Data data; };
 
 layout(descriptor_heap) uniform texture2D Textures[];
 layout(descriptor_heap) uniform sampler   Samplers[];
@@ -16,14 +16,14 @@ layout(descriptor_heap) uniform sampler   Samplers[];
 void main() {
     uint draw_index = gl_GlobalInvocationID.x;
     
-    if (draw_index >= data.data.draw_count) return;
+    if (draw_index >= data.draw_count) return;
     
     bool_p was_visible_last_frame = data.draw_visibility_buffer[draw_index];
     if (!Late && !was_visible_last_frame.v) return;
     
-    bool frustum_culling_enabled = (data.data.flags & Flag_FrustumCulling)   != 0;
-    bool lod_enabled             = (data.data.flags & Flag_LevelOfDetail)    != 0;
-    bool occlusion_enabled       = (data.data.flags & Flag_OcclusionCulling) != 0;
+    bool frustum_culling_enabled = (data.flags & Flag_FrustumCulling)   != 0;
+    bool lod_enabled             = (data.flags & Flag_LevelOfDetail)    != 0;
+    bool occlusion_enabled       = (data.flags & Flag_OcclusionCulling) != 0;
     
     Draw_p draw = data.draw_buffer[draw_index];
     Mesh_p mesh = data.mesh_buffer[draw.v.mesh_index];
@@ -32,23 +32,23 @@ void main() {
     
     vec3  world_center = transform(draw.v.orientation, draw.v.scale, draw.v.p, mesh.v.center);
     float radius       = draw.v.scale * mesh.v.radius;
-    vec4  view_center  = data.data.view_from_world * vec4(world_center, 1);
+    vec4  view_center  = data.view_from_world * vec4(world_center, 1);
     // @todo scale radius by view_from_world?
     
     bool visible = true;
     if (frustum_culling_enabled) {
         // the left/top/right/bottom plane culling utilizes frustum symmetry to cull against two planes at the same time
-        visible = visible && view_center.z * data.data.frustum[1] - abs(view_center.x) * data.data.frustum[0] > -radius;
-        visible = visible && view_center.z * data.data.frustum[3] - abs(view_center.y) * data.data.frustum[2] > -radius;
+        visible = visible && view_center.z * data.frustum[1] - abs(view_center.x) * data.frustum[0] > -radius;
+        visible = visible && view_center.z * data.frustum[3] - abs(view_center.y) * data.frustum[2] > -radius;
         // the near/far plane culling uses camera space Z directly, but the camera looks down -z :ViewSpace:
-        visible = visible && view_center.z + radius < -data.data.near_z && view_center.z - radius > -data.data.far_z;
+        visible = visible && view_center.z + radius < -data.near_z && view_center.z - radius > -data.far_z;
     }
     
     if (Late && occlusion_enabled && visible) {
-        float s00    = data.data.s00;
-        float s11    = data.data.s11;
-        float near_z = data.data.near_z;
-        vec2  size   = data.data.pyramid_size;
+        float s00    = data.s00;
+        float s11    = data.s11;
+        float near_z = data.near_z;
+        vec2  size   = data.pyramid_size;
         
         vec4 rect;
         if (project_sphere_onto_screen(view_center.xyz, radius, s00, s11, near_z, rect)) {
@@ -77,7 +77,7 @@ void main() {
         if (lod_enabled) {
             // lod distance i = base * pow(step, i)
             // i = log2(distance / base) / log2(step)
-            float lod_index_f = log2(length(view_center.xyz) / data.data.lod_base) / log2(data.data.lod_step);
+            float lod_index_f = log2(length(view_center.xyz) / data.lod_base) / log2(data.lod_step);
             lod_index = min(uint(max(lod_index_f + 1, 0)), mesh.v.lod_count - 1);
         }
             
