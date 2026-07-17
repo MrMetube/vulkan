@@ -265,7 +265,7 @@ main :: proc () {
     descriptor_heap := create_descriptor_heap(gpu)
     
     {
-        cpu_scoped_profile_zone("Texture Upload")
+        cpu_profile_scope("Texture Upload")
         
         upload_bump := bump_allocator_make_temporary(gpu, 256 * Megabyte, usage = { .TRANSFER_SRC })
         defer bump_allocator_delete(gpu, &upload_bump)
@@ -319,7 +319,7 @@ main :: proc () {
     geometry: Geometry
     max_draw_visibility_count: u32
     {
-        cpu_scoped_profile_zone("Geometry loading")
+        cpu_profile_scope("Geometry loading")
         
         paths := [?] string {
             "tutorial/suzanne.obj",
@@ -377,7 +377,10 @@ main :: proc () {
     gpu_profile_init(gpu)
     
     stats_count: u32 = 3
-    stats_pool := create_query_pool(gpu, stats_count, .MESH_PRIMITIVES_GENERATED_EXT)
+    stats_pools: [MaxFramesInFlight] vk.QueryPool
+    for &it in stats_pools {
+        it = create_query_pool(gpu, stats_count, .MESH_PRIMITIVES_GENERATED_EXT)
+    }
     
     absolute_frame_index: u64
     next_frame := cast(u64) MaxFramesInFlight+1
@@ -517,6 +520,79 @@ main :: proc () {
         
         frame_index := absolute_frame_index % MaxFramesInFlight
         absolute_frame_index += 1
+        if absolute_frame_index >= MaxFramesInFlight+1 {
+            cpu_profile_scope("GPU profiling")
+            
+            triangle_count: u64
+            if absolute_frame_index >= MaxFramesInFlight {
+                cpu_profile_scope("collect and print shader stats")
+                
+                last_finished_stats_pool := stats_pools[frame_index]
+                
+                stats_result: [128] u64
+                size := cast(int) size_of_slice(stats_result[:])
+                
+                check(vk.GetQueryPoolResults(gpu.device, last_finished_stats_pool, 0, 1, size, &stats_result[0], size_of(stats_result[0]), { ._64 }))
+                
+                for i in 0..<stats_count {
+                    triangle_count += stats_result[i]
+                }
+            }
+            
+            gpu_profile_collate_times(gpu, print_profile_and_stats, frame_index)
+            
+            gpu_delta             := gpu_profile_get_zone_duration(gpu, frame_index, "Frame")
+            early_rendering_delta := gpu_profile_get_zone_duration(gpu, frame_index, "early rendering pass")
+            late_rendering_delta  := gpu_profile_get_zone_duration(gpu, frame_index, "late rendering pass")
+            early_cull_delta      := gpu_profile_get_zone_duration(gpu, frame_index, "early culling")
+            late_cull_delta       := gpu_profile_get_zone_duration(gpu, frame_index, "late culling")
+            
+            blend_factor_k := time_smoothed_blend_factor(7, cpu_delta)
+            
+            debug.cpu_time             = linear_blend(cpu_delta,             debug.cpu_time,             blend_factor_k)
+            debug.early_cull_time      = linear_blend(early_cull_delta,      debug.early_cull_time,      blend_factor_k)
+            debug.late_cull_time       = linear_blend(late_cull_delta,       debug.late_cull_time,       blend_factor_k)
+            debug.early_rendering_time = linear_blend(early_rendering_delta, debug.early_rendering_time, blend_factor_k)
+            debug.late_rendering_time  = linear_blend(late_rendering_delta,  debug.late_rendering_time,  blend_factor_k)
+            // this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
+            if gpu_delta >= 0 {
+                debug.gpu_time = linear_blend(gpu_delta, debug.gpu_time, blend_factor_k)
+            }
+            
+            view :: proc (seconds: f64) -> time.Duration {
+                return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
+            }
+            
+            cpu_begin_profile_zone("Update window title")
+            sb := strings.builder_make(context.temp_allocator)
+            fmt.sbprintf(&sb, "%v tri, cpu: %.3v, gpu: %.3v (early cull %.3v, early render %.3v, late cull %.3v, late render %.3v)", 
+                view_magnitude(triangle_count, kind = .Count),
+                view(debug.cpu_time), view(debug.gpu_time), 
+                view(debug.early_cull_time), view(debug.early_rendering_time), view(debug.late_cull_time), view(debug.late_rendering_time),
+            )
+            fmt.sbprintf(&sb, ", Features: ")
+            if debug.vsync {
+                fmt.sbprintf(&sb, "VSync ")
+            }
+            if debug.culling_enabled {
+                fmt.sbprintf(&sb, "Culling ")
+            }
+            if debug.lod_enabled {
+                fmt.sbprintf(&sb, "LOD ")
+            }
+            if debug.occlusion_enabled {
+                fmt.sbprintf(&sb, "Occlusion ")
+            }
+            extra: string
+            if debug.display_pyramid {
+                extra = fmt.sbprintf(&sb, ", displaying depth mip level %v", debug.display_pyramid_mip_level)
+            }
+            
+            title := strings.to_cstring(&sb)
+            sdl.SetWindowTitle(window, title)
+           
+            cpu_end_profile_zone()
+        }
         
         if gpu_recreate_swapchain_if_needed(gpu, debug.vsync, vsync_changed) {
             ok := get_next_image(gpu, frame_semaphore, frame_index)
@@ -607,7 +683,7 @@ main :: proc () {
         
         frame_descriptor: Frame_Descriptor
         {
-            cpu_scoped_profile_zone("Setup Descriptor Heap")
+            cpu_profile_scope("Setup Descriptor Heap")
             
             frame_descriptor.descriptor_offset = DescriptorStaticLimit              + auto_cast frame_index * DescriptorPerFrameLimit
             frame_descriptor.descriptor_end    = frame_descriptor.descriptor_offset +                     1 * DescriptorPerFrameLimit
@@ -766,13 +842,14 @@ main :: proc () {
         // @api expecting the user to pass the frame index is a source for mistakes
         cmd := gpu_begin_command_recording(gpu, gpu.command_pools[frame_index], gpu.general_queue)
         
-        gpu_profile_frame_begin(gpu, cmd)
+        gpu_profile_frame_begin(gpu, cmd, frame_index)
         
         gpu_profile_zone_begin("frame init")
         
         gpu_set_active_heap(cmd, &descriptor_heap)
         
         stats_pool_query_index: u32
+        stats_pool := stats_pools[frame_index]
         vk.CmdResetQueryPool(cmd, stats_pool, 0, stats_count)
         
         ////////////////////////////////////////////////
@@ -790,7 +867,7 @@ main :: proc () {
         // early pass - frustum cull & fill objects that *were* visible last frame
         
         {
-            cpu_scoped_profile_zone("record early pass")
+            cpu_profile_scope("record early pass")
             
             draw_group_count := bump_allocate(bump, uv3)
             
@@ -837,7 +914,7 @@ main :: proc () {
         // depth pyramid generation
         
         {
-            cpu_scoped_profile_zone("record depth pyramid")
+            cpu_profile_scope("record depth pyramid")
             
             gpu_profile_zone_begin("depth pyramid building")
             gpu_labeled_region_begin(cmd, "depth pyramid building", {0.4, 0.8, 0, 1.0})
@@ -877,7 +954,7 @@ main :: proc () {
         // late pass - frustum & occlusion cull & fill objects that were *not* visible last frame
         
         {
-            cpu_scoped_profile_zone("record late pass")
+            cpu_profile_scope("record late pass")
             
             draw_group_count := bump_allocate(bump, uv3)
             
@@ -994,7 +1071,7 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         {
-            cpu_scoped_profile_zone("record copy to swapchain")
+            cpu_profile_scope("record copy to swapchain")
             
             gpu_profile_zone_begin("copy to swapchain")
                 
@@ -1047,80 +1124,11 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        {
-            cpu_scoped_profile_zone("GPU profiling")
-            
-            triangle_count: u64
-            if absolute_frame_index >= MaxFramesInFlight {
-                cpu_scoped_profile_zone("collect and print shader stats")
-                
-                stats_result: [128] u64
-                size := cast(int) size_of_slice(stats_result[:])
-                // @speed we should really not wait for these, as that obviously effects timing measurements
-                check(vk.GetQueryPoolResults(gpu.device, stats_pool, 0, 1, size, &stats_result[0], size_of(stats_result[0]), { ._64, .WAIT }))
-                
-                for i in 0..<stats_pool_query_index {
-                    triangle_count += stats_result[i]
-                }
-            }
-            
-            gpu_profile_collate_times(gpu, print_profile_and_stats)
-            
-            gpu_delta             := gpu_profile_get_zone_duration(gpu, "Frame")
-            early_rendering_delta := gpu_profile_get_zone_duration(gpu, "early rendering pass")
-            late_rendering_delta  := gpu_profile_get_zone_duration(gpu, "late rendering pass")
-            early_cull_delta      := gpu_profile_get_zone_duration(gpu, "early culling")
-            late_cull_delta       := gpu_profile_get_zone_duration(gpu, "late culling")
-            
-            blend_factor_k := time_smoothed_blend_factor(7, cpu_delta)
-            
-            debug.cpu_time             = linear_blend(cpu_delta,             debug.cpu_time,             blend_factor_k)
-            debug.early_cull_time      = linear_blend(early_cull_delta,      debug.early_cull_time,      blend_factor_k)
-            debug.late_cull_time       = linear_blend(late_cull_delta,       debug.late_cull_time,       blend_factor_k)
-            debug.early_rendering_time = linear_blend(early_rendering_delta, debug.early_rendering_time, blend_factor_k)
-            debug.late_rendering_time  = linear_blend(late_rendering_delta,  debug.late_rendering_time,  blend_factor_k)
-            // this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
-            if gpu_delta >= 0 {
-                debug.gpu_time = linear_blend(gpu_delta, debug.gpu_time, blend_factor_k)
-            }
-            
-            view :: proc (seconds: f64) -> time.Duration {
-                return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
-            }
-            
-            cpu_begin_profile_zone("Update window title")
-            sb := strings.builder_make(context.temp_allocator)
-            fmt.sbprintf(&sb, "%v tri, cpu: %.3v, gpu: %.3v (early cull %.3v, early render %.3v, late cull %.3v, late render %.3v)", 
-                view_magnitude(triangle_count, kind = .Count),
-                view(debug.cpu_time), view(debug.gpu_time), 
-                view(debug.early_cull_time), view(debug.early_rendering_time), view(debug.late_cull_time), view(debug.late_rendering_time),
-            )
-            fmt.sbprintf(&sb, ", Features: ")
-            if debug.vsync {
-                fmt.sbprintf(&sb, "VSync ")
-            }
-            if debug.culling_enabled {
-                fmt.sbprintf(&sb, "Culling ")
-            }
-            if debug.lod_enabled {
-                fmt.sbprintf(&sb, "LOD ")
-            }
-            if debug.occlusion_enabled {
-                fmt.sbprintf(&sb, "Occlusion ")
-            }
-            extra: string
-            if debug.display_pyramid {
-                extra = fmt.sbprintf(&sb, ", displaying depth mip level %v", debug.display_pyramid_mip_level)
-            }
-            
-            title := strings.to_cstring(&sb)
-            sdl.SetWindowTitle(window, title)
-            cpu_end_profile_zone()
-        }
-        
         cpu_end_profile_zone()
         
         if print_profile_and_stats {
+            cpu_profile_scope("print cpu profile")
+            
             zones := the_cpu_profile_zones
             
             fmt.printfln("---------------------\nCPU profile:")
@@ -1184,8 +1192,8 @@ main :: proc () {
     destroy_stuff(gpu, &stuff)
     
     vk.DestroySemaphore(gpu.device, frame_semaphore, nil)
-    vk.DestroyQueryPool(gpu.device, stats_pool, nil)
-    vk.DestroyQueryPool(gpu.device, the_gpu_profiler.pool, nil)
+    for state in the_gpu_profiler.states { vk.DestroyQueryPool(gpu.device, state.pool, nil) }
+    for pool in stats_pools              { vk.DestroyQueryPool(gpu.device, pool, nil) }
     
     gpu_deinit(gpu)
 }
@@ -1193,7 +1201,7 @@ main :: proc () {
 ////////////////////////////////////////////////
 
 generate_draws :: proc (gpu: ^Gpu, draw_buffer: Gpu_Slice(Draw), object_rotation: v3, textures: [] Image, geometry: Geometry) -> ([] Draw, u32) {
-    cpu_scoped_profile_zone("Generate Draws")
+    cpu_profile_scope("Generate Draws")
     draws := draw_buffer.cpu[:50_000]
     
     meshlet_visibility_count: u32
@@ -1239,17 +1247,17 @@ cpu_end_profile_zone :: proc () {
     profiler.record_event(the_cpu_profiler, read_cycle_counter(), .EndZone, "")
 }
 
-@(deferred_in=cpu_end_scoped_profile_zone)
-cpu_scoped_profile_zone :: proc (name: string) {
+@(deferred_in=_cpu_end_scoped_profile_zone)
+cpu_profile_scope :: proc (name: string) {
     profiler.record_event(the_cpu_profiler, read_cycle_counter(), .BeginZone, name)
 }
 
-cpu_end_scoped_profile_zone :: proc (_: string) {
+_cpu_end_scoped_profile_zone :: proc (_: string) {
     profiler.record_event(the_cpu_profiler, read_cycle_counter(), .EndZone, "")
 }
 
 @(deferred_in=_cpu_procedure_end_profile_zone)
-cpu_procedure_profile_zone :: proc (loc := #caller_location) {
+cpu_profile_procedure :: proc (loc := #caller_location) {
     profiler.record_event(the_cpu_profiler, read_cycle_counter(), .BeginZone, loc.procedure)
 }
 _cpu_procedure_end_profile_zone :: proc (_ := #caller_location) {

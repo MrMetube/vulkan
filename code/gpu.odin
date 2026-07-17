@@ -226,7 +226,7 @@ Frame_Descriptor :: struct {
 ////////////////////////////////////////////////
 
 gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
-    cpu_procedure_profile_zone()
+    cpu_profile_procedure()
     
     gpu: Gpu
     
@@ -248,7 +248,7 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
         vk.load_proc_addresses_global(get_instance_proc)
         
         {
-            cpu_scoped_profile_zone("Vulkan Instance")
+            cpu_profile_scope("Vulkan Instance")
             
             instance_extension_names: [dynamic; 16] cstring
             if ODIN_OS == .Windows {
@@ -400,7 +400,7 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
     // Extensions
     
     {
-        cpu_scoped_profile_zone("Device")
+        cpu_profile_scope("Device")
         device_extensions := [] cstring { 
             vk.KHR_SWAPCHAIN_EXTENSION_NAME,
             vk.EXT_MESH_SHADER_EXTENSION_NAME,
