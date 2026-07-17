@@ -101,7 +101,7 @@ Draw_Globals :: struct #all_or_none { // :Shader:
     meshlet_data_buffer: vk.DeviceAddress "uint",
     vertex_buffer:       vk.DeviceAddress "Vertex",
     
-    meshlet_visibility_buffer: vk.DeviceAddress "uint8_t",
+    meshlet_visibility_buffer: vk.DeviceAddress "uint",
     depth_pyramid_index: Texture_Index,
 }
 
@@ -345,8 +345,8 @@ main :: proc () {
         _, max_draw_visibility_count = generate_draws(gpu, draw_buffer, 0, textures[:], geometry)
     }
     
-    draw_visibility_buffer    := gpu_allocate(gpu, [] u32, 256 * Megabyte / size_of(u32), 16, memory, { .STORAGE_BUFFER, .TRANSFER_DST })
-    meshlet_visibility_buffer := gpu_allocate(gpu, []  b8, max_draw_visibility_count,     16, memory, { .STORAGE_BUFFER, .TRANSFER_DST })
+    draw_visibility_buffer    := gpu_allocate(gpu, [] u32, 256 * Megabyte / size_of(u32),         16, memory, { .STORAGE_BUFFER, .TRANSFER_DST })
+    meshlet_visibility_buffer := gpu_allocate(gpu, [] u32, (max_draw_visibility_count + 31) / 32, 16, memory, { .STORAGE_BUFFER, .TRANSFER_DST })
     dvb_and_mvb_cleared := false
     
     cpu_end_profile_zone()

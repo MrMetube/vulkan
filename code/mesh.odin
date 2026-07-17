@@ -104,7 +104,7 @@ load_mesh :: proc (geometry: ^Geometry, filepath: string, _allocator: Allocator)
 
 append_meshlets :: proc (geometry: ^Geometry, mesh_vertices: [] Vertex, mesh_indices: [] u32) -> (count: u32) {
     // :Shader: meshlet.mesh
-    MaxVertices  :: 64
+    MaxVertices  ::  64
     MaxTriangles :: 126
     
     cone_weight :: 0.25 // 0 when not culling, otherwise 0..1 

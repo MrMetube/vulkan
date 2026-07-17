@@ -6,7 +6,7 @@
 
 #include "common.glsl"
 
-// @volatile
+// @volatile mesh.odin
 #define MaxVertices   64
 #define MaxTriangles 126
 
