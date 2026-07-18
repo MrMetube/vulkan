@@ -95,7 +95,7 @@ void main() {
         // note that EXT_mesh_shader doesn't guarantee support for >4M commands anyway, but 4M commands ~= 16B triangles which is surely enough
         //
         
-        uint draw_command_index = atomicAdd(data.draw_group_count.v.x, task_group_count);
+        uint draw_command_index = atomicAdd(data.draw_group_count.v.command_count, task_group_count);
         
         // drop draw calls on overflow; this limits us to ~4M visible draws or ~32B visible triangles, whichever is larger
         if (draw_command_index + task_group_count < TaskWidthLimit ) {

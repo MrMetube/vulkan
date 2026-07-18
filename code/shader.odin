@@ -42,6 +42,7 @@ generate_shader_api :: proc (output_file: string) {
     // :Shader: all types used by the cpu and the gpu
     
     // structs used in buffers
+    append_simple_struct(&builder, Draw_Command_Count)
     append_simple_struct(&builder, Draw_Command)
     append_simple_struct(&builder, Draw)
     append_simple_struct(&builder, Mesh_LOD)
@@ -55,6 +56,7 @@ generate_shader_api :: proc (output_file: string) {
     
     // anything with a vk.DeviceAddress member
     collect_types(&simple_types, &reference_types, Cull_Data)
+    collect_types(&simple_types, &reference_types, Submit_Data)
     collect_types(&simple_types, &reference_types, Draw_Data)
     collect_types(&simple_types, &reference_types, Depth_Data)
     collect_types(&simple_types, &reference_types, UI_Data)
@@ -67,6 +69,7 @@ generate_shader_api :: proc (output_file: string) {
     }
     
     // push constants
+    append_buffer_reference_struct(&builder, Submit_Data)
     append_buffer_reference_struct(&builder, Cull_Data)
     append_buffer_reference_struct(&builder, Draw_Data)
     append_buffer_reference_struct(&builder, Depth_Data)

@@ -1,0 +1,36 @@
+#version 460
+#if 0
+#extension GL_EXT_null_initializer: require
+
+#include "common.glsl"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform _ { Submit_Data data; };
+
+void main() {
+    uint thread_index = gl_LocalInvocationID.x;
+    Draw_Command_Count_p command_count = data.draw_command_count;
+    uint count = command_count.v.command_count;
+    
+    // Represent command count = X*64*1, where X has a maximum of 65535 (per EXT_mesh_shader limits).
+    // This allows us to reach ~4M commands. Note that EXT_mesh_shader doesn't guarentee support for 
+    // >4M commands ~= 16B triangles which is surely enough for everyone.
+    if (thread_index == 0) {
+        command_count.v.group_count_x = min((count + 63) / 64, 65535);
+        command_count.v.group_count_y = 64;
+        command_count.v.group_count_z = 1;
+    }
+    
+    // The above may result in reading command data that was never written, because of the upwards rounding.
+    // As such the excess entries are padded with (up to 63) dummy commands.
+    uint boundary = (count + 63) & ~63;
+    Draw_Command dummy = {};
+    
+    if (count + thread_index < boundary) {
+        data.draw_command_buffer[count + thread_index].v = dummy;
+    }
+}
+#else
+void main() {}
+#endif

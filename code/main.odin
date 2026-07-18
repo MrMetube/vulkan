@@ -81,8 +81,22 @@ Cull_Data :: struct #all_or_none { // :Shader:
     draw_visibility_buffer: vk.DeviceAddress "bool",
     draw_buffer:            vk.DeviceAddress "Draw",
     mesh_buffer:            vk.DeviceAddress "Mesh",
-    draw_group_count:       vk.DeviceAddress "uvec3",
+    draw_group_count:       vk.DeviceAddress "Draw_Command_Count",
     draw_command_buffer:    vk.DeviceAddress "Draw_Command",
+}
+
+Draw_Command_Count :: struct {
+    // @volatile gpu_draw_mesh_tasks_indirect expects a pointer to a group_count: uvec3, but is given a pointer to this.
+    // Therefore the group_count must be at offset 0.
+    group_count_x: u32,
+    group_count_y: u32,
+    group_count_z: u32,
+    command_count: u32,
+}
+
+Submit_Data :: struct {
+    draw_command_count:  vk.DeviceAddress "Draw_Command_Count",
+    draw_command_buffer: vk.DeviceAddress "Draw_Command",
 }
 
 // @volatile Cull_Data.flags
@@ -364,6 +378,7 @@ main :: proc () {
     meshlet_frag_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.frag")
     cull_shader         := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/cull.comp")
     depth_reduce_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/depth_reduce.comp")
+    task_submit_shader  := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/task_submit.comp")
     
     ui_vert_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/ui.vert")
     ui_frag_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/ui.frag")
@@ -401,10 +416,11 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     Stage :: enum { early, late }
-    cull_pipelines:    [Stage] Pipeline
-    depth_pipeline:    Pipeline
-    meshlet_pipelines: [Stage] Pipeline
-    ui_pipeline:       Pipeline
+    cull_pipelines:       [Stage] Pipeline
+    meshlet_pipelines:    [Stage] Pipeline
+    task_submit_pipeline: Pipeline
+    depth_pipeline:       Pipeline
+    ui_pipeline:          Pipeline
     
     ////////////////////////////////////////////////
     
@@ -641,6 +657,13 @@ main :: proc () {
             fmt.printfln("Recreated depth_pipeline.")
         }
         
+        if !pipeline_is_valid(task_submit_pipeline) || test_and_reset_shaders_was_modified(task_submit_shader) {
+            destroy_pipeline(gpu, task_submit_pipeline)
+            immediately := !pipeline_is_valid(task_submit_pipeline)
+            task_submit_pipeline = gpu_create_compute_pipeline(gpu, get_shader(task_submit_shader, immediately), descriptor_heap)
+            fmt.printfln("Recreated task_submit_pipeline.")
+        }
+        
         reloaded_meshlet_shaders := test_and_reset_shaders_was_modified(meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader)
         for &meshlet_pipeline, stage in meshlet_pipelines {
             if !pipeline_is_valid(meshlet_pipeline) || reloaded_meshlet_shaders {
@@ -869,11 +892,17 @@ main :: proc () {
         {
             cpu_profile_scope("record early pass")
             
-            draw_group_count := bump_allocate(bump, uv3)
+            draw_group_count := bump_allocate(bump, Draw_Command_Count)
             
             cull_data := bump_allocate(bump, Cull_Data)
             cull_data.cpu^ = common_cull_data
             cull_data.cpu.draw_group_count = draw_group_count.gpu.p
+            
+            submit_data := bump_allocate(bump, Submit_Data)
+            submit_data.cpu^ = {
+                draw_command_buffer = draw_commands.gpu.p,
+                draw_command_count  = draw_group_count.gpu.p,
+            }
             
             draw_data := bump_allocate(bump, Draw_Data)
             draw_data.cpu^ = common_draw_data
@@ -888,12 +917,17 @@ main :: proc () {
                 gpu_fill_memory(cmd, meshlet_visibility_buffer, len(meshlet_visibility_buffer.cpu), 0)
             }
             
-            culling_end(cmd, cull_pipelines[.early], cull_shader, &frame_descriptor, cull_data, draw_group_count, max_draw_count, early = true)
+            gpu_fill_memory_address(cmd, draw_group_count.gpu, 0, size_of(draw_group_count.cpu.command_count), offset_of(Draw_Command_Count, command_count))
             
-            ////////////////////////////////////////////////
+            culling_end(cmd, cull_pipelines[.early], cull_shader, &frame_descriptor, cull_data, max_draw_count, early = true)
+            
+            
+            gpu_barrier(cmd, { .COMPUTE_SHADER }, { .COMPUTE_SHADER })
+            gpu_set_pipeline(cmd, task_submit_pipeline)
+            gpu_dispatch(cmd, &frame_descriptor, submit_data.gpu, get_group_count(get_shader(task_submit_shader)))
+            
             
             gpu_barrier(cmd, { .BOTTOM_OF_PIPE, .COMPUTE_SHADER }, { .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS })
-            
             begin_meshlet_rendering(gpu, cmd, &stuff, {0.07, 0.07, 0.07, 1}, early = true)
                 
                 gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
@@ -956,19 +990,32 @@ main :: proc () {
         {
             cpu_profile_scope("record late pass")
             
-            draw_group_count := bump_allocate(bump, uv3)
+            draw_group_count := bump_allocate(bump, Draw_Command_Count)
             
             cull_data := bump_allocate(bump, Cull_Data)
             cull_data.cpu^ = common_cull_data
             cull_data.cpu.draw_group_count = draw_group_count.gpu.p
             
+            submit_data := bump_allocate(bump, Submit_Data)
+            submit_data.cpu^ = {
+                draw_command_buffer = draw_commands.gpu.p,
+                draw_command_count  = draw_group_count.gpu.p,
+            }
+            
             draw_data := bump_allocate(bump, Draw_Data)
             draw_data.cpu^ = common_draw_data
             
             culling_begin(cmd, early = false)
-            culling_end(cmd, cull_pipelines[.late], cull_shader, &frame_descriptor, cull_data, draw_group_count, cast(u32) len(draws), early = false)
             
-            ////////////////////////////////////////////////
+            gpu_fill_memory(cmd, draw_group_count.gpu, 0, size_of(draw_group_count.cpu.command_count),  0)
+            
+            culling_end(cmd, cull_pipelines[.late], cull_shader, &frame_descriptor, cull_data, cast(u32) len(draws), early = false)
+            
+            
+            gpu_barrier(cmd, { .COMPUTE_SHADER }, { .COMPUTE_SHADER })
+            gpu_set_pipeline(cmd, task_submit_pipeline)
+            gpu_dispatch(cmd, &frame_descriptor, submit_data.gpu, get_group_count(get_shader(task_submit_shader)))
+            
             
             gpu_barrier(cmd, 
                 { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS,  .COMPUTE_SHADER }, 
@@ -1333,14 +1380,7 @@ culling_begin :: proc (cmd: vk.CommandBuffer, early: bool) {
         // ...
 }
 
-culling_end :: proc (cmd: vk.CommandBuffer, cull_pipeline: Pipeline, cull_shader: Shader_Id, frame_descriptor: ^Frame_Descriptor, cull_data: Gpu_Address(Cull_Data), draw_group_count: Gpu_Address(uv3), max_draw_count: u32, early: bool) {
-     {
-        // group.x = 0
-        gpu_fill_memory(cmd, draw_group_count.gpu, 0, size_of(draw_group_count.cpu.x),  0)
-        // group.yz = 1
-        gpu_fill_memory(cmd, draw_group_count.gpu, 1, size_of(draw_group_count.cpu.yz), size_of(draw_group_count.cpu.x))
-    }
-    
+culling_end :: proc (cmd: vk.CommandBuffer, cull_pipeline: Pipeline, cull_shader: Shader_Id, frame_descriptor: ^Frame_Descriptor, cull_data: Gpu_Address(Cull_Data), max_draw_count: u32, early: bool) {
     before_dispatch := vk.PipelineStageFlags2 { .ALL_TRANSFER  }
     if !early {
         before_dispatch += { .COMPUTE_SHADER } // depth pyramid

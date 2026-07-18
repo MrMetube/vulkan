@@ -28,7 +28,7 @@ bool cone_cull(vec3 center, float radius, vec3 axis, float cutoff, vec3 camera);
 
 void main() {
     uint thread_index  = gl_LocalInvocationIndex;
-    uint command_index = gl_WorkGroupID.x; // :MeshShaderGroupSizeLimits:
+    uint command_index = gl_WorkGroupID.x * 64 + gl_WorkGroupID.y; // :MeshShaderGroupSizeLimits:
     
     Draw_Command command = data.draw_command_buffer[command_index].v;
     uint draw_index                  = command.draw_index;
