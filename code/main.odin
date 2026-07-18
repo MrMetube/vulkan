@@ -59,6 +59,11 @@ Depth_Mip :: struct {
 
 ////////////////////////////////////////////////
 
+// Maximum number of total task shader workgroups
+TaskWidthLimit :: 1 << 22 // :Shader:
+// Maximum number of total visible clusters
+ClusterLimit   :: 1 << 25 // :Shader:
+
 Cull_Data :: struct #all_or_none { // :Shader:
     // data
     view_from_world: m4,
@@ -125,6 +130,37 @@ Draw_Data :: struct #all_or_none { // :Shader:
     meshlet_buffer:            vk.DeviceAddress "Meshlet",      // task, mesh
     meshlet_data_buffer:       vk.DeviceAddress "uint",         // mesh
     vertex_buffer:             vk.DeviceAddress "Vertex",       // mesh
+}
+
+// @naming, @copypasta remove unused fields
+Cluster_Cull_Data :: struct #all_or_none { // :Shader:
+    view_from_world:  m4, // @todo alignment requirements
+    light_pos:        v3,
+    
+    screen_size: v2,
+    flags: u32,
+    
+    s00, s11:      f32,
+    near_z, far_z: f32,
+    pyramid_size:  v2,
+    frustum:       [4] f32,
+    
+    // bindings
+    depth_pyramid_index: Texture_Index,
+    
+    cluster_indices:           vk.DeviceAddress "uint",
+    cluster_count:             vk.DeviceAddress "Cluster_Count",
+    draw_command_buffer:       vk.DeviceAddress "Draw_Command",
+    meshlet_visibility_buffer: vk.DeviceAddress "uint",
+    draw_buffer:               vk.DeviceAddress "Draw",
+    meshlet_buffer:            vk.DeviceAddress "Meshlet",
+    meshlet_data_buffer:       vk.DeviceAddress "uint",
+    vertex_buffer:             vk.DeviceAddress "Vertex",
+}
+
+Cluster_Count :: struct {
+    group: uv3,
+    count: u32,
 }
 
 Depth_Data :: struct { // :Shader:
@@ -238,6 +274,7 @@ main :: proc () {
         occlusion_enabled: bool,
         display_pyramid:   bool,
         display_pyramid_mip_level: i32,
+        cluster_submit:    bool,
         
         cpu_time:  f64,
         gpu_time:  f64,
@@ -251,6 +288,8 @@ main :: proc () {
         culling_enabled   = true,
         lod_enabled       = true,
         occlusion_enabled = true,
+        
+        cluster_submit = true, // @todo make a toggle button
     }
     
     cpu_begin_profile_zone("OS Metrics sleep")
@@ -328,7 +367,7 @@ main :: proc () {
     mesh_buffer         := gpu_allocate(gpu, [] Mesh,    256 * Megabyte / size_of(Mesh),    16, Memory_Kind.Default)
     
     // This is written by the cpu every frame in the worst case.
-    draw_buffer := gpu_allocate(gpu, [] Draw, 256 * Megabyte / size_of(Draw), 16, Memory_Kind.Default)
+    draw_buffer := gpu_allocate_slice(gpu, [] Draw, 256 * Megabyte / size_of(Draw), memory = .Default)
     
     geometry: Geometry
     max_draw_visibility_count: u32
@@ -356,9 +395,11 @@ main :: proc () {
         _, max_draw_visibility_count = generate_draws(gpu, draw_buffer, 0, textures[:], geometry)
     }
     
-    draw_commands             := gpu_allocate(gpu, [] Draw_Command, 256 * Megabyte / size_of(Draw_Command), 16, Memory_Kind.GPU) 
-    draw_visibility_buffer    := gpu_allocate(gpu, [] u32,          256 * Megabyte / size_of(u32),          16, Memory_Kind.GPU, { .STORAGE_BUFFER, .TRANSFER_DST })
-    meshlet_visibility_buffer := gpu_allocate(gpu, [] u32,          (max_draw_visibility_count + 31) / 32,  16, Memory_Kind.GPU, { .STORAGE_BUFFER, .TRANSFER_DST })
+    draw_commands              := gpu_allocate_slice(gpu, [] Draw_Command,     TaskWidthLimit,                        memory = .GPU) 
+    draw_visibility_buffer     := gpu_allocate_slice(gpu, [] u32,              256 * Megabyte / size_of(u32),         memory = .GPU, usage = { .STORAGE_BUFFER, .TRANSFER_DST })
+    meshlet_visibility_buffer  := gpu_allocate_slice(gpu, [] u32,              (max_draw_visibility_count + 31) / 32, memory = .GPU, usage = { .STORAGE_BUFFER, .TRANSFER_DST })
+    cluster_indices            := gpu_allocate_slice(gpu, [] u32,              ClusterLimit,                          memory = .GPU)
+    cluster_count              := gpu_allocate_type( gpu, Cluster_Count,                                              memory = .GPU)
     dvb_and_mvb_cleared := false
     
     cpu_end_profile_zone()
@@ -379,6 +420,7 @@ main :: proc () {
     cull_shader         := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/cull.comp")
     depth_reduce_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/depth_reduce.comp")
     task_submit_shader  := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/task_submit.comp")
+    cluster_cull_shader    := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/cluster_cull.comp")
     
     ui_vert_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/ui.vert")
     ui_frag_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/ui.frag")
@@ -419,6 +461,7 @@ main :: proc () {
     cull_pipelines:       [Stage] Pipeline
     meshlet_pipelines:    [Stage] Pipeline
     task_submit_pipeline: Pipeline
+    cluster_cull_pipelines: [Stage] Pipeline
     depth_pipeline:       Pipeline
     ui_pipeline:          Pipeline
     
@@ -632,6 +675,7 @@ main :: proc () {
         watchers_check_for_modification(watchers)
         recompile_shaders_if_needed(watchers, cull_shader)
         recompile_shaders_if_needed(watchers, depth_reduce_shader)
+        recompile_shaders_if_needed(watchers, cluster_cull_shader)
         recompile_shaders_if_needed(watchers, meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader)
         recompile_shaders_if_needed(watchers, ui_vert_shader, ui_frag_shader)
         
@@ -662,6 +706,17 @@ main :: proc () {
             immediately := !pipeline_is_valid(task_submit_pipeline)
             task_submit_pipeline = gpu_create_compute_pipeline(gpu, get_shader(task_submit_shader, immediately), descriptor_heap)
             fmt.printfln("Recreated task_submit_pipeline.")
+        }
+        
+        reloaded_cluster_cull_shader := test_and_reset_shaders_was_modified(cluster_cull_shader)
+        for &cluster_cull_pipeline, stage in cluster_cull_pipelines {
+            if !pipeline_is_valid(cluster_cull_pipeline) || reloaded_cluster_cull_shader {
+                destroy_pipeline(gpu, cluster_cull_pipeline)
+                immediately := !pipeline_is_valid(cluster_cull_pipeline)
+                constants := [] Specialization_Constant { /* late = */ { b = stage == .late } }
+                cluster_cull_pipeline = gpu_create_compute_pipeline(gpu, get_shader(cluster_cull_shader, immediately), descriptor_heap)
+                fmt.printfln("Recreated cluster_cull_pipeline.")
+            }
         }
         
         reloaded_meshlet_shaders := test_and_reset_shaders_was_modified(meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader)
@@ -917,7 +972,7 @@ main :: proc () {
                 gpu_fill_memory(cmd, meshlet_visibility_buffer, len(meshlet_visibility_buffer.cpu), 0)
             }
             
-            gpu_fill_memory_address(cmd, draw_group_count.gpu, 0, size_of(draw_group_count.cpu.command_count), offset_of(Draw_Command_Count, command_count))
+            gpu_fill_memory_address(cmd, draw_group_count.gpu, 0, size_of(draw_group_count.cpu.command_count), auto_cast offset_of(Draw_Command_Count, command_count))
             
             culling_end(cmd, cull_pipelines[.early], cull_shader, &frame_descriptor, cull_data, max_draw_count, early = true)
             
@@ -926,6 +981,49 @@ main :: proc () {
             gpu_set_pipeline(cmd, task_submit_pipeline)
             gpu_dispatch(cmd, &frame_descriptor, submit_data.gpu, get_group_count(get_shader(task_submit_shader)))
             
+            
+            if debug.cluster_submit {
+                gpu_barrier(cmd, { .DRAW_INDIRECT }, { .ALL_TRANSFER })
+                
+                gpu_fill_memory_address(cmd, cluster_count.gpu, 0)
+                
+                gpu_barrier(cmd, { .ALL_TRANSFER }, { .COMPUTE_SHADER })
+                
+                cluster_cull_data := bump_allocate(bump, Cluster_Cull_Data)
+                cluster_cull_data.cpu^ = {
+                    view_from_world = draw_data.cpu.view_from_world,
+                    light_pos       = draw_data.cpu.light_pos,
+                    screen_size     = draw_data.cpu.screen_size,
+                    flags           = draw_data.cpu.flags,
+                    s00             = draw_data.cpu.s00,
+                    s11             = draw_data.cpu.s11,
+                    near_z          = draw_data.cpu.near_z,
+                    far_z           = draw_data.cpu.far_z,
+                    pyramid_size    = draw_data.cpu.pyramid_size,
+                    frustum         = draw_data.cpu.frustum,
+                    
+                    depth_pyramid_index = draw_data.cpu.depth_pyramid_index,
+                    
+                    cluster_count   = cluster_count.gpu.p,
+                    cluster_indices = cluster_indices.gpu.p,
+                    
+                    draw_command_buffer       = draw_data.cpu.draw_command_buffer,
+                    meshlet_visibility_buffer = draw_data.cpu.meshlet_visibility_buffer,
+                    draw_buffer               = draw_data.cpu.draw_buffer,
+                    meshlet_buffer            = draw_data.cpu.meshlet_buffer,
+                    meshlet_data_buffer       = draw_data.cpu.meshlet_data_buffer,
+                    vertex_buffer             = draw_data.cpu.vertex_buffer,
+                }
+                
+                gpu_set_pipeline(cmd, cluster_cull_pipelines[.early])
+                
+                // @cleanup into helper and enforce Gpu_Pointer(uv3) for all draw indirects calls
+                cluster_count_just_the_group_size := Gpu_Pointer(type_of(cluster_count.cpu.group)) { p = cluster_count.gpu.p + cast(vk.DeviceAddress) offset_of(Cluster_Count, group) }
+                
+                // gpu_dispatch_indirect(cmd, &frame_descriptor, cluster_cull_data.gpu, cluster_count_just_the_group_size)
+            } else {
+                unimplemented()
+            }
             
             gpu_barrier(cmd, { .BOTTOM_OF_PIPE, .COMPUTE_SHADER }, { .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS })
             begin_meshlet_rendering(gpu, cmd, &stuff, {0.07, 0.07, 0.07, 1}, early = true)
@@ -1218,14 +1316,17 @@ main :: proc () {
     gpu_free(gpu, draw_buffer)
     gpu_free(gpu, draw_visibility_buffer)
     gpu_free(gpu, meshlet_visibility_buffer)
+    gpu_free(gpu, cluster_count)
+    gpu_free(gpu, cluster_indices)
     
     for &bump in frame_bump_allocators {
         bump_allocator_delete(gpu, &bump)
     }
     
     for stage in Stage {
-        destroy_pipeline(gpu, meshlet_pipelines[stage])
         destroy_pipeline(gpu, cull_pipelines[stage])
+        destroy_pipeline(gpu, cluster_cull_pipelines[stage])
+        destroy_pipeline(gpu, meshlet_pipelines[stage])
     }
     destroy_pipeline(gpu, depth_pipeline)
     destroy_pipeline(gpu, ui_pipeline)
