@@ -1488,7 +1488,7 @@ gpu_copy_from_texture :: proc (cmd: vk.CommandBuffer, destination: vk.DeviceAddr
 }
 
 gpu_fill_memory :: proc { gpu_fill_memory_address, gpu_fill_memory_slice }
-gpu_fill_memory_address :: proc (cmd: vk.CommandBuffer, destination: Gpu_Pointer($T), value: u32, size: vk.DeviceSize = size_of(T), offset: vk.DeviceSize = 0) {
+gpu_fill_memory_address :: proc (cmd: vk.CommandBuffer, destination: Gpu_Pointer($T), value: u32, size: vk.DeviceSize = size_of(T), #any_int offset: vk.DeviceSize = 0) {
     buffer, buffer_offset := gpu_reflect_get_buffer(destination.p)
     vk.CmdFillBuffer(cmd, buffer, buffer_offset + offset, size, value)
 }

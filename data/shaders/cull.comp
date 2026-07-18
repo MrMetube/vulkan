@@ -85,19 +85,18 @@ void main() {
         uint task_group_count = (lod.meshlet_count + TaskWidth-1) / TaskWidth;
         
         //
-        // :MeshShaderGroupSizeLimits:
-        // The draw_group_count.xyz fields are not guarenteed to be full 32-bit integers by vulkan. Therefore the total count can overflow 
-        // the single x-dimension if too many draw commands are emitted. A solution to this problem can be found in niagara at commit:
-        //     https://github.com/zeux/niagara/commit/0eae88480ad110d5ecabed74b4452ab6d7136881
+        // There are limits enforced by EXT_mesh_shader on the maximal value of each component of the group size
+        // that are below the max 32-bit integer. The branch tasksubmit_shader tried to work around this issue
+        // by first summing the total command count, then distributing it over x and y, which are then multiplied
+        // by the reader to get the actual command index. This caused a severe performance degredation and was reverted.
         //
-        // Here is its general idea:
-        // represent command count as X*64*1; X has a max of 65535 (per EXT_mesh_shader limits), so this allows us to reach ~4M commands
-        // note that EXT_mesh_shader doesn't guarantee support for >4M commands anyway, but 4M commands ~= 16B triangles which is surely enough
+        // This means that the maximum draw commands per render pass are now limited to the per-component limit. This is
+        // separate from the bounds check with TaskWidthLimit, that ensure that the command data itself does not overflow
+        // the buffer allocated for it.
         //
-        
         uint draw_command_index = atomicAdd(data.draw_group_count.v.x, task_group_count);
         
-        // drop draw calls on overflow; this limits us to ~4M visible draws or ~32B visible triangles, whichever is larger
+        // Drop draw calls on overflow; this limits us to ~4M visible draws or ~32B visible triangles, whichever is larger.
         if (draw_command_index + task_group_count < TaskWidthLimit ) {
             for (uint i = 0; i < task_group_count; i += 1) {
                 Draw_Command_p command = data.draw_command_buffer[draw_command_index + i];
