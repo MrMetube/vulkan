@@ -51,6 +51,11 @@ vec3 transform(vec4 orientation, float scale, vec3 offset, vec3 p) {
     return rotate(orientation, p) * scale + offset;
 }
 
+bool cone_cull(vec3 center, float radius, vec3 axis, float cutoff, vec3 camera) {
+    vec3 delta = center - camera;
+    return dot(delta, axis) >= cutoff * length(delta) + radius;
+}
+
 // Based on this paper: 
 //     2D Polyhedral Bounds of a Clipped, Perspective-Projected 3D Sphere. Michael Mara, Morgan McGuire. 2013
 //     https://jcgt.org/published/0002/02/05/paper.pdf

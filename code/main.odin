@@ -57,7 +57,58 @@ Depth_Mip :: struct {
     storage_index: Texture_Index,
 }
 
+Stage :: enum { early, late }
+Pipelines :: struct {
+    culling:      [Stage] Pipeline,
+    depth_reduce: Pipeline,
+    meshlets:     [Stage] Pipeline,
+    ui:           Pipeline,
+}
+
+Shaders :: struct {
+    meshlet_task: Shader_Id,
+    meshlet_mesh: Shader_Id,
+    meshlet_frag: Shader_Id,
+    culling: Shader_Id,
+    depth_reduce: Shader_Id,
+    ui_vert: Shader_Id,
+    ui_frag: Shader_Id,
+}
+
+Buffers :: struct {
+    vertices:     Gpu_Slice(Vertex),
+    meshlets:     Gpu_Slice(Meshlet),
+    meshlet_data: Gpu_Slice(u32),
+    meshes:       Gpu_Slice(Mesh),
+    draws:        Gpu_Slice(Draw),
+    
+    draw_commands:      Gpu_Slice(Draw_Command),
+    // @todo both need to be cleared to 1 on init. is allocated memory guarenteed to be zeroed? if so then we could make 0 the default by making them xx_occluded
+    draw_visibility:    Gpu_Slice(u32),
+    meshlet_visibility: Gpu_Slice(u32),
+}
+
+Debug :: struct {
+    vsync: bool,
+    
+    culling_enabled:   bool,
+    lod_enabled:       bool,
+    occlusion_enabled: bool,
+    display_pyramid:   bool,
+    display_pyramid_mip_level: i32,
+    
+    cpu_time:  f64,
+    gpu_time:  f64,
+    early_rendering_time: f64,
+    late_rendering_time:  f64,
+    early_cull_time: f64,
+    late_cull_time:  f64,
+}
+
 ////////////////////////////////////////////////
+
+// Maximum number of total task shader workgroups
+TaskWidthLimit :: 1 << 22 // :Shader:
 
 Cull_Data :: struct #all_or_none { // :Shader:
     // data
@@ -90,6 +141,7 @@ DebugFlag_FrustumCulling   :: (1 << 0)
 DebugFlag_LevelOfDetail    :: (1 << 1)
 DebugFlag_OcclusionCulling :: (1 << 2)
 
+// @todo It would be way simpler if a bit wasteful to just always pass the shader all buffer addresses (buffers: Buffers).
 Draw_Data :: struct #all_or_none { // :Shader:
     view_from_world:  m4, // @todo alignment requirements
     light_pos:        v3,
@@ -216,22 +268,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    debug: struct {
-        vsync: bool,
-        
-        culling_enabled:   bool,
-        lod_enabled:       bool,
-        occlusion_enabled: bool,
-        display_pyramid:   bool,
-        display_pyramid_mip_level: i32,
-        
-        cpu_time:  f64,
-        gpu_time:  f64,
-        early_rendering_time: f64,
-        late_rendering_time:  f64,
-        early_cull_time: f64,
-        late_cull_time:  f64,
-    } = {
+    debug := Debug {
         vsync = true,
         
         culling_enabled   = true,
@@ -291,7 +328,7 @@ main :: proc () {
             copy(cpu_data, loaded_texture.data)
             
             gpu_image_barriers(cmd, {},
-                create_image_barrier_from_undefined(&texture, { .ALL_TRANSFER }, { .MEMORY_READ, .MEMORY_WRITE }, .GENERAL),
+                create_image_barrier_from_undefined(&texture, { .ALL_TRANSFER }, { .MEMORY_READ, .MEMORY_WRITE }),
             )
             
             gpu_copy_to_texture(cmd, texture, gpu_data)
@@ -307,14 +344,15 @@ main :: proc () {
     // @speed most of these buffer could be moved to GPU local memory
     cpu_begin_profile_zone("Allocate buffers")
     
+    buffers: Buffers
     // geometry data is just written and never read by the cpu
-    vertex_buffer       := gpu_allocate(gpu, [] Vertex,  256 * Megabyte / size_of(Vertex),  16, Memory_Kind.Default)
-    meshlet_buffer      := gpu_allocate(gpu, [] Meshlet, 256 * Megabyte / size_of(Meshlet), 16, Memory_Kind.Default)
-    meshlet_data_buffer := gpu_allocate(gpu, [] u32,     256 * Megabyte / size_of(u32),     16, Memory_Kind.Default)
-    mesh_buffer         := gpu_allocate(gpu, [] Mesh,    256 * Megabyte / size_of(Mesh),    16, Memory_Kind.Default)
+    buffers.vertices     = gpu_allocate_slice(gpu, [] Vertex,  256 * Megabyte / size_of(Vertex),  memory = .Default)
+    buffers.meshlets     = gpu_allocate_slice(gpu, [] Meshlet, 256 * Megabyte / size_of(Meshlet), memory = .Default)
+    buffers.meshlet_data = gpu_allocate_slice(gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = .Default)
+    buffers.meshes       = gpu_allocate_slice(gpu, [] Mesh,    256 * Megabyte / size_of(Mesh),    memory = .Default)
     
     // This is written by the cpu every frame in the worst case.
-    draw_buffer := gpu_allocate(gpu, [] Draw, 256 * Megabyte / size_of(Draw), 16, Memory_Kind.Default)
+    buffers.draws = gpu_allocate(gpu, [] Draw, 256 * Megabyte / size_of(Draw), 16, Memory_Kind.Default)
     
     geometry: Geometry
     max_draw_visibility_count: u32
@@ -333,18 +371,18 @@ main :: proc () {
             }
         }
         
-        copy(vertex_buffer.cpu,       geometry.vertices[:])
-        copy(meshlet_buffer.cpu,      geometry.meshlets[:])
-        copy(meshlet_data_buffer.cpu, geometry.meshlet_data[:])
-        copy(mesh_buffer.cpu,         geometry.meshes[:])
+        copy(buffers.vertices.cpu,     geometry.vertices[:])
+        copy(buffers.meshlets.cpu,     geometry.meshlets[:])
+        copy(buffers.meshlet_data.cpu, geometry.meshlet_data[:])
+        copy(buffers.meshes.cpu,       geometry.meshes[:])
         
         // @todo clearly separate what is temporary and what is kepts outside the temp allocator Currently generate_draws just wants to number of meshes for its randomness.
-        _, max_draw_visibility_count = generate_draws(gpu, draw_buffer, 0, textures[:], geometry)
+        _, max_draw_visibility_count = generate_draws(gpu, buffers.draws, 0, textures[:], geometry)
     }
     
-    draw_commands             := gpu_allocate(gpu, [] Draw_Command, 256 * Megabyte / size_of(Draw_Command), 16, Memory_Kind.GPU) 
-    draw_visibility_buffer    := gpu_allocate(gpu, [] u32,          256 * Megabyte / size_of(u32),          16, Memory_Kind.GPU, { .STORAGE_BUFFER, .TRANSFER_DST })
-    meshlet_visibility_buffer := gpu_allocate(gpu, [] u32,          (max_draw_visibility_count + 31) / 32,  16, Memory_Kind.GPU, { .STORAGE_BUFFER, .TRANSFER_DST })
+    buffers.draw_commands      = gpu_allocate_slice(gpu, [] Draw_Command, TaskWidthLimit,                        memory = .GPU) 
+    buffers.draw_visibility    = gpu_allocate_slice(gpu, [] u32,          256 * Megabyte / size_of(u32),         memory = .GPU, usage = { .STORAGE_BUFFER, .TRANSFER_DST })
+    buffers.meshlet_visibility = gpu_allocate_slice(gpu, [] u32,          (max_draw_visibility_count + 31) / 32, memory = .GPU, usage = { .STORAGE_BUFFER, .TRANSFER_DST })
     dvb_and_mvb_cleared := false
     
     cpu_end_profile_zone()
@@ -359,14 +397,16 @@ main :: proc () {
     generate_shader_api("shaders/api.generated.glsl")
     
     // @speed we duplicate this watcher per shader, so that each shader can keep track of the header being changed and be recompiled independently from other shaders, without effecting their modification test.
-    meshlet_task_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.task")
-    meshlet_mesh_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.mesh")
-    meshlet_frag_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.frag")
-    cull_shader         := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/cull.comp")
-    depth_reduce_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/depth_reduce.comp")
-    
-    ui_vert_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/ui.vert")
-    ui_frag_shader := init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/ui.frag")
+    shaders := Shaders {
+        meshlet_task = init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.task"),
+        meshlet_mesh = init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.mesh"),
+        meshlet_frag = init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.frag"),
+        culling      = init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/cull.comp"),
+        depth_reduce = init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/depth_reduce.comp"),
+        
+        ui_vert = init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/ui.vert"),
+        ui_frag = init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/ui.frag"),
+    }
     
     cpu_end_profile_zone()
     
@@ -400,11 +440,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    Stage :: enum { early, late }
-    cull_pipelines:    [Stage] Pipeline
-    depth_pipeline:    Pipeline
-    meshlet_pipelines: [Stage] Pipeline
-    ui_pipeline:       Pipeline
+    pipelines: Pipelines
     
     ////////////////////////////////////////////////
     
@@ -614,36 +650,44 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         watchers_check_for_modification(watchers)
-        recompile_shaders_if_needed(watchers, cull_shader)
-        recompile_shaders_if_needed(watchers, depth_reduce_shader)
-        recompile_shaders_if_needed(watchers, meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader)
-        recompile_shaders_if_needed(watchers, ui_vert_shader, ui_frag_shader)
+        recompile_shaders_if_needed(watchers, shaders.culling)
+        recompile_shaders_if_needed(watchers, shaders.meshlet_task, shaders.meshlet_mesh, shaders.meshlet_frag)
+        recompile_shaders_if_needed(watchers, shaders.depth_reduce)
+        recompile_shaders_if_needed(watchers, shaders.ui_vert, shaders.ui_frag)
         
         // @todo the work of loading the bytes and parsing them could be moved to a thread. The modified flag then needs to be expanded into a state { Invalid, Loading, Valid }
         load_all_compiled_shaders(immediately = false)
         
-        reloaded_cull_shader := test_and_reset_shaders_was_modified(cull_shader)
-        
-        for &cull_pipeline, stage in cull_pipelines {
+        reloaded_cull_shader := test_and_reset_shaders_was_modified(shaders.culling)
+        for &cull_pipeline, stage in pipelines.culling {
             if !pipeline_is_valid(cull_pipeline) || reloaded_cull_shader {
                 destroy_pipeline(gpu, cull_pipeline)
                 immediately := !pipeline_is_valid(cull_pipeline)
+                
+                compute := get_shader(shaders.culling, immediately)
                 constants := [] Specialization_Constant { /* late = */ { b = stage == .late } }
-                cull_pipeline = gpu_create_compute_pipeline(gpu, get_shader(cull_shader, immediately), descriptor_heap, constants)
+                cull_pipeline = gpu_create_compute_pipeline(gpu, compute, descriptor_heap, constants)
+                
                 fmt.printfln("Recreated %v cull_pipeline.", stage)
             }
         }
         
-        if !pipeline_is_valid(depth_pipeline) || test_and_reset_shaders_was_modified(depth_reduce_shader) {
-            destroy_pipeline(gpu, depth_pipeline)
-            immediately := !pipeline_is_valid(depth_pipeline)
-            depth_pipeline = gpu_create_compute_pipeline(gpu, get_shader(depth_reduce_shader, immediately), descriptor_heap)
+        if !pipeline_is_valid(pipelines.depth_reduce) || test_and_reset_shaders_was_modified(shaders.depth_reduce) {
+            destroy_pipeline(gpu, pipelines.depth_reduce)
+            immediately := !pipeline_is_valid(pipelines.depth_reduce)
+            
+            compute := get_shader(shaders.depth_reduce, immediately)
+            pipelines.depth_reduce = gpu_create_compute_pipeline(gpu, compute, descriptor_heap)
+            
             fmt.printfln("Recreated depth_pipeline.")
         }
         
-        reloaded_meshlet_shaders := test_and_reset_shaders_was_modified(meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader)
-        for &meshlet_pipeline, stage in meshlet_pipelines {
+        reloaded_meshlet_shaders := test_and_reset_shaders_was_modified(shaders.meshlet_task, shaders.meshlet_mesh, shaders.meshlet_frag)
+        for &meshlet_pipeline, stage in pipelines.meshlets {
             if !pipeline_is_valid(meshlet_pipeline) || reloaded_meshlet_shaders {
+                destroy_pipeline(gpu, meshlet_pipeline)
+                immediately := !pipeline_is_valid(meshlet_pipeline)
+                
                 raster_description := DefaultRasterDesc
                 raster_description.depth_format = stuff.depth_buffer.format
                 raster_description.color_targets = {
@@ -652,17 +696,19 @@ main :: proc () {
                 raster_description.blendstate = &Blend_Desc{ **DefaultBlendDesc }
                 // :Stencil: 
                 
-                task, mesh, frag := meshlet_task_shader, meshlet_mesh_shader, meshlet_frag_shader
-                
-                destroy_pipeline(gpu, meshlet_pipeline)
-                immediately := !pipeline_is_valid(meshlet_pipeline)
+                task, mesh, frag := get_shader(shaders.meshlet_task, immediately), get_shader(shaders.meshlet_mesh, immediately), get_shader(shaders.meshlet_frag, immediately)
                 constants := [] Specialization_Constant { /* late = */ { b = stage == .late } }
-                meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(gpu, get_shader(task, immediately), get_shader(mesh, immediately), get_shader(frag, immediately), raster_description, descriptor_heap, constants)
+                
+                meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(gpu, task, mesh, frag, raster_description, descriptor_heap, constants)
+                
                 fmt.printfln("Recreated %v meshlet_pipeline.", stage)
             }
         }    
         
-        if !pipeline_is_valid(ui_pipeline) || test_and_reset_shaders_was_modified(ui_vert_shader, ui_frag_shader) {
+        if !pipeline_is_valid(pipelines.ui) || test_and_reset_shaders_was_modified(shaders.ui_vert, shaders.ui_frag) {
+            destroy_pipeline(gpu, pipelines.ui)
+            immediately := !pipeline_is_valid(pipelines.ui)
+            
             raster_description := DefaultRasterDesc
             raster_description.color_targets = {
                 { format = stuff.color_buffer.format, write_mask = DefaulColorMask },
@@ -673,59 +719,58 @@ main :: proc () {
             raster_description.blendstate.src_alpha_factor = .ONE
             raster_description.blendstate.dst_alpha_factor = .ONE_MINUS_SRC_ALPHA
             
-            destroy_pipeline(gpu, ui_pipeline)
-            immediately := !pipeline_is_valid(ui_pipeline)
-            ui_pipeline = gpu_create_graphics_pipeline(gpu, get_shader(ui_vert_shader, immediately), get_shader(ui_frag_shader, immediately), raster_description, descriptor_heap)
+            vert, frag := get_shader(shaders.ui_vert, immediately), get_shader(shaders.ui_frag, immediately)
+            pipelines.ui = gpu_create_graphics_pipeline(gpu, vert, frag, raster_description, descriptor_heap)
+            
             fmt.printfln("Recreated ui_pipeline.")
         }
         
         ////////////////////////////////////////////////
         
-        frame_descriptor: Frame_Descriptor
         {
             cpu_profile_scope("Setup Descriptor Heap")
             
-            frame_descriptor.descriptor_offset = DescriptorStaticLimit              + auto_cast frame_index * DescriptorPerFrameLimit
-            frame_descriptor.descriptor_end    = frame_descriptor.descriptor_offset +                     1 * DescriptorPerFrameLimit
+            descriptor_offset := cast(Texture_Index) DescriptorStaticLimit + auto_cast frame_index * DescriptorPerFrameLimit
+            descriptor_end    :=                     descriptor_offset     +                     1 * DescriptorPerFrameLimit
             
-            frame_descriptor.descriptor_offset = 0
+            descriptor_offset = 0
             {
                 // @cleanup who should keep which data, and how often do we actually need to write this (atleast when the swapchain
                 // is recreated).
                 // @todo add a null texture, which is a bright debug color so that uninitialized indices(0) are easy to find
-                write_texture_to_heap(gpu, &descriptor_heap, frame_descriptor.descriptor_offset, textures[0], .SAMPLED_IMAGE)
-                textures[0].sampled_index = frame_descriptor.descriptor_offset
-                frame_descriptor.descriptor_offset += 1
+                write_texture_to_heap(gpu, &descriptor_heap, descriptor_offset, textures[0], .SAMPLED_IMAGE)
+                textures[0].sampled_index = descriptor_offset
+                descriptor_offset += 1
                 
-                write_texture_to_heap(gpu, &descriptor_heap, frame_descriptor.descriptor_offset, textures[1], .SAMPLED_IMAGE)
-                textures[1].sampled_index = frame_descriptor.descriptor_offset
-                frame_descriptor.descriptor_offset += 1
+                write_texture_to_heap(gpu, &descriptor_heap, descriptor_offset, textures[1], .SAMPLED_IMAGE)
+                textures[1].sampled_index = descriptor_offset
+                descriptor_offset += 1
                 
-                write_texture_to_heap(gpu, &descriptor_heap, frame_descriptor.descriptor_offset, textures[2], .SAMPLED_IMAGE)
-                textures[2].sampled_index = frame_descriptor.descriptor_offset
-                frame_descriptor.descriptor_offset += 1
+                write_texture_to_heap(gpu, &descriptor_heap, descriptor_offset, textures[2], .SAMPLED_IMAGE)
+                textures[2].sampled_index = descriptor_offset
+                descriptor_offset += 1
                 
-                write_texture_to_heap(gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_buffer, .SAMPLED_IMAGE)
-                stuff.depth_buffer.sampled_index = frame_descriptor.descriptor_offset
-                frame_descriptor.descriptor_offset += 1
+                write_texture_to_heap(gpu, &descriptor_heap, descriptor_offset, stuff.depth_buffer, .SAMPLED_IMAGE)
+                stuff.depth_buffer.sampled_index = descriptor_offset
+                descriptor_offset += 1
                 
-                write_texture_to_heap(gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_pyramid, .SAMPLED_IMAGE)
-                stuff.depth_pyramid.sampled_index = frame_descriptor.descriptor_offset
-                frame_descriptor.descriptor_offset += 1
+                write_texture_to_heap(gpu, &descriptor_heap, descriptor_offset, stuff.depth_pyramid, .SAMPLED_IMAGE)
+                stuff.depth_pyramid.sampled_index = descriptor_offset
+                descriptor_offset += 1
                 
-                write_texture_to_heap(gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_pyramid, .STORAGE_IMAGE)
-                stuff.depth_pyramid.storage_index = frame_descriptor.descriptor_offset
-                frame_descriptor.descriptor_offset += 1
+                write_texture_to_heap(gpu, &descriptor_heap, descriptor_offset, stuff.depth_pyramid, .STORAGE_IMAGE)
+                stuff.depth_pyramid.storage_index = descriptor_offset
+                descriptor_offset += 1
                 
                 
                 for &mip, mip_level in stuff.depth_pyramid_mips {
-                    write_texture_to_heap(gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_pyramid, .SAMPLED_IMAGE, cast(u32) mip_level, 1)
-                    mip.sampled_index = frame_descriptor.descriptor_offset
-                    frame_descriptor.descriptor_offset += 1
+                    write_texture_to_heap(gpu, &descriptor_heap, descriptor_offset, stuff.depth_pyramid, .SAMPLED_IMAGE, cast(u32) mip_level, 1)
+                    mip.sampled_index = descriptor_offset
+                    descriptor_offset += 1
                     
-                    write_texture_to_heap(gpu, &descriptor_heap, frame_descriptor.descriptor_offset, stuff.depth_pyramid, .STORAGE_IMAGE, cast(u32) mip_level, 1)
-                    mip.storage_index = frame_descriptor.descriptor_offset
-                    frame_descriptor.descriptor_offset += 1
+                    write_texture_to_heap(gpu, &descriptor_heap, descriptor_offset, stuff.depth_pyramid, .STORAGE_IMAGE, cast(u32) mip_level, 1)
+                    mip.storage_index = descriptor_offset
+                    descriptor_offset += 1
                 }
             }
         }
@@ -739,7 +784,7 @@ main :: proc () {
         //
         //
         
-        draws, _ := generate_draws(gpu, draw_buffer, object_rotation, textures[:], geometry)
+        draws, _ := generate_draws(gpu, buffers.draws, object_rotation, textures[:], geometry)
         
         ////////////////////////////////////////////////
         
@@ -754,84 +799,15 @@ main :: proc () {
         // 
         
         near_z: f32 = 0.01
-        screen_from_view := projection_reversed_z_infinite_far_plane(70 * RadiansFromDegrees, cast(f32) gpu.swapchain_size.x / cast(f32) gpu.swapchain_size.y, near_z)
-        view_from_world  := translate(1, -cam_pos)
-        
         // @todo this is in view/camera space make this a distance in world space
         draw_distance: f32 = 1000
         
-        frustum: [4] f32
-        if debug.culling_enabled {
-            frustum_x := get_row_v4(screen_from_view, 3) + get_row_v4(screen_from_view, 0) // x + w < 0
-            frustum_y := get_row_v4(screen_from_view, 3) + get_row_v4(screen_from_view, 1) // y + w > 0
-            frustum_x /= length(frustum_x.xyz)
-            frustum_y /= length(frustum_y.xyz)
-            
-            frustum[0] = frustum_x.x
-            frustum[1] = frustum_x.z
-            frustum[2] = frustum_y.y
-            frustum[3] = frustum_y.z
-        }
-        
-        ////////////////////////////////////////////////
-        
-        shader_culling_flags: u32 
-        if debug.culling_enabled   { shader_culling_flags |= DebugFlag_FrustumCulling   }
-        if debug.lod_enabled       { shader_culling_flags |= DebugFlag_LevelOfDetail    }
-        if debug.occlusion_enabled { shader_culling_flags |= DebugFlag_OcclusionCulling }
-        
-        common_cull_data := Cull_Data {
-            view_from_world = view_from_world,
-            
-            pyramid_size = cast(v2) stuff.depth_pyramid.size.xy,
-            s00 = screen_from_view[0,0],
-            s11 = screen_from_view[1,1],
-            near_z = near_z,
-            far_z  = draw_distance,
-            frustum = frustum,
-            
-            draw_count = auto_cast len(draws),
-            flags      = shader_culling_flags,
-            
-            lod_base = 10,
-            lod_step = 1.5,
-            
-            depth_pyramid_index = stuff.depth_pyramid.sampled_index,
-            draw_buffer            = draw_buffer.gpu.p,
-            mesh_buffer            = mesh_buffer.gpu.p,
-            draw_visibility_buffer = draw_visibility_buffer.gpu.p,
-            draw_command_buffer    = draw_commands.gpu.p,
-            draw_group_count       = {}, // @volatile must be assigned later when its allocated from the frame bump
-        }
-        
-        common_draw_data := Draw_Data {
-            pyramid_size = cast(v2) stuff.depth_pyramid.size.xy,
-            s00 = screen_from_view[0,0],
-            s11 = screen_from_view[1,1],
-            near_z = near_z,
-            far_z  = draw_distance,
-            frustum = frustum,
-            
-            flags = shader_culling_flags,
-            
-            screen_size  = cast(v2) gpu.swapchain_size,
-            view_from_world = view_from_world,
-            
-            light_pos = light_pos,
-            
-            depth_pyramid_index = stuff.depth_pyramid.sampled_index,
-            draw_command_buffer       = draw_commands.gpu.p,
-            draw_buffer               = draw_buffer.gpu.p,
-            meshlet_buffer            = meshlet_buffer.gpu.p,
-            meshlet_data_buffer       = meshlet_data_buffer.gpu.p,
-            vertex_buffer             = vertex_buffer.gpu.p,
-            meshlet_visibility_buffer = meshlet_visibility_buffer.gpu.p,
-        }
+        view_from_world  := translate(1, -cam_pos)
+        screen_from_view := projection_reversed_z_infinite_far_plane(70 * RadiansFromDegrees, cast(f32) gpu.swapchain_size.x / cast(f32) gpu.swapchain_size.y, near_z)
         
         ////////////////////////////////////////////////
         ////////////////////////////////////////////////
         ////////////////////////////////////////////////
-        
         
         cpu_begin_profile_zone("Record command buffer")
         
@@ -855,60 +831,19 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         gpu_image_barriers(cmd, { .BY_REGION },
-            create_image_barrier_from_undefined(&stuff.color_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE },         .GENERAL),
-            create_image_barrier_from_undefined(&stuff.depth_buffer, { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE, .MEMORY_READ }, .GENERAL), 
-            create_image_barrier_from_undefined(&stuff.depth_pyramid, { .COMPUTE_SHADER }, { .MEMORY_READ, .MEMORY_WRITE }, .GENERAL),
-            create_image_barrier_from_undefined(&gpu.swapchain_images[gpu.image_index], { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .GENERAL),
+            create_image_barrier_from_undefined(&stuff.color_buffer,                    { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE                       }),
+            create_image_barrier_from_undefined(&stuff.depth_buffer,                    { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE, .MEMORY_READ }), 
+            create_image_barrier_from_undefined(&stuff.depth_pyramid,                   { .COMPUTE_SHADER                                 }, { .MEMORY_READ, .MEMORY_WRITE                   }),
+            create_image_barrier_from_undefined(&gpu.swapchain_images[gpu.image_index], { .ALL_TRANSFER                                   }, { .TRANSFER_WRITE                               }),
         )
         
         gpu_profile_zone_end()
         
         ////////////////////////////////////////////////
-        // early pass - frustum cull & fill objects that *were* visible last frame
         
-        {
-            cpu_profile_scope("record early pass")
-            
-            draw_group_count := bump_allocate(bump, uv3)
-            
-            cull_data := bump_allocate(bump, Cull_Data)
-            cull_data.cpu^ = common_cull_data
-            cull_data.cpu.draw_group_count = draw_group_count.gpu.p
-            
-            draw_data := bump_allocate(bump, Draw_Data)
-            draw_data.cpu^ = common_draw_data
-            
-            max_draw_count := cast(u32) len(draws)
-            culling_begin(cmd, early = true)
-            
-            // @todo this is stupidly redundant
-            if !dvb_and_mvb_cleared {
-                dvb_and_mvb_cleared = true
-                gpu_fill_memory(cmd, draw_visibility_buffer,    max_draw_count, 0)
-                gpu_fill_memory(cmd, meshlet_visibility_buffer, len(meshlet_visibility_buffer.cpu), 0)
-            }
-            
-            culling_end(cmd, cull_pipelines[.early], cull_shader, &frame_descriptor, cull_data, draw_group_count, max_draw_count, early = true)
-            
-            ////////////////////////////////////////////////
-            
-            gpu_barrier(cmd, { .BOTTOM_OF_PIPE, .COMPUTE_SHADER }, { .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS })
-            
-            begin_meshlet_rendering(gpu, cmd, &stuff, {0.07, 0.07, 0.07, 1}, early = true)
-                
-                gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
-                gpu_set_scissor(cmd,  size = gpu.swapchain_size)
-                
-                vk.CmdBeginQuery(cmd, stats_pool, stats_pool_query_index, {})
-                
-                gpu_set_pipeline(cmd, meshlet_pipelines[.early])
-                gpu_draw_mesh_tasks_indirect(cmd, &frame_descriptor, draw_group_count.gpu, 1, draw_data.gpu)
-                
-                vk.CmdEndQuery(cmd, stats_pool, stats_pool_query_index)
-                stats_pool_query_index += 1
-                
-            end_meshlet_rendering(cmd)
-        }
+        draw_count := cast(u32) len(draws)
+        cull_and_render(gpu, cmd, .early, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug, light_pos)
+        stats_pool_query_index += 1
         
         ////////////////////////////////////////////////
         // depth pyramid generation
@@ -921,7 +856,7 @@ main :: proc () {
             
             gpu_barrier(cmd, { .LATE_FRAGMENT_TESTS }, { .COMPUTE_SHADER })
             
-            gpu_set_pipeline(cmd, depth_pipeline)
+            gpu_set_pipeline(cmd, pipelines.depth_reduce)
             
             for mip, mip_level in stuff.depth_pyramid_mips {
                 depth_data := bump_allocate(bump, Depth_Data)
@@ -939,7 +874,7 @@ main :: proc () {
                     depth_data.cpu.output_index = mip.storage_index
                 }
                 
-                gpu_dispatch(cmd, &frame_descriptor, depth_data.gpu, get_group_count(get_shader(depth_reduce_shader), **mip.size))
+                gpu_dispatch(cmd, depth_data.gpu, grid_dimension_from_total_count(shaders.depth_reduce, **mip.size))
                 
                 gpu_barrier(cmd, { .COMPUTE_SHADER }, { .COMPUTE_SHADER })
             }
@@ -951,45 +886,9 @@ main :: proc () {
         }
         
         ////////////////////////////////////////////////
-        // late pass - frustum & occlusion cull & fill objects that were *not* visible last frame
         
-        {
-            cpu_profile_scope("record late pass")
-            
-            draw_group_count := bump_allocate(bump, uv3)
-            
-            cull_data := bump_allocate(bump, Cull_Data)
-            cull_data.cpu^ = common_cull_data
-            cull_data.cpu.draw_group_count = draw_group_count.gpu.p
-            
-            draw_data := bump_allocate(bump, Draw_Data)
-            draw_data.cpu^ = common_draw_data
-            
-            culling_begin(cmd, early = false)
-            culling_end(cmd, cull_pipelines[.late], cull_shader, &frame_descriptor, cull_data, draw_group_count, cast(u32) len(draws), early = false)
-            
-            ////////////////////////////////////////////////
-            
-            gpu_barrier(cmd, 
-                { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS,  .COMPUTE_SHADER }, 
-                { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS },
-            )
-            
-            begin_meshlet_rendering(gpu, cmd, &stuff, {}, early = false)
-                
-                gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
-                gpu_set_scissor(cmd,  size = gpu.swapchain_size)
-                
-                vk.CmdBeginQuery(cmd, stats_pool, stats_pool_query_index, {})
-                
-                gpu_set_pipeline(cmd, meshlet_pipelines[.late])
-                gpu_draw_mesh_tasks_indirect(cmd, &frame_descriptor, draw_group_count.gpu, 1, draw_data.gpu)
-                
-                vk.CmdEndQuery(cmd, stats_pool, stats_pool_query_index)
-                stats_pool_query_index += 1
-                    
-            end_meshlet_rendering(cmd)
-        }
+        cull_and_render(gpu, cmd, .late, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug, light_pos)
+        stats_pool_query_index += 1
         
         ////////////////////////////////////////////////
         // UI pass
@@ -1061,8 +960,8 @@ main :: proc () {
                 gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
                 gpu_set_scissor(cmd,  size = gpu.swapchain_size)
                 
-                gpu_set_pipeline(cmd, ui_pipeline)
-                gpu_draw_indirect(cmd, &frame_descriptor, ui_draw_command.gpu, ui_data.gpu)
+                gpu_set_pipeline(cmd, pipelines.ui)
+                gpu_draw_indirect(cmd, ui_draw_command.gpu, ui_data.gpu)
                 
             gpu_end_rendering(cmd)
         }
@@ -1164,24 +1063,24 @@ main :: proc () {
     
 	check(vk.DeviceWaitIdle(gpu.device))
     
-    gpu_free(gpu, vertex_buffer)
-    gpu_free(gpu, meshlet_buffer)
-    gpu_free(gpu, meshlet_data_buffer)
-    gpu_free(gpu, mesh_buffer)
-    gpu_free(gpu, draw_buffer)
-    gpu_free(gpu, draw_visibility_buffer)
-    gpu_free(gpu, meshlet_visibility_buffer)
+    gpu_free(gpu, buffers.vertices)
+    gpu_free(gpu, buffers.meshlets)
+    gpu_free(gpu, buffers.meshlet_data)
+    gpu_free(gpu, buffers.meshes)
+    gpu_free(gpu, buffers.draws)
+    gpu_free(gpu, buffers.draw_visibility)
+    gpu_free(gpu, buffers.meshlet_visibility)
     
     for &bump in frame_bump_allocators {
         bump_allocator_delete(gpu, &bump)
     }
     
     for stage in Stage {
-        destroy_pipeline(gpu, meshlet_pipelines[stage])
-        destroy_pipeline(gpu, cull_pipelines[stage])
+        destroy_pipeline(gpu, pipelines.meshlets[stage])
+        destroy_pipeline(gpu, pipelines.culling[stage])
     }
-    destroy_pipeline(gpu, depth_pipeline)
-    destroy_pipeline(gpu, ui_pipeline)
+    destroy_pipeline(gpu, pipelines.depth_reduce)
+    destroy_pipeline(gpu, pipelines.ui)
     
     for texture in textures {
         gpu_free_image(gpu, texture)
@@ -1285,75 +1184,184 @@ get_next_image :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, frame_index: u64) ->
     return true
 }
 
-begin_meshlet_rendering :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stuff: ^Render_Targets_And_Stuff, clear_color: v4, early: bool) {
-    desc: Render_Pass_Desc
-    desc.color_targets = { { 
-        texture     = stuff.color_buffer,
-        view        = stuff.color_view,
-        load_op     = early ? .CLEAR : .LOAD,
-        store_op    = .STORE,
-        clear_color = clear_color,
-    } }
-    desc.depth_target  = { // :ViewSpace: 0 is the maximal depth value
-        texture     = stuff.depth_buffer,
-        view        = stuff.depth_view,
-        load_op     = early ? .CLEAR : .LOAD,
-        store_op    = early ? .STORE : .DONT_CARE,
-        clear_depth = 0,
+cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelines, shaders: Shaders, buffers: Buffers, bump: ^Bump_Allocator,  stats_pool: vk.QueryPool, query_index: u32, stuff: ^Render_Targets_And_Stuff, draw_count: u32, dvb_and_mvb_cleared: ^bool, view_from_world: m4, screen_from_view: m4, near_z, draw_distance: f32, debug: Debug, light_pos: v3) {
+    frustum: [4] f32
+    if debug.culling_enabled {
+        frustum_x := get_row_v4(screen_from_view, 3) + get_row_v4(screen_from_view, 0) // x + w < 0
+        frustum_y := get_row_v4(screen_from_view, 3) + get_row_v4(screen_from_view, 1) // y + w > 0
+        frustum_x /= length(frustum_x.xyz)
+        frustum_y /= length(frustum_y.xyz)
+        
+        frustum[0] = frustum_x.x
+        frustum[1] = frustum_x.z
+        frustum[2] = frustum_y.y
+        frustum[3] = frustum_y.z
     }
     
-    if early {
+    shader_culling_flags: u32 
+    if debug.culling_enabled   { shader_culling_flags |= DebugFlag_FrustumCulling   }
+    if debug.lod_enabled       { shader_culling_flags |= DebugFlag_LevelOfDetail    }
+    if debug.occlusion_enabled { shader_culling_flags |= DebugFlag_OcclusionCulling }
+    
+    // early pass - frustum cull & fill objects that *were* visible last frame
+    //  late pass - frustum & occlusion cull & fill objects that were *not* visible last frame
+    
+    switch stage {
+    case .early: cpu_profile_scope("record early pass")
+    case .late:  cpu_profile_scope("record late pass")
+    }
+    
+    draw_group_count := bump_allocate(bump, uv3)
+    
+    cull_data := bump_allocate(bump, Cull_Data)
+    cull_data.cpu^ = {
+        view_from_world = view_from_world,
+        
+        pyramid_size = cast(v2) stuff.depth_pyramid.size.xy,
+        s00 = screen_from_view[0,0],
+        s11 = screen_from_view[1,1],
+        near_z = near_z,
+        far_z  = draw_distance,
+        frustum = frustum,
+        
+        draw_count = draw_count,
+        flags      = shader_culling_flags,
+        
+        lod_base = 10,
+        lod_step = 1.5,
+        
+        depth_pyramid_index = stuff.depth_pyramid.sampled_index,
+        draw_buffer            = buffers.draws.gpu.p,
+        mesh_buffer            = buffers.meshes.gpu.p,
+        draw_visibility_buffer = buffers.draw_visibility.gpu.p,
+        draw_command_buffer    = buffers.draw_commands.gpu.p,
+        draw_group_count       = {}, // @volatile must be assigned later when its allocated from the frame bump
+    }
+    cull_data.cpu.draw_group_count = draw_group_count.gpu.p
+    
+    draw_data := bump_allocate(bump, Draw_Data)
+    draw_data.cpu^ = {
+        pyramid_size = cast(v2) stuff.depth_pyramid.size.xy,
+        s00 = screen_from_view[0,0],
+        s11 = screen_from_view[1,1],
+        near_z = near_z,
+        far_z  = draw_distance,
+        frustum = frustum,
+        
+        flags = shader_culling_flags,
+        
+        screen_size  = cast(v2) gpu.swapchain_size,
+        view_from_world = view_from_world,
+        
+        light_pos = light_pos,
+        
+        depth_pyramid_index = stuff.depth_pyramid.sampled_index,
+        draw_command_buffer       = buffers.draw_commands.gpu.p,
+        draw_buffer               = buffers.draws.gpu.p,
+        meshlet_buffer            = buffers.meshlets.gpu.p,
+        meshlet_data_buffer       = buffers.meshlet_data.gpu.p,
+        vertex_buffer             = buffers.vertices.gpu.p,
+        meshlet_visibility_buffer = buffers.meshlet_visibility.gpu.p,
+    }
+    
+    cull_label := stage == .early ? cast(cstring) "early culling" : "late culling"
+    before_fill := vk.PipelineStageFlags2 { .DRAW_INDIRECT }
+    if stage == .late {
+        before_fill += { .PRE_RASTERIZATION_SHADERS }
+    }
+    
+    gpu_labeled_region_begin(cmd, cull_label, {0.0, 0.6, 0.8, 1.0})
+    gpu_profile_zone_begin(cast(string) cull_label)
+        gpu_barrier(cmd, before_fill, { .ALL_TRANSFER })
+        
+        if stage == .early {
+            // @todo this is stupidly redundant
+            if !dvb_and_mvb_cleared^ {
+                dvb_and_mvb_cleared^ = true
+                gpu_fill_memory(cmd, buffers.draw_visibility,    draw_count, 0)
+                gpu_fill_memory(cmd, buffers.meshlet_visibility, len(buffers.meshlet_visibility.cpu), 0)
+            }
+        }
+        
+        // draw_group_count = {0, 1, 1}
+        gpu_fill_memory(cmd, draw_group_count.gpu, 0, size_of(draw_group_count.cpu.x),  0)
+        gpu_fill_memory(cmd, draw_group_count.gpu, 1, size_of(draw_group_count.cpu.yz), size_of(draw_group_count.cpu.x))
+        
+        before_dispatch := vk.PipelineStageFlags2 { .ALL_TRANSFER  }
+        if stage == .late {
+            before_dispatch += { .COMPUTE_SHADER } // depth pyramid
+        }
+        
+        gpu_barrier(cmd, before_dispatch, { .COMPUTE_SHADER })
+        
+        gpu_set_pipeline(cmd, pipelines.culling[stage])
+        gpu_dispatch(cmd, cull_data.gpu, grid_dimension_from_total_count(shaders.culling, x = draw_count))
+        
+    gpu_profile_zone_end()
+    gpu_labeled_region_end(cmd)
+    
+    ////////////////////////////////////////////////
+    
+    before_draw := vk.PipelineStageFlags2 { .COMPUTE_SHADER }
+    after_draw  := vk.PipelineStageFlags2 { .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }
+    switch stage {
+    case .early: 
+        before_draw += { .BOTTOM_OF_PIPE }
+        
+    case .late:  
+        before_draw += { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS  }
+        after_draw  += { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS }
+    
+    }
+    gpu_barrier(cmd, before_draw, after_draw)
+    
+    desc := Render_Pass_Desc {
+        color_targets = { { 
+            texture     = stuff.color_buffer,
+            view        = stuff.color_view,
+            load_op     = stage == .early ? .CLEAR : .LOAD,
+            store_op    = .STORE,
+            clear_color = stage == .early ? {0.07, 0.07, 0.07, 1} : {},
+        } },
+        
+        depth_target  = { // :ViewSpace: 0 is the maximal depth value
+            texture     = stuff.depth_buffer,
+            view        = stuff.depth_view,
+            load_op     = stage == .early ? .CLEAR : .LOAD,
+            store_op    = stage == .early ? .STORE : .DONT_CARE,
+            clear_depth = 0,
+        },
+    }
+    
+    switch stage {
+    case .early:
         gpu_profile_zone_begin("early rendering pass")
         gpu_labeled_region_begin(cmd, "early rendering pass", {0.6, 0.1, 07, 1.0})
-    } else {
+    case .late:
         gpu_profile_zone_begin("late rendering pass")
         gpu_labeled_region_begin(cmd, "late rendering pass", {0.6, 0.1, 07, 1.0})
     }
+    
     gpu_begin_rendering(gpu, cmd, desc)
-    // ...
-}
-
-end_meshlet_rendering :: proc (cmd: vk.CommandBuffer) {
-    // ...
+        gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
+        gpu_set_scissor(cmd,  size = gpu.swapchain_size)
+        
+        vk.CmdBeginQuery(cmd, stats_pool, query_index, {})
+        
+        gpu_set_pipeline(cmd, pipelines.meshlets[stage])
+        gpu_draw_mesh_tasks_indirect(cmd, draw_group_count.gpu, 1, draw_data.gpu)
+        
+        vk.CmdEndQuery(cmd, stats_pool, query_index)
+    
     gpu_end_rendering(cmd)
     gpu_labeled_region_end(cmd)
     gpu_profile_zone_end()
 }
 
-culling_begin :: proc (cmd: vk.CommandBuffer, early: bool) {
-    label: cstring = early ? "early culling" : "late culling"
-    before_fill := vk.PipelineStageFlags2 { .DRAW_INDIRECT }
-    if !early {
-        before_fill += { .PRE_RASTERIZATION_SHADERS }
-    }
-    
-    gpu_labeled_region_begin(cmd, label, {0.0, 0.6, 0.8, 1.0})
-    gpu_profile_zone_begin(cast(string) label)
-        gpu_barrier(cmd, before_fill, { .ALL_TRANSFER })
-        // ...
-}
-
-culling_end :: proc (cmd: vk.CommandBuffer, cull_pipeline: Pipeline, cull_shader: Shader_Id, frame_descriptor: ^Frame_Descriptor, cull_data: Gpu_Address(Cull_Data), draw_group_count: Gpu_Address(uv3), max_draw_count: u32, early: bool) {
-     {
-        // group.x = 0
-        gpu_fill_memory(cmd, draw_group_count.gpu, 0, size_of(draw_group_count.cpu.x),  0)
-        // group.yz = 1
-        gpu_fill_memory(cmd, draw_group_count.gpu, 1, size_of(draw_group_count.cpu.yz), size_of(draw_group_count.cpu.x))
-    }
-    
-    before_dispatch := vk.PipelineStageFlags2 { .ALL_TRANSFER  }
-    if !early {
-        before_dispatch += { .COMPUTE_SHADER } // depth pyramid
-    }
-    
-        // ...
-        gpu_barrier(cmd, before_dispatch, { .COMPUTE_SHADER })
-        
-        gpu_set_pipeline(cmd, cull_pipeline)
-        gpu_dispatch(cmd, frame_descriptor, cull_data.gpu, get_group_count(get_shader(cull_shader), max_draw_count))
-        
-    gpu_profile_zone_end()
-    gpu_labeled_region_end(cmd)
+grid_dimension_from_total_count :: proc (id: Shader_Id, x: u32 = 1, y: u32 = 1, z: u32 = 1) -> uv3 {
+    shader := get_shader(id)
+    result := shader_grid_dimension_from_total_count(shader, x, y, z)
+    return result
 }
 
 ////////////////////////////////////////////////

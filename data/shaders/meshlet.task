@@ -24,8 +24,6 @@ shared int shared_count;
 
 ////////////////////////////////////////////////
 
-bool cone_cull(vec3 center, float radius, vec3 axis, float cutoff, vec3 camera);
-
 void main() {
     uint thread_index  = gl_LocalInvocationIndex;
     uint command_index = gl_WorkGroupID.x;
@@ -137,9 +135,4 @@ void main() {
     barrier(); // for shared_count
     
     EmitMeshTasksEXT(shared_count, 1, 1);
-}
-
-bool cone_cull(vec3 center, float radius, vec3 axis, float cutoff, vec3 camera) {
-    vec3 delta = center - camera;
-    return dot(delta, axis) >= cutoff * length(delta) + radius;
 }

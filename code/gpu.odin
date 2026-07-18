@@ -218,11 +218,6 @@ Descriptor_Heap :: struct {
     sampler_reserved_size:   vk.DeviceSize,
 }
 
-Frame_Descriptor :: struct {
-    descriptor_offset: Texture_Index,
-    descriptor_end:    Texture_Index,
-}
-
 ////////////////////////////////////////////////
 
 gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
@@ -1535,8 +1530,8 @@ create_image_barrier :: proc (image: ^Image, src_stage: vk.PipelineStageFlags2, 
     return result
 }
 
-create_image_barrier_from_undefined :: proc (image: ^Image, stage: vk.PipelineStageFlags2, access: vk.AccessFlags2, layout: vk.ImageLayout) -> vk.ImageMemoryBarrier2 {
-    result := create_image_barrier(image, { .ALL_COMMANDS }, {}, .UNDEFINED, stage, access, layout)
+create_image_barrier_from_undefined :: proc (image: ^Image, stage: vk.PipelineStageFlags2, access: vk.AccessFlags2) -> vk.ImageMemoryBarrier2 {
+    result := create_image_barrier(image, { .ALL_COMMANDS }, {}, .UNDEFINED, stage, access, .GENERAL)
     return result
 }
 
@@ -1632,38 +1627,43 @@ gpu_end_rendering :: proc (cmd: vk.CommandBuffer) {
     vk.CmdEndRendering(cmd)
 }
 
-// void gpuDispatchIndirect(GpuCommandBuffer cb, void* dataGpu, void* gridDimensionsGpu);
-
 // void gpuDrawIndexedInstanced(GpuCommandBuffer cb, void* vertexDataGpu, void* pixelDataGpu, void* indicesGpu, uint32 indexCount, uint32 instanceCount);
 // void gpuDrawIndexedInstancedIndirectMulti(GpuCommandBuffer cb, void* dataVxGpu, uint32 vxStride, void* dataPxGpu, uint32 pxStride, void* argsGpu, void* drawCountGpu);
 
 // void gpuDrawMeshlets(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, uvec3 dim);
 
 // @api we may want to allow the pipeline to have a push constant per stage. For that we need the shaders to each declare the push data to be N pointers to their respective data. Then the pipeline layout and this command both needs to declare the correct size of 3 pointers and their offsets in the push data.
-gpu_push_constants :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, push_constant: Gpu_Pointer($T), heap := false) {
-    push_constant := push_constant
+gpu_push_constants :: proc (cmd: vk.CommandBuffer, data: Gpu_Pointer($T), heap := false) {
+    data := data
     info := vk.PushDataInfoEXT {
         sType = .PUSH_DATA_INFO_EXT,
-        data  = { address = &push_constant.p, size = size_of(push_constant.p) },
+        data  = { address = &data.p, size = size_of(data.p) },
     }
     vk.CmdPushDataEXT(cmd, &info)
 }
 
-gpu_dispatch :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, push_constant: Gpu_Pointer($T), group_size: uv3) {
-    gpu_push_constants(cmd, frame_descriptor, push_constant)
+gpu_dispatch :: proc (cmd: vk.CommandBuffer, data: Gpu_Pointer($T), grid_dimensions: uv3) {
+    gpu_push_constants(cmd, data)
     
-    vk.CmdDispatch(cmd, **group_size)
+    vk.CmdDispatch(cmd, **grid_dimensions)
 }
 
-gpu_draw_indirect :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, commands: Gpu_Pointer($C), push_constant: Gpu_Pointer($T)) {
-    gpu_push_constants(cmd, frame_descriptor, push_constant)
+gpu_dispatch_indirect :: proc (cmd: vk.CommandBuffer, data: Gpu_Pointer($T), grid_dimensions: Gpu_Pointer(uv3)) {
+    gpu_push_constants(cmd, data)
+    
+    buffer, offset := gpu_reflect_get_buffer(grid_dimensions.p)
+    vk.CmdDispatchIndirect(cmd, buffer, offset)
+}
+
+gpu_draw_indirect :: proc (cmd: vk.CommandBuffer, commands: Gpu_Pointer($C), data: Gpu_Pointer($T)) {
+    gpu_push_constants(cmd, data)
     
     commands, commands_base_offset := gpu_reflect_get_buffer(commands.p)
     vk.CmdDrawIndirect(cmd, commands, commands_base_offset, 1, size_of(C))
 }
 
-gpu_draw_indexed_instanced_indirect :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, draws: Gpu_Pointer($D), max_count: u32, push_constant: Gpu_Pointer($T)) {
-    gpu_push_constants(cmd, frame_descriptor, push_constant)
+gpu_draw_indexed_instanced_indirect :: proc (cmd: vk.CommandBuffer, draws: Gpu_Pointer($D), max_count: u32, data: Gpu_Pointer($T)) {
+    gpu_push_constants(cmd, data)
     
     draws, draws_base_offset := gpu_reflect_get_buffer(draws.p)
     vk.CmdDrawIndexedIndirect(cmd, draws, draws_base_offset + cast(vk.DeviceSize) draw_offset, max_count, size_of(D))
@@ -1671,15 +1671,15 @@ gpu_draw_indexed_instanced_indirect :: proc (cmd: vk.CommandBuffer, frame_descri
 
 // @speed The extension device_address_commands would remove the need to ever have a vk.Buffer for any command.
 // But its not supported on my RTX 3070 ._.
-gpu_draw_mesh_tasks_indirect :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, group_count: Gpu_Pointer($C), draw_count: u32, push_constant: Gpu_Pointer($T), group_count_offset: umm = 0) {
-    gpu_push_constants(cmd, frame_descriptor, push_constant)
+gpu_draw_mesh_tasks_indirect :: proc (cmd: vk.CommandBuffer, grid_dimensions: Gpu_Pointer(uv3), count: u32, data: Gpu_Pointer($T)) {
+    gpu_push_constants(cmd, data)
     
-    group_count, offset := gpu_reflect_get_buffer(group_count.p)
-    vk.CmdDrawMeshTasksIndirectEXT(cmd, group_count, offset + cast(vk.DeviceSize) group_count_offset, draw_count, size_of(C))
+    grid_dimensions, offset := gpu_reflect_get_buffer(grid_dimensions.p)
+    vk.CmdDrawMeshTasksIndirectEXT(cmd, grid_dimensions, offset, count, size_of(uv3))
 
 }
-gpu_draw_mesh_tasks_indirect_count :: proc (cmd: vk.CommandBuffer, frame_descriptor: ^Frame_Descriptor, commands: Gpu_Pointer($C), count: Gpu_Pointer(u32), max_count: u32, command_offset: umm, push_constant: Gpu_Pointer($T)) {
-    gpu_push_constants(cmd, frame_descriptor, push_constant)
+gpu_draw_mesh_tasks_indirect_count :: proc (cmd: vk.CommandBuffer, commands: Gpu_Pointer($C), count: Gpu_Pointer(u32), max_count: u32, command_offset: umm, data: Gpu_Pointer($T)) {
+    gpu_push_constants(cmd, data)
     
     commands, commands_base_offset := gpu_reflect_get_buffer(commands.p)
     count,    count_offset         := gpu_reflect_get_buffer(count.p)

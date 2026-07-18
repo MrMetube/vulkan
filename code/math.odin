@@ -708,9 +708,9 @@ columns_3x3 :: proc (x, y, z: v3) -> m4 {
     return result
 }
 
-projection_reversed_z_infinite_far_plane :: proc (fov_y, aspect_w_h, near_z: f32) -> m4 {
+projection_reversed_z_infinite_far_plane :: proc (fov_y, aspect_width_over_height, near_z: f32) -> m4 {
     f := 1 / tan(fov_y / 2)
-    x := f / aspect_w_h
+    x := f / aspect_width_over_height
     y := f
     n := near_z
     

@@ -353,8 +353,8 @@ compile_shader_end :: proc (cmd: ^Cmd, shader_input: string) -> bool {
     return true
 }
 
-get_group_count :: proc (shader: ^Shader, count_x: u32 = 1, count_y: u32 = 1, count_z: u32 = 1) -> uv3 {
-    total_count := uv3{ count_x, count_y, count_z }
+shader_grid_dimension_from_total_count :: proc (shader: ^Shader, x: u32 = 1, y: u32 = 1, z: u32 = 1) -> uv3 {
+    total_count := uv3 { x, y, z }
     result := (total_count + shader.local_size-1) / shader.local_size
     return result
 }
