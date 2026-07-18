@@ -97,16 +97,18 @@ void main() {
         
         uint draw_command_index = atomicAdd(data.draw_group_count.v.x, task_group_count);
         
-        // @todo ideally we would abort if draw_group_count overflows the output buffer
-        for (uint i = 0; i < task_group_count; i += 1) {
-            Draw_Command_p command = data.draw_command_buffer[draw_command_index + i];
-            
-            command.v.draw_index = draw_index;
-            command.v.meshlet_offset =     lod.meshlet_offset + i * TaskWidth;
-            command.v.meshlet_count  = min(lod.meshlet_count  - i * TaskWidth, TaskWidth);
-            
-            command.v.mesh_was_visible_last_frame = was_visible_last_frame.v;
-            command.v.meshlet_visibility_offset   = meshlet_visibility_offset + i * TaskWidth;
+        // drop draw calls on overflow; this limits us to ~4M visible draws or ~32B visible triangles, whichever is larger
+        if (draw_command_index + task_group_count < TaskWidthLimit ) {
+            for (uint i = 0; i < task_group_count; i += 1) {
+                Draw_Command_p command = data.draw_command_buffer[draw_command_index + i];
+                
+                command.v.draw_index = draw_index;
+                command.v.meshlet_offset =     lod.meshlet_offset + i * TaskWidth;
+                command.v.meshlet_count  = min(lod.meshlet_count  - i * TaskWidth, TaskWidth);
+                
+                command.v.mesh_was_visible_last_frame = was_visible_last_frame.v;
+                command.v.meshlet_visibility_offset   = meshlet_visibility_offset + i * TaskWidth;
+            }
         }
     }
     

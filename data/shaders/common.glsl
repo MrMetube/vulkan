@@ -9,7 +9,8 @@
 
 #define Debug 0
 
-#define TaskWidth 64
+#define TaskWidth      64
+#define TaskWidthLimit (1 << 22)
 
 // @volatile
 #define Flag_FrustumCulling   (1 << 0)
