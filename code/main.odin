@@ -726,62 +726,41 @@ main :: proc () {
         }
         
         ////////////////////////////////////////////////
+        // @waste texture management and draw "generation" only really need to happen once per "level load" as there is no streaming in of data.
         
         {
             cpu_profile_scope("Setup Descriptor Heap")
             
-            descriptor_offset := cast(Texture_Index) DescriptorStaticLimit + auto_cast frame_index * DescriptorPerFrameLimit
-            descriptor_end    :=                     descriptor_offset     +                     1 * DescriptorPerFrameLimit
+            append_texture :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index_offset: ^Texture_Index, image: Image, sampled: bool, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) -> Texture_Index {
+                result := index_offset^
+                index_offset^ += 1
+                write_texture_to_heap(gpu, heap, result, image, sampled ? .SAMPLED_IMAGE : .STORAGE_IMAGE, mip_base, mip_count)
+                return result
+            }
             
-            descriptor_offset = 0
-            {
-                // @cleanup who should keep which data, and how often do we actually need to write this (atleast when the swapchain
-                // is recreated).
-                // @todo add a null texture, which is a bright debug color so that uninitialized indices(0) are easy to find
-                write_texture_to_heap(gpu, &descriptor_heap, descriptor_offset, textures[0], .SAMPLED_IMAGE)
-                textures[0].sampled_index = descriptor_offset
-                descriptor_offset += 1
-                
-                write_texture_to_heap(gpu, &descriptor_heap, descriptor_offset, textures[1], .SAMPLED_IMAGE)
-                textures[1].sampled_index = descriptor_offset
-                descriptor_offset += 1
-                
-                write_texture_to_heap(gpu, &descriptor_heap, descriptor_offset, textures[2], .SAMPLED_IMAGE)
-                textures[2].sampled_index = descriptor_offset
-                descriptor_offset += 1
-                
-                write_texture_to_heap(gpu, &descriptor_heap, descriptor_offset, stuff.depth_buffer, .SAMPLED_IMAGE)
-                stuff.depth_buffer.sampled_index = descriptor_offset
-                descriptor_offset += 1
-                
-                write_texture_to_heap(gpu, &descriptor_heap, descriptor_offset, stuff.depth_pyramid, .SAMPLED_IMAGE)
-                stuff.depth_pyramid.sampled_index = descriptor_offset
-                descriptor_offset += 1
-                
-                write_texture_to_heap(gpu, &descriptor_heap, descriptor_offset, stuff.depth_pyramid, .STORAGE_IMAGE)
-                stuff.depth_pyramid.storage_index = descriptor_offset
-                descriptor_offset += 1
-                
-                
-                for &mip, mip_level in stuff.depth_pyramid_mips {
-                    write_texture_to_heap(gpu, &descriptor_heap, descriptor_offset, stuff.depth_pyramid, .SAMPLED_IMAGE, cast(u32) mip_level, 1)
-                    mip.sampled_index = descriptor_offset
-                    descriptor_offset += 1
-                    
-                    write_texture_to_heap(gpu, &descriptor_heap, descriptor_offset, stuff.depth_pyramid, .STORAGE_IMAGE, cast(u32) mip_level, 1)
-                    mip.storage_index = descriptor_offset
-                    descriptor_offset += 1
-                }
+            descriptor_offset := cast(Texture_Index) (DescriptorStaticLimit + frame_index * DescriptorPerFrameLimit)
+            
+            // @todo add a null texture, which is a bright debug color so that uninitialized indices(0) are easy to find
+            // @todo when would we not want to get the sample/storage descriptors of a texture we uploaded? should this not
+            // just be part of the upload code?
+            textures[0].sampled_index = append_texture(gpu, &descriptor_heap, &descriptor_offset, textures[0], true)
+            textures[1].sampled_index = append_texture(gpu, &descriptor_heap, &descriptor_offset, textures[1], true)
+            textures[2].sampled_index = append_texture(gpu, &descriptor_heap, &descriptor_offset, textures[2], true)
+            
+            stuff.depth_buffer.sampled_index  = append_texture(gpu, &descriptor_heap, &descriptor_offset, stuff.depth_buffer,  true)
+            stuff.depth_pyramid.sampled_index = append_texture(gpu, &descriptor_heap, &descriptor_offset, stuff.depth_pyramid, true)
+            stuff.depth_pyramid.storage_index = append_texture(gpu, &descriptor_heap, &descriptor_offset, stuff.depth_pyramid, false)
+            
+            for &mip, mip_level in stuff.depth_pyramid_mips {
+                mip.sampled_index = append_texture(gpu, &descriptor_heap, &descriptor_offset, stuff.depth_pyramid, true,  cast(u32) mip_level, 1)
+                mip.storage_index = append_texture(gpu, &descriptor_heap, &descriptor_offset, stuff.depth_pyramid, false, cast(u32) mip_level, 1)
             }
         }
         
-        
-        //
         //
         // @hack @race_condition the draw commands should obviously not be written to by the cpu, whilst the gpu is still 
         // processing the previous draw commands. We need atleast MaxFramesInFlight different draw_buffers to prevent this 
         // race condition, if the draws themselves change every frame, which is likely if the objects themselves are dynamic.
-        //
         //
         
         draws, _ := generate_draws(gpu, buffers.draws, object_rotation, textures[:], geometry)
@@ -1185,6 +1164,18 @@ get_next_image :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, frame_index: u64) ->
 }
 
 cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelines, shaders: Shaders, buffers: Buffers, bump: ^Bump_Allocator,  stats_pool: vk.QueryPool, query_index: u32, stuff: ^Render_Targets_And_Stuff, draw_count: u32, dvb_and_mvb_cleared: ^bool, view_from_world: m4, screen_from_view: m4, near_z, draw_distance: f32, debug: Debug, light_pos: v3) {
+    //
+    // early pass - frustum cull             & fill objects that *were* visible last frame
+    //  late pass - frustum & occlusion cull & fill objects that were *not* visible last frame
+    //
+    
+    cpu_label: string
+    switch stage {
+    case .early: cpu_label = "record early pass"
+    case .late:  cpu_label = "record late pass"
+    }
+    cpu_profile_scope(cpu_label)
+    
     frustum: [4] f32
     if debug.culling_enabled {
         frustum_x := get_row_v4(screen_from_view, 3) + get_row_v4(screen_from_view, 0) // x + w < 0
@@ -1202,14 +1193,6 @@ cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelin
     if debug.culling_enabled   { shader_culling_flags |= DebugFlag_FrustumCulling   }
     if debug.lod_enabled       { shader_culling_flags |= DebugFlag_LevelOfDetail    }
     if debug.occlusion_enabled { shader_culling_flags |= DebugFlag_OcclusionCulling }
-    
-    // early pass - frustum cull & fill objects that *were* visible last frame
-    //  late pass - frustum & occlusion cull & fill objects that were *not* visible last frame
-    
-    switch stage {
-    case .early: cpu_profile_scope("record early pass")
-    case .late:  cpu_profile_scope("record late pass")
-    }
     
     draw_group_count := bump_allocate(bump, uv3)
     

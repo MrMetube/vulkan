@@ -21,7 +21,7 @@ the_gpu_profiler: struct {
         queries:     [dynamic; QueryPoolSize] Profile_Query,
      
         event_table: ^profiler.Event_Table,
-    }
+    },
 }
 
 Profile_Query :: struct { zone_index: int, kind: profiler.Event_Kind }
