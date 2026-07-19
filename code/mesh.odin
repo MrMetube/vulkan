@@ -85,85 +85,90 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
         return false
     }
     
-    floats   := make([dynamic] f32, context.temp_allocator)
+    floats   := make([dynamic] f32,    context.temp_allocator)
     vertices := make([dynamic] Vertex, context.temp_allocator)
-    indices  := make([dynamic] u32, context.temp_allocator)
+    indices  := make([dynamic] u32,    context.temp_allocator)
+    
+    Primitive :: struct { meshes_offset, primitive_count: int }
+    primitives := make([dynamic] Primitive, context.temp_allocator)
+    
     for mesh in data.meshes {
-        assert(len(mesh.primitives) == 1, "@todo A mesh has submeshes, which we don't handle")
+        append(&primitives, Primitive { len(geometry.meshes), len(mesh.primitives)})
         
-        primitive := &mesh.primitives[0]
-        assert(primitive.type == .triangles)
-        assert(primitive.indices != nil)
-        
-        find_accessor :: proc (primitive: ^cgltf.primitive, type: cgltf.attribute_type, index: i32 = 0) -> ^cgltf.accessor {
-            result: ^cgltf.accessor
+        for &primitive in mesh.primitives {
+            assert(primitive.type == .triangles)
+            assert(primitive.indices != nil)
             
-            for attribute in primitive.attributes {
-                if attribute.type == type && attribute.index == index {
-                    result = attribute.data
-                    break
+            find_accessor :: proc (primitive: ^cgltf.primitive, type: cgltf.attribute_type, index: i32 = 0) -> ^cgltf.accessor {
+                result: ^cgltf.accessor
+                
+                for attribute in primitive.attributes {
+                    if attribute.type == type && attribute.index == index {
+                        result = attribute.data
+                        break
+                    }
+                }
+                
+                return result
+            }
+            
+            clear(&vertices)
+            clear(&indices)
+            
+            vertex_count := primitive.attributes[0].data.count
+            
+            resize(&vertices, vertex_count)
+            non_zero_resize(&floats, vertex_count * 4) // @speed make more resizes non_zero
+            
+            if positions := find_accessor(&primitive, .position); positions != nil {
+                components :: len(Vertex{}.p)
+                assert(cgltf.num_components(positions.type) == components)
+                
+                _ = cgltf.accessor_unpack_floats(positions, &floats[0], vertex_count * components)
+                
+                for vertex_index in 0..<vertex_count {
+                    vertices[vertex_index].p = {
+                        floats[vertex_index * components + 0],
+                        floats[vertex_index * components + 1],
+                        floats[vertex_index * components + 2],
+                    }
                 }
             }
             
-            return result
-        }
-        
-        clear(&vertices)
-        clear(&indices)
-        
-        vertex_count := primitive.attributes[0].data.count
-        
-        resize(&vertices, vertex_count)
-        non_zero_resize(&floats, vertex_count * 4) // @speed make more resizes non_zero
-        
-        if positions := find_accessor(primitive, .position); positions != nil {
-            components :: len(Vertex{}.p)
-            assert(cgltf.num_components(positions.type) == components)
-            
-            _ = cgltf.accessor_unpack_floats(positions, &floats[0], vertex_count * components)
-            
-            for vertex_index in 0..<vertex_count {
-                vertices[vertex_index].p = {
-                    floats[vertex_index * components + 0],
-                    floats[vertex_index * components + 1],
-                    floats[vertex_index * components + 2],
+            if normals := find_accessor(&primitive, .normal); normals != nil {
+                components :: len(Vertex{}.n)
+                assert(cgltf.num_components(normals.type) == components)
+                
+                _ = cgltf.accessor_unpack_floats(normals, &floats[0], vertex_count * components)
+                
+                for vertex_index in 0..<vertex_count {
+                    vertices[vertex_index].n = pack_normal(v3 {
+                        floats[vertex_index * components + 0],
+                        floats[vertex_index * components + 1],
+                        floats[vertex_index * components + 2],
+                    })
                 }
             }
-        }
-        
-        if normals := find_accessor(primitive, .normal); normals != nil {
-            components :: len(Vertex{}.n)
-            assert(cgltf.num_components(normals.type) == components)
             
-            _ = cgltf.accessor_unpack_floats(normals, &floats[0], vertex_count * components)
-            
-            for vertex_index in 0..<vertex_count {
-                vertices[vertex_index].n = pack_normal(v3 {
-                    floats[vertex_index * components + 0],
-                    floats[vertex_index * components + 1],
-                    floats[vertex_index * components + 2],
-                })
-            }
-        }
-        
-        if uvs := find_accessor(primitive, .texcoord); uvs != nil {
-            components :: len(Vertex{}.uv)
-            assert(cgltf.num_components(uvs.type) == components)
-            
-            _ = cgltf.accessor_unpack_floats(uvs, &floats[0], vertex_count * components)
-            
-            for vertex_index in 0..<vertex_count {
-                vertices[vertex_index].uv = cast(hv2) v2 {
-                    floats[vertex_index * components + 0],
-                    floats[vertex_index * components + 1],
+            if uvs := find_accessor(&primitive, .texcoord); uvs != nil {
+                components :: len(Vertex{}.uv)
+                assert(cgltf.num_components(uvs.type) == components)
+                
+                _ = cgltf.accessor_unpack_floats(uvs, &floats[0], vertex_count * components)
+                
+                for vertex_index in 0..<vertex_count {
+                    vertices[vertex_index].uv = cast(hv2) v2 {
+                        floats[vertex_index * components + 0],
+                        floats[vertex_index * components + 1],
+                    }
                 }
             }
+            
+            resize(&indices, primitive.indices.count)
+            _ = cgltf.accessor_unpack_indices(primitive.indices, &indices[0], size_of(indices[0]), len(indices))
+            
+            load_mesh(geometry, vertices[:], indices[:])
         }
-        
-        resize(&indices, primitive.indices.count)
-        _ = cgltf.accessor_unpack_indices(primitive.indices, &indices[0], size_of(indices[0]), len(indices))
-        
-        load_mesh(geometry, vertices[:], indices[:])
     }
     
     for &node in data.nodes {
@@ -218,17 +223,22 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
                 return translation, rotation, scale
             }
             
-            t, r, s := decompose_transform(world_matrix)
-            if s.x != s.y || s.x != s.z {
-                fmt.printfln("%v: Warning: A mesh has non-uniform scale(%v), which we don't handle. This mesh will not be drawn correctly.", #location(), s)
-            }
+            mesh_index := cast(int) cgltf.mesh_index(data, node.mesh)
+            slot := primitives[mesh_index]
             
-            draw := append_into(draws)
-            draw.p           = t
-            draw.scale       = max(s.x, s.y, s.z)
-            draw.orientation = r
-            draw.mesh_index  = cast(u32) cgltf.mesh_index(data, node.mesh)
-            draw.vertex_offset = geometry.meshes[draw.mesh_index].vertex_offset
+            for index in 0..<slot.primitive_count {
+                t, r, s := decompose_transform(world_matrix)
+                if s.x != s.y || s.x != s.z {
+                    fmt.printfln("%v: Warning: A mesh has non-uniform scale(%v), which we don't handle. This mesh will not be drawn correctly.", #location(), s)
+                }
+                
+                draw := append_into(draws)
+                draw.p           = t
+                draw.scale       = max(s.x, s.y, s.z)
+                draw.orientation = r
+                draw.mesh_index  = cast(u32) (mesh_index + index)
+                draw.vertex_offset = geometry.meshes[draw.mesh_index].vertex_offset
+            }
         }
     }
     
