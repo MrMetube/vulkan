@@ -1,5 +1,4 @@
-#+vet !unused-procedures
-#+vet explicit-allocators
+#+vet explicit-allocators !unused-procedures
 #+no-instrumentation
 package main
 
@@ -155,8 +154,8 @@ swap :: proc (a, b: ^$T ) { a^, b^ = b^, a^ }
 unused :: proc (_: ..any) {}
 
 append_into :: proc { append_into_array, append_into_fixed_array }
-append_into_array :: proc (array: ^[dynamic] $T) -> ^T {
-    appended := append_nothing(array)
+append_into_array :: proc (array: ^[dynamic] $T, loc := #caller_location) -> ^T {
+    appended := append_nothing(array, loc = loc)
     result: ^T 
     if appended != 0 {
         result = last(array^)

@@ -37,6 +37,18 @@ init_assets :: proc (shader_bytes_allocator: Allocator) {
     assets.initialized = true
 }
 
+deinit_assets :: proc () {
+    assets := get_assets()
+    load_all_compiled_shaders() // finish all running compilations and clean them up
+    for shader in assets.shaders {
+        delete(shader.bytes, assets.shader_bytes_allocator)
+    }
+    delete(assets.shaders)
+    delete(assets.shader_infos)
+    delete(assets.shader_compilation_procs)
+    delete(assets.shader_compilation_infos)
+}
+
 get_assets :: proc (loc := #caller_location) -> ^Assets {
     assets := &The_Assets
     assert(assets.initialized, loc = loc)

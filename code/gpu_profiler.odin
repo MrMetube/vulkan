@@ -38,6 +38,15 @@ gpu_profile_init :: proc (gpu: ^Gpu) {
     }
 }
 
+gpu_profile_deinit :: proc (gpu: ^Gpu) {
+    prof := &the_gpu_profiler
+    for &state in prof.states {
+        vk.DestroyQueryPool(gpu.device, state.pool, nil)
+        free(state.event_table, context.allocator) // @volatile see init
+        delete(state.zones)
+    }
+}
+
 gpu_profile_frame_begin :: proc (gpu: ^Gpu, cb: vk.CommandBuffer, frame_index: u64) {
     the_gpu_profiler.state_index = frame_index
     prof := &the_gpu_profiler.states[the_gpu_profiler.state_index]

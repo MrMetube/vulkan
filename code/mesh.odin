@@ -2,7 +2,6 @@
 package main
 
 import "core:fmt"
-import la "core:math/linalg"
 
 import "../lib/meshoptimizer"
 import "../lib/tobj"
@@ -61,6 +60,13 @@ pack_normal :: proc (n: v3) -> [3] u8 {
     return result
 }
 
+//
+// @speed The loading from ssd and the memory overhead themselves are not the bottleneck. It is the 
+// generation and processing of meshlets, which takes the majority of the time. But this whole process 
+// is embarrisingly parallel. The only shared resource are the buffers in geometry, which would need to
+// have their access synchronized, so that no 2 threads use the same memory and that no thread uses
+// memory that was freed, if any buffer needed to be reallocated to grow.
+//
 load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Draw) -> bool {
     path := fmt.ctprint(filepath)
     
@@ -117,8 +123,8 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
             
             vertex_count := primitive.attributes[0].data.count
             
-            resize(&vertices, vertex_count)
-            non_zero_resize(&floats, vertex_count * 4) // @speed make more resizes non_zero
+            non_zero_resize(&vertices, vertex_count)
+            non_zero_resize(&floats, vertex_count * 4)
             
             if positions := find_accessor(&primitive, .position); positions != nil {
                 components :: len(Vertex{}.p)
@@ -164,7 +170,8 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
                 }
             }
             
-            resize(&indices, primitive.indices.count)
+            non_zero_resize(&indices, primitive.indices.count)
+            
             _ = cgltf.accessor_unpack_indices(primitive.indices, &indices[0], size_of(indices[0]), len(indices))
             
             load_mesh(geometry, vertices[:], indices[:])
@@ -187,7 +194,7 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
                 det := 
                     m[0, 0] * (m[1, 1] * m[2, 2] - m[1, 2] * m[2, 1]) -
                     m[1, 0] * (m[0, 1] * m[2, 2] - m[2, 1] * m[0, 2]) +
-                    m[2, 0] * (m[0, 1] * m[1, 2] - m[1, 1] * m[0, 2]);
+                    m[2, 0] * (m[0, 1] * m[1, 2] - m[1, 1] * m[0, 2])
                 
                 sign : f32 = det < 0 ? -1 : 1
                 
@@ -215,7 +222,7 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
                 qs := 0.5 / square_root(qt)
                 
                 _rotation := cast(^v4) &rotation 
-                _rotation[qc ~ 0] = qs * qt;
+                _rotation[qc ~ 0] = qs * qt
                 _rotation[qc ~ 1] = qs * (r01 + qs1 * r10)
                 _rotation[qc ~ 2] = qs * (r20 + qs2 * r02)
                 _rotation[qc ~ 3] = qs * (r12 + qs3 * r21)
@@ -241,6 +248,8 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
             }
         }
     }
+    
+    fmt.printfln("Loaded scene %q: %v meshes, %v draws", filepath, len(geometry.meshes), len(draws))
     
     return true
 }
@@ -305,7 +314,7 @@ append_meshlets :: proc (geometry: ^Geometry, mesh_vertices: [] Vertex, mesh_ind
     // :Shader: meshlet.mesh
     MaxVertices  ::  64
     MaxTriangles :: 126
-    cone_weight :: 0.25 // 0 when not culling, otherwise 0..1 
+    cone_weight  :: 0.25 // 0 when not culling, otherwise 0..1 
     
     max_meshlet_count := meshoptimizer.buildMeshletsBound(auto_cast len(mesh_indices), MaxVertices, MaxTriangles)
     

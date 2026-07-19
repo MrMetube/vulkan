@@ -1,5 +1,4 @@
-#+vet !unused-procedures
-#+vet explicit-allocators
+#+vet explicit-allocators !unused-procedures
 #+no-instrumentation
 package main
 

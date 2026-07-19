@@ -1,4 +1,4 @@
-#+vet !unused-procedures
+#+vet explicit-allocators !unused-procedures
 package main
 
 import "base:runtime"
@@ -15,7 +15,7 @@ view_init :: proc "contextless" () {
     context = runtime.default_context()
     
     if fmt._user_formatters == nil {
-        user_formatters, err := new(type_of(fmt._user_formatters^))
+        user_formatters, err := new(type_of(fmt._user_formatters^), context.allocator)
         assert(err == nil)
         fmt.set_user_formatters(user_formatters)
     }

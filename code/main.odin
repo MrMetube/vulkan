@@ -2,8 +2,10 @@
 package main
 
 import "core:fmt"
+import "core:mem"
 import "core:os"
 import "core:strings"
+import "core:slice"
 import "core:time"
 import la "core:math/linalg"
 
@@ -254,6 +256,17 @@ UI_Draw :: struct { // :Shader:
 OBJ_Mode :: false
 
 main :: proc () {
+    track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+    defer {
+        for _, leak in track.allocation_map {
+            fmt.printf("%v leaked %m\n", leak.location, leak.size)
+        }
+        assert(true)
+    }
+    
     the_cpu_profiler = new(profiler.Event_Table, context.allocator)
     the_cpu_profile_zones := make([dynamic] profiler.Zone, context.allocator)
     profiler.set_recording(the_cpu_profiler, true)
@@ -343,7 +356,7 @@ main :: proc () {
         
         gpu_submit(gpu.transfer_queue, { { upload_semaphore, { .ALL_COMMANDS }, 1} }, cmd)
         gpu_wait_semaphore(gpu, upload_semaphore, 1)
-     }
+    }
     
     ////////////////////////////////////////////////
     
@@ -1035,30 +1048,79 @@ main :: proc () {
             
             zones := the_cpu_profile_zones
             
-            fmt.printfln("---------------------\nCPU profile:")
+            xx :: proc (seconds: f64) -> time.Duration { return cast(time.Duration) (seconds * cast(f64) time.Second) }
             root := zones[0]
             total_time := profiler.clocks_to_seconds(root.duration_with_children)
-            link: u32
-            for {
-                zone := zones[link]
-                depth := zone.depth_of_the_event
-                
-                seconds               := profiler.clocks_to_seconds(zone.duration)
-                seconds_with_children := profiler.clocks_to_seconds(zone.duration_with_children)
-                
-                xx :: proc (seconds: f64) -> time.Duration { return cast(time.Duration) (seconds * cast(f64) time.Second) }
-                
-                fmt.printf("  %v", view_percentage(seconds_with_children/total_time))
-                for _ in 0..<depth { fmt.printf("    ") }
-                fmt.printf(" %v", xx(seconds))
-                if zone.duration_with_children != zone.duration {
-                    fmt.printf(" (with children %v)", xx(seconds_with_children))
+            
+            fmt.printfln("---------------------\nCPU profile:")
+            if false { // tree view
+                link: u32
+                for {
+                    zone := zones[link]
+                    depth := zone.depth_of_the_event
+                    
+                    seconds               := profiler.clocks_to_seconds(zone.duration)
+                    seconds_with_children := profiler.clocks_to_seconds(zone.duration_with_children)
+                    
+                    fmt.printf("  %v", view_percentage(seconds_with_children/total_time))
+                    for _ in 0..<depth { fmt.printf("    ") }
+                    fmt.printf(" %v", xx(seconds))
+                    if zone.duration_with_children != zone.duration {
+                        fmt.printf(" (with children %v)", xx(seconds_with_children))
+                    }
+                    fmt.printf(" - %v", zone.name)
+                    fmt.printfln("")
+                    
+                    link = zone.depth_next_event
+                    if link == 0 { break }
                 }
-                fmt.printf(" - %v", zone.name)
-                fmt.printfln("")
+            } else { // zone view
+                // @todo map only cares about name, durations and should also keep a hitcount, the tree data is not correct afterwards
+                zone_map := make(map[string] profiler.Zone, context.temp_allocator)
                 
-                link = zone.depth_next_event
-                if link == 0 { break }
+                for zone in zones {
+                    if zone.name not_in zone_map {
+                        zone_map[zone.name] = zone
+                    } else {
+                        entry := &zone_map[zone.name]
+                        entry.duration               += zone.duration
+                        entry.duration_with_children += zone.duration_with_children
+                    }
+                }
+                
+                zone_list := make([dynamic] profiler.Zone, context.temp_allocator)
+                
+                for _, zone in zone_map {
+                    append(&zone_list, zone)
+                }
+                
+                slice.sort_by(zone_list[:], proc (a, b: profiler.Zone) -> bool {
+                    return a.duration > b.duration
+                })
+                
+                
+                // @todo also print total time
+                // @todo make a toggle for omission
+                Omit_Below :: 0 // 0.01
+                for zone in zone_list {
+                    // @todo also print hitcount and avg duration per hit (mean?)
+                    seconds               := profiler.clocks_to_seconds(zone.duration)
+                    seconds_with_children := profiler.clocks_to_seconds(zone.duration_with_children)
+                    
+                    percent := seconds/total_time
+                    if percent < Omit_Below {
+                        fmt.printfln(" <%v ...", view_percentage(0.01))
+                        break
+                    }
+                    fmt.printf("  %v", view_percentage(percent))
+                    fmt.printf(" %v", xx(seconds))
+                    if zone.duration_with_children != zone.duration {
+                        fmt.printf(" (with children %v)", xx(seconds_with_children))
+                    }
+                    fmt.printf(" - %v", zone.name)
+                    fmt.printfln("")
+                    
+                }
             }
         }
     }
@@ -1073,6 +1135,7 @@ main :: proc () {
     gpu_free(gpu, buffers.meshlet_data)
     gpu_free(gpu, buffers.meshes)
     gpu_free(gpu, buffers.draws)
+    gpu_free(gpu, buffers.draw_commands)
     gpu_free(gpu, buffers.draw_visibility)
     gpu_free(gpu, buffers.meshlet_visibility)
     
@@ -1096,10 +1159,27 @@ main :: proc () {
     destroy_stuff(gpu, &stuff)
     
     vk.DestroySemaphore(gpu.device, frame_semaphore, nil)
-    for state in the_gpu_profiler.states { vk.DestroyQueryPool(gpu.device, state.pool, nil) }
-    for pool in stats_pools              { vk.DestroyQueryPool(gpu.device, pool, nil) }
+    for pool in stats_pools { vk.DestroyQueryPool(gpu.device, pool, nil) }
+    
+    gpu_profile_deinit(gpu)
     
     gpu_deinit(gpu)
+    
+    ////////////////////////////////////////////////
+    
+    delete(watchers)
+    free(the_cpu_profiler, context.allocator) // @volatile see new
+    delete(the_cpu_profile_zones)
+    
+    deinit_assets()
+    
+    // geometry
+    delete(geometry.vertices)
+    delete(geometry.meshlets)
+    delete(geometry.meshlet_data)
+    delete(geometry.meshes)
+    
+    delete(scene_draws)
 }
 
 ////////////////////////////////////////////////

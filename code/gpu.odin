@@ -634,6 +634,10 @@ gpu_deinit :: proc (gpu: ^Gpu) {
     
     gpu_destroy_swapchain(gpu)
     
+    delete(gpu.swapchain_images)
+    delete(gpu.render_completes)
+    delete(_the_gpu_allocations)
+    
     vk.DestroyDevice(gpu.device, nil)
     
     vk.DestroySurfaceKHR(gpu.instance, gpu.surface, nil)
