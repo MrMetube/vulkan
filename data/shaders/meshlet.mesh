@@ -77,7 +77,7 @@ void main() {
             result.light_vec    =  view_light_p.xyz - view_p.xyz;
         }
         result.view_vec = -view_p.xyz;
-        result.uv     = vertex.v.uv;
+        result.uv     = unpackHalf2x16(vertex.v.uv);
         result.normal = view_n;
         
         

@@ -22,7 +22,7 @@ Sync_Validation :: false && Validation
 ////////////////////////////////////////////////
 
 Geometry :: struct {
-    // @todo all this data is not needed on the cpu, we could just directly upload it to the gpu buffers
+    // @todo this data is only temp allocated and should not be kept around after loading from ssd and uploading to gpu is done
     vertices:     [dynamic] Vertex,
     meshlets:     [dynamic] Meshlet,
     meshlet_data: [dynamic] u32,
@@ -224,9 +224,10 @@ Meshlet :: struct { // :Shader:
 }
 
 Vertex :: struct { // :Shader:
-    p:  v3,      p_pad: f32,
-    n:  [3] u8,  n_pad: u8,
-    uv: v2,
+    p:  v3,
+    n:  [3] u8,
+    _:  u8,
+    uv: hv2,
 }
 
 UI_Draw_Command :: struct {
@@ -248,6 +249,9 @@ UI_Draw :: struct { // :Shader:
 }
 
 ////////////////////////////////////////////////
+
+// @todo remove this old OBJ spamming mode
+OBJ_Mode :: false
 
 main :: proc () {
     the_cpu_profiler = new(profiler.Event_Table, context.allocator)
@@ -271,9 +275,10 @@ main :: proc () {
     debug := Debug {
         vsync = true,
         
-        culling_enabled   = true,
-        lod_enabled       = true,
-        occlusion_enabled = true,
+        // @todo reenable when occlusion indices are set in draws and lod is better
+        // culling_enabled   = true,
+        // lod_enabled       = true,
+        // occlusion_enabled = true,
     }
     
     cpu_begin_profile_zone("OS Metrics sleep")
@@ -341,7 +346,7 @@ main :: proc () {
      }
     
     ////////////////////////////////////////////////
-    // @speed most of these buffer could be moved to GPU local memory
+    
     cpu_begin_profile_zone("Allocate buffers")
     
     buffers: Buffers
@@ -356,18 +361,27 @@ main :: proc () {
     
     geometry: Geometry
     max_draw_visibility_count: u32
+    scene_draws: [dynamic] Draw
     {
         cpu_profile_scope("Geometry loading")
         
-        paths := [?] string {
-            "tutorial/suzanne.obj",
-            // "models/bunny.obj",
-            // "models/lucy_280k.obj",
-        }
+        if OBJ_Mode {
+            paths := [?] string {
+                "tutorial/suzanne.obj",
+                // "models/bunny.obj",
+                // "models/lucy_280k.obj",
+            }
+            
+            for path in paths {
+                if !load_obj_mesh(&geometry, path) {
+                    os.exit(1)
+                }
+            }
         
-        for path in paths {
-            if !load_mesh(&geometry, path, context.temp_allocator) {
-                fmt.eprintfln("Failed to load mesh from file `%v`", path)
+        } else {
+            path := "niagara_bistro/bistro.gltf"
+            if !load_scene(&geometry, path, &scene_draws) {
+                os.exit(1)
             }
         }
         
@@ -376,8 +390,12 @@ main :: proc () {
         copy(buffers.meshlet_data.cpu, geometry.meshlet_data[:])
         copy(buffers.meshes.cpu,       geometry.meshes[:])
         
-        // @todo clearly separate what is temporary and what is kepts outside the temp allocator Currently generate_draws just wants to number of meshes for its randomness.
-        _, max_draw_visibility_count = generate_draws(gpu, buffers.draws, 0, textures[:], geometry)
+        if OBJ_Mode {
+            // @todo clearly separate what is temporary and what is kepts outside the temp allocator Currently generate_draws just wants to number of meshes for its randomness.
+            _, max_draw_visibility_count = generate_draws(gpu, buffers.draws, 0, textures[:], geometry)
+        } else {
+            max_draw_visibility_count = 1 // @todo
+        }
     }
     
     buffers.draw_commands      = gpu_allocate_slice(gpu, [] Draw_Command, TaskWidthLimit,                        memory = .GPU) 
@@ -444,10 +462,12 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    light_pos := v3{0, 10, 10}
+    cam_pos := v3{0, 0, 0}
     
-    cam_pos := v3{ 0, 0, 0}
+    // @cleanup OBJ_Mode
+    light_pos := v3{0, 10, 10}
     object_rotation: v3
+    
     quit: bool
     last_time := time.tick_now()
     
@@ -763,7 +783,13 @@ main :: proc () {
         // race condition, if the draws themselves change every frame, which is likely if the objects themselves are dynamic.
         //
         
-        draws, _ := generate_draws(gpu, buffers.draws, object_rotation, textures[:], geometry)
+        draws: [] Draw // @cleanup what is this even used for?
+        if OBJ_Mode {
+            draws, _ = generate_draws(gpu, buffers.draws, object_rotation, textures[:], geometry)
+        } else {
+            copy(buffers.draws.cpu,  scene_draws[:])
+            draws = buffers.draws.cpu[:len(scene_draws)]
+        }
         
         ////////////////////////////////////////////////
         

@@ -729,7 +729,7 @@ gpu_recreate_swapchain_if_needed :: proc (gpu: ^Gpu, vsync: bool, force_recreati
     
     if previous_image_count != image_count {
         resize(&gpu.swapchain_images, image_count)
-        resize(&gpu.render_completes, image_count)
+        resize(&gpu.render_completes,  image_count)
         
         for &it in gpu.render_completes {
             it = gpu_create_semaphore(gpu)

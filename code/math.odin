@@ -23,6 +23,20 @@ uv2 :: [2] u32
 uv3 :: [3] u32
 uv4 :: [4] u32
 
+dv2 :: [2] f64
+dv3 :: [3] f64
+dv4 :: [4] f64
+
+hv2 :: [2] f16
+hv3 :: [3] f16
+hv4 :: [4] f16
+
+m2 :: matrix[2,2] f32
+m3 :: matrix[3,3] f32
+m4 :: matrix[4,4] f32
+
+q32 :: quaternion128
+
 Color :: [4] u8
 
 LaneWidth :: 8
@@ -46,12 +60,6 @@ lane_false :: cast(lane_u32) 0
 lane_true  :: cast(lane_u32) 0xffff_ffff
 
 lane_offset :: lane_u32{0, 1, 2, 3, 4, 5, 6, 7} when LaneWidth == 8 else ( lane_u32{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15} when LaneWidth == 16 else lane_u32{0, 1, 2, 3})
-
-m2 :: matrix[2,2] f32
-m3 :: matrix[3,3] f32
-m4 :: matrix[4,4] f32
-
-q32 :: quaternion128
 
 Rectangle   :: struct($T: typeid) { min, max: T }
 Rectangle2  :: Rectangle(v2)
@@ -680,6 +688,27 @@ get_row_v4 :: proc (a: m4, row: u32) -> v4 {
     result.y = a[row, 1]
     result.z = a[row, 2]
     result.w = a[row, 3]
+    
+    return result
+}
+
+get_diagnonal_v3 :: proc (a: $M/matrix[$N, N] f32) -> v3 where N >= 3 {
+    result: v3
+    
+    result.x = a[0,0]
+    result.y = a[1,1]
+    result.z = a[2,2]
+    
+    return result
+}
+
+get_diagnonal_v4 :: proc (a: m4) -> v4 {
+    result: v4
+    
+    result.x = a[0, 0]
+    result.y = a[1, 1]
+    result.z = a[2, 2]
+    result.w = a[3, 3]
     
     return result
 }
