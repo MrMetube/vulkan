@@ -67,7 +67,7 @@ pack_normal :: proc (n: v3) -> [3] u8 {
 // have their access synchronized, so that no 2 threads use the same memory and that no thread uses
 // memory that was freed, if any buffer needed to be reallocated to grow.
 //
-load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Draw) -> bool {
+load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Draw, camera: ^Camera) -> bool {
     path := fmt.ctprint(filepath)
     
     options: cgltf.options
@@ -178,74 +178,87 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
         }
     }
     
+    // stolen from zeux's niagara code
+    decompose_transform :: proc (m: m4) -> (translation: v3, rotation: q32, scale: v3) {
+        // extract translation from last row
+        translation[0] = m[0, 3]
+        translation[1] = m[1, 3]
+        translation[2] = m[2, 3]
+        
+        // compute determinant to determine handedness
+        det := 
+        m[0, 0] * (m[1, 1] * m[2, 2] - m[1, 2] * m[2, 1]) -
+        m[1, 0] * (m[0, 1] * m[2, 2] - m[2, 1] * m[0, 2]) +
+        m[2, 0] * (m[0, 1] * m[1, 2] - m[1, 1] * m[0, 2])
+        
+        sign : f32 = det < 0 ? -1 : 1
+        
+        // recover scale from axis lengths
+        scale[0] = square_root(m[0, 0] * m[0, 0] + m[1, 0] * m[1, 0] + m[2, 0] * m[2, 0]) * sign
+        scale[1] = square_root(m[0, 1] * m[0, 1] + m[1, 1] * m[1, 1] + m[2, 1] * m[2, 1]) * sign
+        scale[2] = square_root(m[0, 2] * m[0, 2] + m[1, 2] * m[1, 2] + m[2, 2] * m[2, 2]) * sign
+        
+        // normalize axes to get a pure rotation matrix
+        rsx := (scale[0] == 0) ? 0 : 1 / scale[0]
+        rsy := (scale[1] == 0) ? 0 : 1 / scale[1]
+        rsz := (scale[2] == 0) ? 0 : 1 / scale[2]
+        
+        r00, r10, r20 := m[0, 0] * rsx, m[0, 1] * rsy, m[0, 2] * rsz
+        r01, r11, r21 := m[1, 0] * rsx, m[1, 1] * rsy, m[1, 2] * rsz
+        r02, r12, r22 := m[2, 0] * rsx, m[2, 1] * rsy, m[2, 2] * rsz
+        
+        // "branchless" version of Mike Day's matrix to quaternion conversion
+        qc  := r22 < 0 ? (r00 > r11 ? 0 : 1) : (r00 < -r11 ? 2 : 3)
+        qs1 : f32 = (      qc & 2) != 0 ? -1 : 1
+        qs2 : f32 = (      qc & 1) != 0 ? -1 : 1
+        qs3 : f32 = ((qc - 1) & 2) != 0 ? -1 : 1
+        
+        qt := 1 - qs3*r00 - qs2*r11 - qs1*r22
+        qs := 0.5 / square_root(qt)
+        
+        _rotation := cast(^v4) &rotation 
+        _rotation[qc ~ 0] = qs * qt
+        _rotation[qc ~ 1] = qs * (r01 + qs1 * r10)
+        _rotation[qc ~ 2] = qs * (r20 + qs2 * r02)
+        _rotation[qc ~ 3] = qs * (r12 + qs3 * r21)
+        
+        return translation, rotation, scale
+    }
+    
     for &node in data.nodes {
         if node.mesh != nil {
             world_matrix: m4
             cgltf.node_transform_world(&node, raw_data(&world_matrix))
-            
-            // stolen from zeux's niagara code
-            decompose_transform :: proc (m: m4) -> (translation: v3, rotation: q32, scale: v3) {
-                // extract translation from last row
-                translation[0] = m[0, 3]
-                translation[1] = m[1, 3]
-                translation[2] = m[2, 3]
-                
-                // compute determinant to determine handedness
-                det := 
-                    m[0, 0] * (m[1, 1] * m[2, 2] - m[1, 2] * m[2, 1]) -
-                    m[1, 0] * (m[0, 1] * m[2, 2] - m[2, 1] * m[0, 2]) +
-                    m[2, 0] * (m[0, 1] * m[1, 2] - m[1, 1] * m[0, 2])
-                
-                sign : f32 = det < 0 ? -1 : 1
-                
-                // recover scale from axis lengths
-                scale[0] = square_root(m[0, 0] * m[0, 0] + m[1, 0] * m[1, 0] + m[2, 0] * m[2, 0]) * sign
-                scale[1] = square_root(m[0, 1] * m[0, 1] + m[1, 1] * m[1, 1] + m[2, 1] * m[2, 1]) * sign
-                scale[2] = square_root(m[0, 2] * m[0, 2] + m[1, 2] * m[1, 2] + m[2, 2] * m[2, 2]) * sign
-                
-                // normalize axes to get a pure rotation matrix
-                rsx := (scale[0] == 0) ? 0 : 1 / scale[0]
-                rsy := (scale[1] == 0) ? 0 : 1 / scale[1]
-                rsz := (scale[2] == 0) ? 0 : 1 / scale[2]
-                
-                r00, r10, r20 := m[0, 0] * rsx, m[0, 1] * rsy, m[0, 2] * rsz
-                r01, r11, r21 := m[1, 0] * rsx, m[1, 1] * rsy, m[1, 2] * rsz
-                r02, r12, r22 := m[2, 0] * rsx, m[2, 1] * rsy, m[2, 2] * rsz
-                
-                // "branchless" version of Mike Day's matrix to quaternion conversion
-                qc  := r22 < 0 ? (r00 > r11 ? 0 : 1) : (r00 < -r11 ? 2 : 3)
-                qs1 : f32 = (      qc & 2) != 0 ? -1 : 1
-                qs2 : f32 = (      qc & 1) != 0 ? -1 : 1
-                qs3 : f32 = ((qc - 1) & 2) != 0 ? -1 : 1
-                
-                qt := 1 - qs3*r00 - qs2*r11 - qs1*r22
-                qs := 0.5 / square_root(qt)
-                
-                _rotation := cast(^v4) &rotation 
-                _rotation[qc ~ 0] = qs * qt
-                _rotation[qc ~ 1] = qs * (r01 + qs1 * r10)
-                _rotation[qc ~ 2] = qs * (r20 + qs2 * r02)
-                _rotation[qc ~ 3] = qs * (r12 + qs3 * r21)
-                
-                return translation, rotation, scale
-            }
+            t, r, s := decompose_transform(world_matrix)
             
             mesh_index := cast(int) cgltf.mesh_index(data, node.mesh)
             slot := primitives[mesh_index]
             
             for index in 0..<slot.primitive_count {
-                t, r, s := decompose_transform(world_matrix)
                 if s.x != s.y || s.x != s.z {
                     fmt.printfln("%v: Warning: A mesh has non-uniform scale(%v), which we don't handle. This mesh will not be drawn correctly.", #location(), s)
                 }
                 
                 draw := append_into(draws)
-                draw.p           = t
-                draw.scale       = max(s.x, s.y, s.z)
-                draw.orientation = r
-                draw.mesh_index  = cast(u32) (mesh_index + index)
+                draw.p             = t
+                draw.scale         = max(s.x, s.y, s.z)
+                draw.orientation   = r
+                draw.mesh_index    = cast(u32) (mesh_index + index)
                 draw.vertex_offset = geometry.meshes[draw.mesh_index].vertex_offset
             }
+        }
+        
+        if node.camera != nil {
+            world_matrix: m4
+            cgltf.node_transform_world(&node, raw_data(&world_matrix))
+            t, r, _ := decompose_transform(world_matrix)
+            
+            cam := node.camera
+            assert(cam.type == .perspective)
+            
+            camera.p           = t
+            camera.orientation = r
+            camera.fov_y       = cam.data.perspective.yfov
         }
     }
     

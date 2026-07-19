@@ -74,8 +74,7 @@ void main() {
         vec3  world_cone_axis = rotate(draw.orientation, cone_axis);
         vec3  view_cone_axis  = mat3(data.view_from_world) * world_cone_axis;
         float cone_cutoff     = float(meshlet.v.cone_cutoff) / 127.0;
-        // @todo radius and cutoff might need scaling if the view_from_world matrix is more than translating
-            
+        
         // backface cone culling
         visible = visible && !cone_cull(view_center.xyz, radius, view_cone_axis, cone_cutoff, vec3(0));
         
@@ -85,7 +84,7 @@ void main() {
             visible = visible && view_center.z * data.frustum[1] - abs(view_center.x) * data.frustum[0] > -radius;
             visible = visible && view_center.z * data.frustum[3] - abs(view_center.y) * data.frustum[2] > -radius;
             // the near/far plane culling uses camera space Z directly, but the camera looks down -z :ViewSpace:
-            visible = visible && view_center.z + radius < -data.near_z && view_center.z - radius > -data.far_z;
+            visible = visible && view_center.z - radius < data.near_z && view_center.z + radius > -data.far_z;
         }
         
         // @copypasta from cull.comp

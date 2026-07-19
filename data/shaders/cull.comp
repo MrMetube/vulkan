@@ -33,7 +33,6 @@ void main() {
     vec3  world_center = transform(draw.v.orientation, draw.v.scale, draw.v.p, mesh.v.center);
     float radius       = draw.v.scale * mesh.v.radius;
     vec4  view_center  = data.view_from_world * vec4(world_center, 1);
-    // @todo scale radius by view_from_world?
     
     bool visible = true;
     if (frustum_culling_enabled) {
@@ -41,7 +40,7 @@ void main() {
         visible = visible && view_center.z * data.frustum[1] - abs(view_center.x) * data.frustum[0] > -radius;
         visible = visible && view_center.z * data.frustum[3] - abs(view_center.y) * data.frustum[2] > -radius;
         // the near/far plane culling uses camera space Z directly, but the camera looks down -z :ViewSpace:
-        visible = visible && view_center.z + radius < -data.near_z && view_center.z - radius > -data.far_z;
+        visible = visible && view_center.z - radius < data.near_z && view_center.z + radius > -data.far_z;
     }
     
     if (Late && occlusion_enabled && visible) {

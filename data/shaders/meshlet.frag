@@ -34,6 +34,7 @@ void main() {
     vec3 color = diffuse * albedo + specular;
     
     #if Debug
+        color = vec3(1,1,1);
         color *= mesh_result.debug_color;
     #endif // Debug
     

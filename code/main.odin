@@ -107,6 +107,12 @@ Debug :: struct {
     late_cull_time:  f64,
 }
 
+Camera :: struct {
+    p: v3,
+    orientation: q32,
+    fov_y: f32,
+}
+
 ////////////////////////////////////////////////
 
 // Maximum number of total task shader workgroups
@@ -288,10 +294,11 @@ main :: proc () {
     debug := Debug {
         vsync = true,
         
-        // @todo reenable when occlusion indices are set in draws and lod is better
-        // culling_enabled   = true,
+        culling_enabled   = true,
+        occlusion_enabled = true,
+        
+        // @todo lod generation and selection needs to be made better before it can be enabled without visible artefacts
         // lod_enabled       = true,
-        // occlusion_enabled = true,
     }
     
     cpu_begin_profile_zone("OS Metrics sleep")
@@ -372,7 +379,13 @@ main :: proc () {
     // This is written by the cpu every frame in the worst case.
     buffers.draws = gpu_allocate(gpu, [] Draw, 256 * Megabyte / size_of(Draw), 16, Memory_Kind.Default)
     
+    camera := Camera {
+        p           = {0, 0, 0},
+        orientation = 1,
+        fov_y       = 70 * RadiansFromDegrees,
+    }
     geometry: Geometry
+    
     max_draw_visibility_count: u32
     scene_draws: [dynamic] Draw
     {
@@ -393,7 +406,7 @@ main :: proc () {
         
         } else {
             path := "niagara_bistro/bistro.gltf"
-            if !load_scene(&geometry, path, &scene_draws) {
+            if !load_scene(&geometry, path, &scene_draws, &camera) {
                 os.exit(1)
             }
         }
@@ -407,7 +420,19 @@ main :: proc () {
             // @todo clearly separate what is temporary and what is kepts outside the temp allocator Currently generate_draws just wants to number of meshes for its randomness.
             _, max_draw_visibility_count = generate_draws(gpu, buffers.draws, 0, textures[:], geometry)
         } else {
-            max_draw_visibility_count = 1 // @todo
+            meshlet_visibility_count: u32
+            for &draw in scene_draws {
+                mesh := geometry.meshes[draw.mesh_index]
+                // @speed just ensure that the base lod has the most meshlets
+                meshlet_count: u32
+                for lod in mesh.lods[:mesh.lod_count] {
+                    meshlet_count = max(meshlet_count, lod.meshlet_count)
+                }
+                
+                draw.meshlet_visibility_offset = meshlet_visibility_count
+                meshlet_visibility_count      += meshlet_count
+            }
+            max_draw_visibility_count = meshlet_visibility_count
         }
     }
     
@@ -474,8 +499,6 @@ main :: proc () {
     pipelines: Pipelines
     
     ////////////////////////////////////////////////
-    
-    cam_pos := v3{0, 0, 0}
     
     // @cleanup OBJ_Mode
     light_pos := v3{0, 10, 10}
@@ -570,12 +593,12 @@ main :: proc () {
         last_time = current_time
         
         if mouse_wheel_delta != 0 {
-            cam_pos.z += mouse_wheel_delta * -10 * delta_time
+            camera.p.z += mouse_wheel_delta * -10 * delta_time
         }
         
         if mouse_delta != 0 && left_down {
             if space_down {
-                cam_pos.xy += mouse_delta * {-1, 1} * delta_time * 5
+                camera.p.xy += mouse_delta * {-1, 1} * delta_time * 5
             } else {
                 object_rotation.yx += mouse_delta * delta_time
             }
@@ -820,8 +843,9 @@ main :: proc () {
         // @todo this is in view/camera space make this a distance in world space
         draw_distance: f32 = 1000
         
-        view_from_world  := translate(1, -cam_pos)
-        screen_from_view := projection_reversed_z_infinite_far_plane(70 * RadiansFromDegrees, cast(f32) gpu.swapchain_size.x / cast(f32) gpu.swapchain_size.y, near_z)
+        oriented := cast(m4) la.matrix3_from_quaternion(camera.orientation)
+        view_from_world  := la.inverse(translate(oriented, camera.p))
+        screen_from_view := projection_reversed_z_infinite_far_plane(camera.fov_y, cast(f32) gpu.swapchain_size.x / cast(f32) gpu.swapchain_size.y, near_z)
         
         ////////////////////////////////////////////////
         ////////////////////////////////////////////////

@@ -128,6 +128,7 @@ gpu_profile_collate_times :: proc (gpu: ^Gpu, print: bool, frame_index: u64) {
     if print {
         zones := prof.zones
         
+        fmt.printfln("---------------------\nGPU profile:")
         link: u32
         for {
             zone := zones[link]
