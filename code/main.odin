@@ -322,19 +322,16 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    textures: [3] Image
-    
     descriptor_heap := create_descriptor_heap(gpu)
     
-    {
+    textures: [] Image
+    defer delete(textures, context.allocator)
+    
+    if OBJ_Mode {
+        make_by_pointer(&textures, 3, context.allocator)
         cpu_profile_scope("Texture Upload")
         
-        upload_bump := bump_allocator_make_temporary(gpu, 256 * Megabyte, usage = { .TRANSFER_SRC })
-        defer bump_allocator_delete(gpu, &upload_bump)
-        
-        cmd := gpu_begin_command_recording(gpu, gpu.transfer_command_pool, gpu.transfer_queue)
-        upload_semaphore := gpu_create_timeline_semaphore(gpu, 0)
-        defer gpu_destroy_semaphore(gpu, upload_semaphore)
+        cmd, upload_bump, upload_semaphore := begin_uploading_textures(gpu, 256 * Megabyte)
         
         for &texture, index in textures {
             filename := fmt.tprintf("tutorial/suzanne%v.ktx", index)
@@ -346,23 +343,10 @@ main :: proc () {
             description.format  = auto_cast loaded_texture.format
             description.usage   = { .TRANSFER_DST, .SAMPLED }
             
-            texture = gpu_allocate_texture(gpu, description)
-            
-            // @waste we should have loaded all data into here if possible
-            cpu_data, gpu_data := bump_allocate(&upload_bump, cast(u32) len(loaded_texture.data), alignment = 32)
-            copy(cpu_data, loaded_texture.data)
-            
-            gpu_image_barriers(cmd, {},
-                create_image_barrier_from_undefined(&texture, { .ALL_TRANSFER }, { .MEMORY_READ, .MEMORY_WRITE }),
-            )
-            
-            gpu_copy_to_texture(cmd, texture, gpu_data)
+            texture = upload_texture(gpu, cmd, &upload_bump, description, loaded_texture.data)
         }
-            
-        gpu_barrier(cmd, { .ALL_TRANSFER }, { .ALL_GRAPHICS })
         
-        gpu_submit(gpu.transfer_queue, { { upload_semaphore, { .ALL_COMMANDS }, 1} }, cmd)
-        gpu_wait_semaphore(gpu, upload_semaphore, 1)
+        end_uploading_textures(gpu, cmd, &upload_bump, upload_semaphore)
     }
     
     ////////////////////////////////////////////////
@@ -406,9 +390,34 @@ main :: proc () {
         
         } else {
             path := "niagara_bistro/bistro.gltf"
-            if !load_scene(&geometry, path, &scene_draws, &camera) {
+            texture_paths := make([dynamic] string, context.temp_allocator)
+            print("\nLoading scene: %v\n", path)
+            cpu_begin_profile_zone("load scene")
+            if !load_scene(&geometry, path, &scene_draws, &camera, &texture_paths) {
                 os.exit(1)
             }
+            cpu_end_profile_zone()
+            
+            print("  Loaded scene %q: %v meshes, %v draws, %v textures\n", path, len(geometry.meshes), len(scene_draws), len(texture_paths))
+            print("  Loading textures\n")
+            
+            make_by_pointer(&textures, len(texture_paths), context.allocator)
+            
+            cpu_begin_profile_zone("upload textures")
+            cmd, upload_bump, upload_semaphore := begin_uploading_textures(gpu, 2 * Gigabyte)
+            for texture_path, index in texture_paths {
+                // @waste read into the bump allocator/gpu memory directly
+                data, error := read_entire_file(texture_path, context.temp_allocator)
+                assert(error == nil)
+                
+                description, pixel_data := load_dds_texture(data)
+                
+                textures[index] = upload_texture(gpu, cmd, &upload_bump, description, pixel_data)
+            }
+            end_uploading_textures(gpu, cmd, &upload_bump, upload_semaphore)
+            cpu_end_profile_zone()
+            
+            print("  Loaded textures\n\n")
         }
         
         copy(buffers.vertices.cpu,     geometry.vertices[:])
@@ -799,9 +808,12 @@ main :: proc () {
             // @todo add a null texture, which is a bright debug color so that uninitialized indices(0) are easy to find
             // @todo when would we not want to get the sample/storage descriptors of a texture we uploaded? should this not
             // just be part of the upload code?
-            textures[0].sampled_index = append_texture(gpu, &descriptor_heap, &descriptor_offset, textures[0], true)
-            textures[1].sampled_index = append_texture(gpu, &descriptor_heap, &descriptor_offset, textures[1], true)
-            textures[2].sampled_index = append_texture(gpu, &descriptor_heap, &descriptor_offset, textures[2], true)
+            
+            // @volatile draws assume that their texture indices start at index 0. Add some kind of base offset that the shader add to a draws
+            // texture index(if its not 0?) to get its texture, or do this offsetting on draw generation on the cpu.
+            for &texture in textures {
+                texture.sampled_index = append_texture(gpu, &descriptor_heap, &descriptor_offset, texture, true)
+            }
             
             stuff.depth_buffer.sampled_index  = append_texture(gpu, &descriptor_heap, &descriptor_offset, stuff.depth_buffer,  true)
             stuff.depth_pyramid.sampled_index = append_texture(gpu, &descriptor_heap, &descriptor_offset, stuff.depth_pyramid, true)
@@ -1475,6 +1487,61 @@ grid_dimension_from_total_count :: proc (id: Shader_Id, x: u32 = 1, y: u32 = 1, 
     shader := get_shader(id)
     result := shader_grid_dimension_from_total_count(shader, x, y, z)
     return result
+}
+
+////////////////////////////////////////////////
+
+begin_uploading_textures :: proc (gpu: ^Gpu, buffer_size: u32) -> (vk.CommandBuffer, Bump_Allocator, vk.Semaphore) {
+    upload_bump := bump_allocator_make_temporary(gpu, buffer_size, usage = { .TRANSFER_SRC })
+    
+    cmd := gpu_begin_command_recording(gpu, gpu.transfer_command_pool, gpu.transfer_queue)
+    upload_semaphore := gpu_create_timeline_semaphore(gpu, 0)
+    
+    return cmd, upload_bump, upload_semaphore
+}
+
+// @todo if the bump allocator cap would be exceeded, wait for uploads to complete and clear the bump.offset
+upload_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, upload_bump: ^Bump_Allocator, description: Texture_Desc, data: [] u8) -> Image {
+    texture: Image
+    texture = gpu_allocate_texture(gpu, description)
+    
+    // @waste we should have loaded all data into here if possible
+    cpu_data, gpu_data := bump_allocate(upload_bump, cast(u32) len(data), alignment = 32)
+    copy(cpu_data, data)
+    
+    // @speed how can we batch barriers?
+    gpu_image_barriers(cmd, {},
+        create_image_barrier_from_undefined(&texture, { .ALL_TRANSFER }, { .MEMORY_READ, .MEMORY_WRITE }),
+    )
+    
+    // @copypasta from load_dds_texture
+    block_size := 16
+    #partial switch description.format {
+    case .BC1_RGBA_UNORM_BLOCK, .BC4_SNORM_BLOCK, .BC4_UNORM_BLOCK: block_size = 8
+    }
+    
+    mip_offset: int
+    mip_size := description.size.xy
+    for mip_level in 0..<description.mip_count {
+        gpu_copy_to_texture(cmd, texture, gpu_data, mip_level = mip_level, mip_offset = mip_offset, mip_size = mip_size)
+        // @copypasta from load_dds_texture
+        blocks := (mip_size + 3) / 4
+        mip_offset += cast(int) blocks.x * cast(int) blocks.y * block_size
+        
+        mip_size = vec_max(mip_size/2, 1)
+    }
+    assert(mip_offset == len(data))
+    
+    return texture
+}
+
+end_uploading_textures :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, upload_bump: ^Bump_Allocator, upload_semaphore: vk.Semaphore) {
+    gpu_barrier(cmd, { .ALL_TRANSFER }, { .ALL_GRAPHICS })
+    
+    gpu_submit(gpu.transfer_queue, { { upload_semaphore, { .ALL_COMMANDS }, 1} }, cmd)
+    gpu_wait_semaphore(gpu, upload_semaphore, 1)
+    gpu_destroy_semaphore(gpu, upload_semaphore)
+    bump_allocator_delete(gpu, upload_bump)
 }
 
 ////////////////////////////////////////////////

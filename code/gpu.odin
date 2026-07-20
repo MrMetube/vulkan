@@ -399,7 +399,6 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
         device_extensions := [] cstring { 
             vk.KHR_SWAPCHAIN_EXTENSION_NAME,
             vk.EXT_MESH_SHADER_EXTENSION_NAME,
-            vk.KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME,
             vk.EXT_DESCRIPTOR_HEAP_EXTENSION_NAME,
             vk.KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME,
             vk.KHR_SHADER_UNTYPED_POINTERS_EXTENSION_NAME,
@@ -1462,19 +1461,24 @@ gpu_copy :: proc (cmd: vk.CommandBuffer, destination: any, source: pmm) {
     unimplemented()
 }
 
-gpu_copy_to_texture :: proc (cmd: vk.CommandBuffer, destination: Image, source: vk.DeviceAddress, layout := vk.ImageLayout.GENERAL) {
+gpu_copy_to_texture :: proc (cmd: vk.CommandBuffer, destination: Image, source: vk.DeviceAddress, mip_level: u32 = 0, mip_offset: int = 0, mip_size: uv2 = 0) {
     alloc := gpu_reflect_get_allocation(source)
     
     region := vk.BufferImageCopy {
-        bufferOffset = alloc.offset,
-        imageSubresource = { aspectMask = { .COLOR }, mipLevel = 0, layerCount = 1 },
+        bufferOffset = alloc.offset + cast(vk.DeviceSize) mip_offset,
+        imageSubresource = { aspectMask = { .COLOR }, mipLevel = mip_level, layerCount = 1 },
         imageExtent      = { **destination.size },
     }
     
-    vk.CmdCopyBufferToImage(cmd, alloc.buffer, destination.image, layout, 1, &region)
+    if mip_level != 0 {
+        assert(mip_size != 0)
+        region.imageExtent = { mip_size.x, mip_size.y, 1 }
+    }
+    
+    vk.CmdCopyBufferToImage(cmd, alloc.buffer, destination.image, .GENERAL, 1, &region)
 }
 
-gpu_copy_from_texture :: proc (cmd: vk.CommandBuffer, destination: vk.DeviceAddress, source: Image, size: uv3, layout := vk.ImageLayout.GENERAL) {
+gpu_copy_from_texture :: proc (cmd: vk.CommandBuffer, destination: vk.DeviceAddress, source: Image, size: uv3) {
     alloc := gpu_reflect_get_allocation(destination)
     
     region := vk.BufferImageCopy {
@@ -1483,7 +1487,7 @@ gpu_copy_from_texture :: proc (cmd: vk.CommandBuffer, destination: vk.DeviceAddr
         imageExtent      = { **size },
     }
     
-    vk.CmdCopyImageToBuffer(cmd, source.image, layout, alloc.buffer, 1, &region)
+    vk.CmdCopyImageToBuffer(cmd, source.image, .GENERAL, alloc.buffer, 1, &region)
 }
 
 gpu_fill_memory :: proc { gpu_fill_memory_address, gpu_fill_memory_slice }

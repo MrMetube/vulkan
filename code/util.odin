@@ -6,6 +6,7 @@ import "base:intrinsics"
 import "base:runtime"
 
 import "core:simd"
+import "core:os"
 
 _ :: simd
 
@@ -153,6 +154,14 @@ swap :: proc (a, b: ^$T ) { a^, b^ = b^, a^ }
 
 unused :: proc (_: ..any) {}
 
+clone_string :: proc (s: string, allocator: Allocator) -> string {
+    s_bytes := transmute([] u8) s
+    bytes := make([] u8, len(s_bytes), allocator)
+    copy(bytes, s_bytes)
+    result := transmute(string) bytes
+    return result
+}
+
 append_into :: proc { append_into_array, append_into_fixed_array }
 append_into_array :: proc (array: ^[dynamic] $T, loc := #caller_location) -> ^T {
     appended := append_nothing(array, loc = loc)
@@ -228,6 +237,9 @@ slice_from_parts_type :: proc ($T: typeid, data: pmm, #any_int count: i64) -> []
 }
 slice_from_parts_type_of_data_pointer :: proc (data: ^$T, #any_int count: i64) -> [] T {
     return (cast([^]T) data)[:count] // :PointerArithmetic
+}
+string_from_parts :: proc (data: pmm, #any_int count: i64) -> string {
+    return transmute(string) (cast([^] u8) data)[:count] // :PointerArithmetic
 }
 
 array_from_parts :: proc ($T: typeid, data: pmm, #any_int length, capacity: int, allocator: Maybe(Allocator) = nil) -> [dynamic] T {
@@ -373,4 +385,17 @@ previous_power_of_two :: proc (v: u32) -> u32 {
 
 integer_log2 :: proc (x: u32) -> u32 {
 	return (32-1) - intrinsics.count_leading_zeros(x)
+}
+
+////////////////////////////////////////////////
+
+// Assumes that its a regular file with a known size and not a pipe or socket or other "file" that must be read in parts.
+read_entire_file :: proc (path: string, allocator: Allocator) -> (data: [] u8, error: os.Error) {
+    file := os.open(path)                or_return
+    defer   os.close(file)
+    size := os.file_size(file)           or_return
+    data  = make([] u8, size, allocator) or_return
+    read := os.read_full(file, data)     or_return
+    
+    return data, nil
 }

@@ -2,6 +2,7 @@
 package main
 
 import "core:fmt"
+import "core:strings"
 
 import "../lib/meshoptimizer"
 import "../lib/tobj"
@@ -67,7 +68,7 @@ pack_normal :: proc (n: v3) -> [3] u8 {
 // have their access synchronized, so that no 2 threads use the same memory and that no thread uses
 // memory that was freed, if any buffer needed to be reallocated to grow.
 //
-load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Draw, camera: ^Camera) -> bool {
+load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Draw, camera: ^Camera, texture_paths: ^[dynamic] string) -> bool {
     path := fmt.ctprint(filepath)
     
     options: cgltf.options
@@ -238,7 +239,7 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
             
             for index in 0..<slot.primitive_count {
                 if s.x != s.y || s.x != s.z {
-                    fmt.printfln("%v: Warning: A mesh has non-uniform scale(%v), which we don't handle. This mesh will not be drawn correctly.", #location(), s)
+                    // fmt.printfln("%v: Warning: A mesh has non-uniform scale(%v), which we don't handle. This mesh will not be drawn correctly.", #location(), s)
                 }
                 
                 draw := append_into(draws)
@@ -264,13 +265,28 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
         }
     }
     
-    fmt.printfln("Loaded scene %q: %v meshes, %v draws", filepath, len(geometry.meshes), len(draws))
+    // @hack real path handling?
+    slash_index := strings.last_index_byte(filepath, '/')
+    assert(slash_index != -1, "use a path with a slash '/' not a '\\'")
+    base_path := filepath[:slash_index+1]
+    
+    for texture in data.textures {
+        assert(texture.image_ != nil)
+        
+        image := texture.image_
+        assert(image.uri != nil)
+        uri_size := cgltf.decode_uri(image.uri)
+        assert(uri_size <= len(image.uri))
+        
+        // @hack
+        png_path := tprint("%v%v", base_path, (cast(string) image.uri)[:uri_size])
+        
+        dds_path, _ := strings.replace(png_path, ".png", ".dds", 1, context.temp_allocator)
+        append(texture_paths, dds_path)
+    }
     
     return true
 }
-
-
-////////////////////////////////////////////////
 
 append_mesh :: proc (geometry: ^Geometry, mesh_vertices: [] Vertex, mesh_indices: [] u32) {
     meshoptimizer.optimizeVertexCache(&mesh_indices[0],  &mesh_indices[0], len(mesh_indices),                    len(mesh_vertices))
