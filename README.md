@@ -44,6 +44,3 @@ The further the camera is from the mesh, the fewer meshlets and therefore triang
 
 The dependencies are not committed into this repository. You can find them through these links:
 - [Odin Bindings for Meshoptimizer](https://github.com/GloriousPtr/odin-meshoptimizer): used to generate the meshlets and LOD data from the mesh. (Note: these are bindings to the original library, which has a C api.)
-- [Tiny OBJ Loader](https://github.com/Capati/odin-tobj): used to parse and load the mesh data from Wavefront files.
-
-- [Odin Bindings for LibKTX](https://github.com/nowhereware/ktx_odin): used to load KTX textures. (Note: these are bindings to the original library, which has a C api.)
