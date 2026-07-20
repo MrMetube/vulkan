@@ -55,12 +55,13 @@ void main() {
         Vertex_p vertex = data.vertex_buffer[vertex_index];
         
         mat4 screen_from_view = mat4(
-            data.s00,                0,                   0,  0,
-                           0, data.s11,                   0,  0, // s11 is already inverted, to invert the y-axis
-                           0,                0,                   0, -1,
-                           0,                0, data.near_z,  0  // look down -z
+            data.s00,        0,           0,  0,
+                   0, data.s11,           0,  0, // s11 is already inverted, to invert the y-axis
+                   0,        0,           0, -1,
+                   0,        0, data.near_z,  0  // look down -z
         );
         
+        // @cleanup why are we passing view space to the frag shader. world space would do.
         vec3 model_p = vertex.v.p;
         vec3 world_p = transform(draw.v.orientation, draw.v.scale, draw.v.p, model_p);
         vec4 view_p = data.view_from_world * vec4(world_p, 1.0);
@@ -68,7 +69,11 @@ void main() {
         
         vec3 model_n = vec3(vertex.v.n[0], vertex.v.n[1], vertex.v.n[2]) / 127.5 - 1;
         vec3 world_n = rotate(draw.v.orientation, model_n);
-        vec3 view_n  = mat3(data.view_from_world) * world_n;
+        
+        vec4 model_t = vec4(vertex.v.t[0], vertex.v.t[1], vertex.v.t[2], vertex.v.t[3]) / 127.5 - 1;
+        vec4 world_t = model_t;
+             world_t.xyz = rotate(draw.v.orientation, world_t.xyz);
+        
         Mesh_Result result;
         
         {
@@ -77,9 +82,9 @@ void main() {
             result.light_vec    =  view_light_p.xyz - view_p.xyz;
         }
         result.view_vec = -view_p.xyz;
-        result.uv     = unpackHalf2x16(vertex.v.uv);
-        result.normal = view_n;
-        
+        result.uv       = unpackHalf2x16(vertex.v.uv);
+        result.normal   = world_n;
+        result.tangent  = world_t;
         
         #if Debug
             uint mhash = hash(meshlet_index);

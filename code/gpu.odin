@@ -247,7 +247,8 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
             
             instance_extension_names: [dynamic; 16] cstring
             if ODIN_OS == .Windows {
-                append(&instance_extension_names, "VK_KHR_surface", "VK_KHR_win32_surface")
+                append(&instance_extension_names, vk.KHR_SURFACE_EXTENSION_NAME)
+                append(&instance_extension_names, "VK_KHR_win32_surface")
             } else { unimplemented() }
             
             when Validation {

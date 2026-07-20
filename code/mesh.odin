@@ -29,7 +29,12 @@ load_obj_mesh :: proc (geometry: ^Geometry, filepath: string) -> bool {
             uv = model.texture_coords[index] * { 1, -1 }
         }
         
-        v = { p = p, n = pack_normal(n), uv = cast(hv2) uv }
+        v = { 
+            p = p, 
+            n = pack_normal_or_tangent(n), 
+            t = {127, 127, 127, 254},
+            uv = cast(hv2) uv,
+        }
     }
     
     mesh_indices := model.indices[:]
@@ -56,8 +61,8 @@ load_obj_mesh :: proc (geometry: ^Geometry, filepath: string) -> bool {
     return true
 }
 
-pack_normal :: proc (n: v3) -> [3] u8 {
-    result := cast([3] u8) (n * 127 + 127.5)
+pack_normal_or_tangent :: proc (n: [$N] f32) -> [N] u8 {
+    result := cast([N] u8) (n * 127 + 127.5)
     return result
 }
 
@@ -103,8 +108,9 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
         mesh_offset := len(geometry.meshes)
         
         for &primitive in mesh.primitives {
-            if primitive.type != .triangles { continue }
-            if primitive.indices == nil     { continue }
+            // @todo remove asserts and fix the material lookup for the draws
+            if primitive.type != .triangles { assert(false); continue }
+            if primitive.indices == nil     { assert(false); continue }
             
             find_accessor :: proc (primitive: ^cgltf.primitive, type: cgltf.attribute_type, index: i32 = 0) -> ^cgltf.accessor {
                 result: ^cgltf.accessor
@@ -149,10 +155,26 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
                 _ = cgltf.accessor_unpack_floats(normals, &floats[0], vertex_count * components)
                 
                 for vertex_index in 0..<vertex_count {
-                    vertices[vertex_index].n = pack_normal(v3 {
+                    vertices[vertex_index].n = pack_normal_or_tangent(v3 {
                         floats[vertex_index * components + 0],
                         floats[vertex_index * components + 1],
                         floats[vertex_index * components + 2],
+                    })
+                }
+            }
+            
+            if tangents := find_accessor(&primitive, .tangent); tangents != nil {
+                components :: len(Vertex{}.t)
+                assert(cgltf.num_components(tangents.type) == components)
+                
+                _ = cgltf.accessor_unpack_floats(tangents, &floats[0], vertex_count * components)
+                
+                for vertex_index in 0..<vertex_count {
+                    vertices[vertex_index].t = pack_normal_or_tangent(v4 {
+                        floats[vertex_index * components + 0],
+                        floats[vertex_index * components + 1],
+                        floats[vertex_index * components + 2],
+                        floats[vertex_index * components + 3],
                     })
                 }
             }
@@ -181,53 +203,6 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
         append(&primitives, Primitive { mesh_offset , len(geometry.meshes) - mesh_offset})
     }
     
-    // stolen from zeux's niagara code
-    decompose_transform :: proc (m: m4) -> (translation: v3, rotation: q32, scale: v3) {
-        // extract translation from last row
-        translation[0] = m[0, 3]
-        translation[1] = m[1, 3]
-        translation[2] = m[2, 3]
-        
-        // compute determinant to determine handedness
-        det := 
-        m[0, 0] * (m[1, 1] * m[2, 2] - m[1, 2] * m[2, 1]) -
-        m[1, 0] * (m[0, 1] * m[2, 2] - m[2, 1] * m[0, 2]) +
-        m[2, 0] * (m[0, 1] * m[1, 2] - m[1, 1] * m[0, 2])
-        
-        sign : f32 = det < 0 ? -1 : 1
-        
-        // recover scale from axis lengths
-        scale[0] = square_root(m[0, 0] * m[0, 0] + m[1, 0] * m[1, 0] + m[2, 0] * m[2, 0]) * sign
-        scale[1] = square_root(m[0, 1] * m[0, 1] + m[1, 1] * m[1, 1] + m[2, 1] * m[2, 1]) * sign
-        scale[2] = square_root(m[0, 2] * m[0, 2] + m[1, 2] * m[1, 2] + m[2, 2] * m[2, 2]) * sign
-        
-        // normalize axes to get a pure rotation matrix
-        rsx := (scale[0] == 0) ? 0 : 1 / scale[0]
-        rsy := (scale[1] == 0) ? 0 : 1 / scale[1]
-        rsz := (scale[2] == 0) ? 0 : 1 / scale[2]
-        
-        r00, r10, r20 := m[0, 0] * rsx, m[0, 1] * rsy, m[0, 2] * rsz
-        r01, r11, r21 := m[1, 0] * rsx, m[1, 1] * rsy, m[1, 2] * rsz
-        r02, r12, r22 := m[2, 0] * rsx, m[2, 1] * rsy, m[2, 2] * rsz
-        
-        // "branchless" version of Mike Day's matrix to quaternion conversion
-        qc  := r22 < 0 ? (r00 > r11 ? 0 : 1) : (r00 < -r11 ? 2 : 3)
-        qs1 : f32 = (      qc & 2) != 0 ? -1 : 1
-        qs2 : f32 = (      qc & 1) != 0 ? -1 : 1
-        qs3 : f32 = ((qc - 1) & 2) != 0 ? -1 : 1
-        
-        qt := 1 - qs3*r00 - qs2*r11 - qs1*r22
-        qs := 0.5 / square_root(qt)
-        
-        _rotation := cast(^v4) &rotation 
-        _rotation[qc ~ 0] = qs * qt
-        _rotation[qc ~ 1] = qs * (r01 + qs1 * r10)
-        _rotation[qc ~ 2] = qs * (r20 + qs2 * r02)
-        _rotation[qc ~ 3] = qs * (r12 + qs3 * r21)
-        
-        return translation, rotation, scale
-    }
-    
     for &node in data.nodes {
         if node.mesh != nil {
             world_matrix: m4
@@ -248,6 +223,19 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
                 draw.orientation   = r
                 draw.mesh_index    = cast(u32) (mesh_index + index)
                 draw.vertex_offset = geometry.meshes[draw.mesh_index].vertex_offset
+                
+                // @todo this will be incorrect if any meshes/primitives are skipped
+                material := node.mesh.primitives[index].material 
+                if material != nil {
+                    if material.pbr_metallic_roughness.base_color_texture.texture != nil {
+                        draw.albedo_texture = cast(Texture_Index) cgltf.texture_index(data, material.pbr_metallic_roughness.base_color_texture.texture)
+                    } else if material.pbr_specular_glossiness.diffuse_texture.texture != nil {
+                        draw.albedo_texture = cast(Texture_Index) cgltf.texture_index(data, material.pbr_specular_glossiness.diffuse_texture.texture)
+                    }
+                    if material.normal_texture.texture != nil {
+                        draw.normal_texture = cast(Texture_Index) cgltf.texture_index(data, material.normal_texture.texture)
+                    }
+                }
             }
         }
         
@@ -286,6 +274,53 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
     }
     
     return true
+}
+
+// stolen from zeux's niagara code
+decompose_transform :: proc (m: m4) -> (translation: v3, rotation: q32, scale: v3) {
+    // extract translation from last row
+    translation[0] = m[0, 3]
+    translation[1] = m[1, 3]
+    translation[2] = m[2, 3]
+    
+    // compute determinant to determine handedness
+    det := 
+    m[0, 0] * (m[1, 1] * m[2, 2] - m[1, 2] * m[2, 1]) -
+    m[1, 0] * (m[0, 1] * m[2, 2] - m[2, 1] * m[0, 2]) +
+    m[2, 0] * (m[0, 1] * m[1, 2] - m[1, 1] * m[0, 2])
+    
+    sign : f32 = det < 0 ? -1 : 1
+    
+    // recover scale from axis lengths
+    scale[0] = square_root(m[0, 0] * m[0, 0] + m[1, 0] * m[1, 0] + m[2, 0] * m[2, 0]) * sign
+    scale[1] = square_root(m[0, 1] * m[0, 1] + m[1, 1] * m[1, 1] + m[2, 1] * m[2, 1]) * sign
+    scale[2] = square_root(m[0, 2] * m[0, 2] + m[1, 2] * m[1, 2] + m[2, 2] * m[2, 2]) * sign
+    
+    // normalize axes to get a pure rotation matrix
+    rsx := (scale[0] == 0) ? 0 : 1 / scale[0]
+    rsy := (scale[1] == 0) ? 0 : 1 / scale[1]
+    rsz := (scale[2] == 0) ? 0 : 1 / scale[2]
+    
+    r00, r10, r20 := m[0, 0] * rsx, m[0, 1] * rsy, m[0, 2] * rsz
+    r01, r11, r21 := m[1, 0] * rsx, m[1, 1] * rsy, m[1, 2] * rsz
+    r02, r12, r22 := m[2, 0] * rsx, m[2, 1] * rsy, m[2, 2] * rsz
+    
+    // "branchless" version of Mike Day's matrix to quaternion conversion
+    qc  := r22 < 0 ? (r00 > r11 ? 0 : 1) : (r00 < -r11 ? 2 : 3)
+    qs1 : f32 = (      qc & 2) != 0 ? -1 : 1
+    qs2 : f32 = (      qc & 1) != 0 ? -1 : 1
+    qs3 : f32 = ((qc - 1) & 2) != 0 ? -1 : 1
+    
+    qt := 1 - qs3*r00 - qs2*r11 - qs1*r22
+    qs := 0.5 / square_root(qt)
+    
+    _rotation := cast(^v4) &rotation 
+    _rotation[qc ~ 0] = qs * qt
+    _rotation[qc ~ 1] = qs * (r01 + qs1 * r10)
+    _rotation[qc ~ 2] = qs * (r20 + qs2 * r02)
+    _rotation[qc ~ 3] = qs * (r12 + qs3 * r21)
+    
+    return translation, rotation, scale
 }
 
 append_mesh :: proc (geometry: ^Geometry, mesh_vertices: [] Vertex, mesh_indices: [] u32) {

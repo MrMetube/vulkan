@@ -30,8 +30,9 @@ struct Task_Result {
 
 struct Mesh_Result {
     vec3 light_vec;
-    vec3 normal;
     vec3 view_vec;
+    vec3 normal;
+    vec4 tangent;
     vec2 uv;
 #if Debug
     vec3 debug_color; // @cleanup

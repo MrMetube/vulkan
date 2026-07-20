@@ -13,31 +13,35 @@ layout(descriptor_heap) uniform sampler   Samplers[];
 layout(location = 0) out vec4 pixel_result;
 
 void main() {
-    vec3 diffuse  = vec3(0.0);
-    vec3 specular = vec3(0.0);
-    
-    // Phong lighting
-    vec3 n = normalize(mesh_result.normal);
-    vec3 v = normalize(mesh_result.view_vec);
+    vec4 albedo = vec4(.5, .5, .5, 1);
+    vec4 nnormal = vec4(0, 0, 1, 0); // @naming
     {
-        vec3 l = normalize(mesh_result.light_vec);
-        vec3 r = reflect(-l, n);
-        diffuse  += 3 * max(dot(n, l), 0.0025);
-        specular += 3 * pow(max(dot(r, v), 0.0), 16.0) * 0.75;
+        Draw draw = data.draw_buffer[draw_index].v;
+        vec2 uv = mesh_result.uv;
+        
+        // @volatile heap StaticLimit. just move those to the end of the heap and forget about them.
+        // @speed if the texture index is uniform over the lanes, then nonuniformEXT() is a pessimisation.
+        if (draw.albedo_texture > 0) {
+            albedo = texture(sampler2D(Textures[nonuniformEXT(65536 + 1 + draw.albedo_texture)], Samplers[Sampler_Texture]), uv);
+        }
+        if (draw.normal_texture > 0) {
+            nnormal = texture(sampler2D(Textures[nonuniformEXT(65536 + 1 + draw.normal_texture)], Samplers[Sampler_Texture]), uv);
+            nnormal = nnormal * 2 - 1;
+        }
     }
     
-    uint texture_index = data.draw_buffer[draw_index].v.texture_index;
-    vec2 uv = mesh_result.uv;
+    vec3 binormal = cross(mesh_result.normal, mesh_result.tangent.xyz) * mesh_result.tangent.w;
     
-    vec3 albedo = texture(sampler2D(Textures[texture_index], Samplers[Sampler_Texture]), uv).rgb;
+    vec3 normal = normalize(nnormal.x * mesh_result.tangent.xyz + nnormal.y * binormal + nnormal.z * mesh_result.normal);
     
-    vec3 color = diffuse * albedo + specular;
+    // @todo lighting
+    float ndotl = max(dot(normal, normalize(vec3(1, 1, 1))), 0);
+    vec4 color = albedo * sqrt(ndotl + 0.005);
     
     #if Debug
-        color = vec3(1,1,1);
-        color *= mesh_result.debug_color;
+        color = mesh_result.debug_color;
     #endif // Debug
     
-    pixel_result = vec4(color, 1);
-    pixel_result = vec4(n+1*0.5, 1);
+    pixel_result = color;
+    // pixel_result.xyz = (normal + 1) / 2;
 }

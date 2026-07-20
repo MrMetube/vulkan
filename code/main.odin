@@ -51,6 +51,7 @@ Image :: struct {
     storage_index: Texture_Index,
 }
 
+// @waste do we really need more then 65535 textures? how much memory would that many 1k (compressed) textures even require?
 Texture_Index :: distinct u32
 
 Depth_Mip :: struct {
@@ -190,7 +191,9 @@ Draw :: struct { // :Shader:
     p:           v3,
     scale:       f32,
     
-    texture_index: Texture_Index,
+    albedo_texture: Texture_Index, // @todo make proper zero values for these: 1x1 white pixel
+    normal_texture: Texture_Index, // @todo make proper zero values for these: ??
+    
     mesh_index:    u32,
     vertex_offset: u32,
     meshlet_visibility_offset: u32,
@@ -235,6 +238,7 @@ Vertex :: struct { // :Shader:
     p:  v3,
     n:  [3] u8,
     _:  u8,
+    t:  [4] u8,
     uv: hv2,
 }
 
@@ -392,6 +396,7 @@ main :: proc () {
             path := "niagara_bistro/bistro.gltf"
             texture_paths := make([dynamic] string, context.temp_allocator)
             print("\nLoading scene: %v\n", path)
+            
             cpu_begin_profile_zone("load scene")
             if !load_scene(&geometry, path, &scene_draws, &camera, &texture_paths) {
                 os.exit(1)
@@ -806,6 +811,9 @@ main :: proc () {
             descriptor_offset := cast(Texture_Index) (DescriptorStaticLimit + frame_index * DescriptorPerFrameLimit)
             
             // @todo add a null texture, which is a bright debug color so that uninitialized indices(0) are easy to find
+            // nil_index := append_texture(gpu, &descriptor_heap, &descriptor_offset, nil_texture, true)
+            descriptor_offset += 1
+            
             // @todo when would we not want to get the sample/storage descriptors of a texture we uploaded? should this not
             // just be part of the upload code?
             
@@ -823,6 +831,8 @@ main :: proc () {
                 mip.sampled_index = append_texture(gpu, &descriptor_heap, &descriptor_offset, stuff.depth_pyramid, true,  cast(u32) mip_level, 1)
                 mip.storage_index = append_texture(gpu, &descriptor_heap, &descriptor_offset, stuff.depth_pyramid, false, cast(u32) mip_level, 1)
             }
+            
+            // @todo add a barrier after modifying the heap to ensure descriptor caches are flushed
         }
         
         //
@@ -1236,7 +1246,7 @@ generate_draws :: proc (gpu: ^Gpu, draw_buffer: Gpu_Slice(Draw), object_rotation
         rotation        := la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
         draw.orientation = rotation * global_rotation
         
-        draw.texture_index = textures[random_between_u32(&entropy, 0, cast(u32) len(textures)-1)].sampled_index
+        draw.albedo_texture = textures[random_between_u32(&entropy, 0, cast(u32) len(textures)-1)].sampled_index
         
         mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
         
@@ -1509,7 +1519,20 @@ upload_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, upload_bump: ^Bump_All
     cpu_data, gpu_data := bump_allocate(upload_bump, cast(u32) len(data), alignment = 32)
     copy(cpu_data, data)
     
-    // @speed how can we batch barriers?
+    //
+    // @speed we can batch these barriers by doing a loop over all texture slots in textures: [] Image before the upload. There we make all these barries and then submit them once and then we do the rest.
+    // that requires that the texture descriptions are already loaded so we should do something like this:
+    //
+    // make a structure that mananger a texture upload task
+    //
+    // collect all texture file paths
+    // read all headers and make descriptions
+    // allocate all textures with their description
+    //   batch wait on the layout transitions
+    // load the pixel data directly into the bump allocator
+    //   if the cap is reached we wait for all already submitted copy commands and then clear the bump's .offset
+    // wait at the end for all uploads to finish and emit a single barrier on ALL_TRANSFER
+    // 
     gpu_image_barriers(cmd, {},
         create_image_barrier_from_undefined(&texture, { .ALL_TRANSFER }, { .MEMORY_READ, .MEMORY_WRITE }),
     )
