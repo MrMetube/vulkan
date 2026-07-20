@@ -6,6 +6,7 @@ import "../code" // just for the shader compiling
 
 optimize       :: false
 pedantic       :: false
+very_pedantic  :: false
 strict_shaders :: true
 
 main :: proc () {
@@ -13,6 +14,25 @@ main :: proc () {
     
     parse_run_and_debug_arguments()
     
+    compile_shaders()
+    
+    if begin_build(cmd, "code", "engine.exe", .Kill) {
+        build_meander()
+        
+        build_optimizations(optimize)
+        build_native()
+        build_pedantic(pedantic)
+        if pedantic && very_pedantic {
+            append(cmd, "-vet-packages:main", "-vet-unused-procedures")
+        }
+        
+        end_build(cmd)
+    }
+    
+    run_or_debug_according_to_args()
+}
+
+compile_shaders :: proc () {
     fmt.printfln("\nCompiling shaders:")
     // @copypasta from code.main: shader setup code
     code.generate_shader_api("data/shaders/api.generated.glsl")
@@ -62,19 +82,4 @@ main :: proc () {
         
         fmt.printfln("\nAll shaders compiled.\n")
     }
-    
-    if begin_build(cmd, "code", "engine.exe", .Kill) {
-        build_meander()
-        
-        build_optimizations(optimize)
-        build_native()
-        build_pedantic(pedantic)
-        if false && pedantic {
-            append(cmd, "-vet-packages:main", "-vet-unused-procedures")
-        }
-        
-        end_build(cmd)
-    }
-    
-    run_or_debug_according_to_args()
 }

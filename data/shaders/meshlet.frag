@@ -6,6 +6,9 @@ layout(push_constant) uniform _ { Draw_Data data; };
 
 layout(location = 0) flat   in uint        draw_index;
 layout(location = 1) smooth in Mesh_Result mesh_result;
+#if Debug
+layout(location = 6) flat   in uint debug_index;
+#endif // Debug
 
 layout(descriptor_heap) uniform texture2D Textures[];
 layout(descriptor_heap) uniform sampler   Samplers[];
@@ -35,11 +38,15 @@ void main() {
     vec3 normal = normalize(nnormal.x * mesh_result.tangent.xyz + nnormal.y * binormal + nnormal.z * mesh_result.normal);
     
     // @todo lighting
-    float ndotl = max(dot(normal, normalize(vec3(1, 1, 1))), 0);
+    float ndotl = max(dot(normal, normalize(vec3(-1, 1, 1))), 0);
     vec4 color = albedo * sqrt(ndotl + 0.005);
     
     #if Debug
-        color = mesh_result.debug_color;
+        uint index = 0;
+        index = debug_index;
+        index = draw_index;
+        uint mhash = hash(index);
+        color.rgb = vec3(float(mhash & 255), float((mhash >> 8) & 255), float((mhash >> 16) & 255)) / 255.0;
     #endif // Debug
     
     pixel_result = color;

@@ -396,6 +396,7 @@ read_entire_file :: proc (path: string, allocator: Allocator) -> (data: [] u8, e
     size := os.file_size(file)           or_return
     data  = make([] u8, size, allocator) or_return
     read := os.read_full(file, data)     or_return
+    assert(cast(i64) read == size)
     
     return data, nil
 }

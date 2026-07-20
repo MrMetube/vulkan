@@ -29,14 +29,9 @@ struct Task_Result {
 };
 
 struct Mesh_Result {
-    vec3 light_vec;
-    vec3 view_vec;
     vec3 normal;
     vec4 tangent;
     vec2 uv;
-#if Debug
-    vec3 debug_color; // @cleanup
-#endif // Debug
 };
 
 ////////////////////////////////////////////////
@@ -96,4 +91,14 @@ bool project_sphere_onto_screen(vec3 view_center, float radius, float s00, float
     result = result.xwzy * -0.5 + 0.5;
     
     return true;
+}
+
+uint hash(uint a) {
+    a = (a + 0x7ed55d16) + (a << 12);
+    a = (a ^ 0xc761c23c) ^ (a >> 19);
+    a = (a + 0x165667b1) + (a << 5);
+    a = (a + 0xd3a2646c) ^ (a << 9);
+    a = (a + 0xfd7046c5) + (a << 3);
+    a = (a ^ 0xb55a4f09) ^ (a >> 16);
+    return a;
 }

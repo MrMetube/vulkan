@@ -153,7 +153,6 @@ DebugFlag_OcclusionCulling :: (1 << 2)
 // @todo It would be way simpler if a bit wasteful to just always pass the shader all buffer addresses (buffers: Buffers).
 Draw_Data :: struct #all_or_none { // :Shader:
     view_from_world:  m4, // @todo alignment requirements
-    light_pos:        v3,
     
     screen_size: v2,
     flags: u32,
@@ -262,9 +261,6 @@ UI_Draw :: struct { // :Shader:
 
 ////////////////////////////////////////////////
 
-// @todo remove this old OBJ spamming mode
-OBJ_Mode :: false
-
 main :: proc () {
     track: mem.Tracking_Allocator
 	mem.tracking_allocator_init(&track, context.allocator, context.allocator)
@@ -328,31 +324,6 @@ main :: proc () {
     
     descriptor_heap := create_descriptor_heap(gpu)
     
-    textures: [] Image
-    defer delete(textures, context.allocator)
-    
-    if OBJ_Mode {
-        make_by_pointer(&textures, 3, context.allocator)
-        cpu_profile_scope("Texture Upload")
-        
-        cmd, upload_bump, upload_semaphore := begin_uploading_textures(gpu, 256 * Megabyte)
-        
-        for &texture, index in textures {
-            filename := fmt.tprintf("tutorial/suzanne%v.ktx", index)
-            
-            loaded_texture := load_ktx_texture(filename, context.temp_allocator)
-            
-            description := default_texture_desc()
-            description.size.xy = { loaded_texture.width, loaded_texture.height }
-            description.format  = auto_cast loaded_texture.format
-            description.usage   = { .TRANSFER_DST, .SAMPLED }
-            
-            texture = upload_texture(gpu, cmd, &upload_bump, description, loaded_texture.data)
-        }
-        
-        end_uploading_textures(gpu, cmd, &upload_bump, upload_semaphore)
-    }
-    
     ////////////////////////////////////////////////
     
     cpu_begin_profile_zone("Allocate buffers")
@@ -372,27 +343,18 @@ main :: proc () {
         orientation = 1,
         fov_y       = 70 * RadiansFromDegrees,
     }
+    
     geometry: Geometry
+    
+    textures: [] Image
+    defer delete(textures, context.allocator)
     
     max_draw_visibility_count: u32
     scene_draws: [dynamic] Draw
     {
         cpu_profile_scope("Geometry loading")
         
-        if OBJ_Mode {
-            paths := [?] string {
-                "tutorial/suzanne.obj",
-                // "models/bunny.obj",
-                // "models/lucy_280k.obj",
-            }
-            
-            for path in paths {
-                if !load_obj_mesh(&geometry, path) {
-                    os.exit(1)
-                }
-            }
-        
-        } else {
+        {
             path := "niagara_bistro/bistro.gltf"
             texture_paths := make([dynamic] string, context.temp_allocator)
             print("\nLoading scene: %v\n", path)
@@ -430,24 +392,19 @@ main :: proc () {
         copy(buffers.meshlet_data.cpu, geometry.meshlet_data[:])
         copy(buffers.meshes.cpu,       geometry.meshes[:])
         
-        if OBJ_Mode {
-            // @todo clearly separate what is temporary and what is kepts outside the temp allocator Currently generate_draws just wants to number of meshes for its randomness.
-            _, max_draw_visibility_count = generate_draws(gpu, buffers.draws, 0, textures[:], geometry)
-        } else {
-            meshlet_visibility_count: u32
-            for &draw in scene_draws {
-                mesh := geometry.meshes[draw.mesh_index]
-                // @speed just ensure that the base lod has the most meshlets
-                meshlet_count: u32
-                for lod in mesh.lods[:mesh.lod_count] {
-                    meshlet_count = max(meshlet_count, lod.meshlet_count)
-                }
-                
-                draw.meshlet_visibility_offset = meshlet_visibility_count
-                meshlet_visibility_count      += meshlet_count
+        meshlet_visibility_count: u32
+        for &draw in scene_draws {
+            mesh := geometry.meshes[draw.mesh_index]
+            // @speed just ensure that the base lod has the most meshlets
+            meshlet_count: u32
+            for lod in mesh.lods[:mesh.lod_count] {
+                meshlet_count = max(meshlet_count, lod.meshlet_count)
             }
-            max_draw_visibility_count = meshlet_visibility_count
+            
+            draw.meshlet_visibility_offset = meshlet_visibility_count
+            meshlet_visibility_count      += meshlet_count
         }
+        max_draw_visibility_count = meshlet_visibility_count
     }
     
     buffers.draw_commands      = gpu_allocate_slice(gpu, [] Draw_Command, TaskWidthLimit,                        memory = .GPU) 
@@ -514,10 +471,6 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    // @cleanup OBJ_Mode
-    light_pos := v3{0, 10, 10}
-    object_rotation: v3
-    
     quit: bool
     last_time := time.tick_now()
     
@@ -541,7 +494,6 @@ main :: proc () {
         mouse_delta: v2
         mouse_wheel_delta: f32
         @(static) left_down:  bool
-        @(static) space_down: bool
         
         cpu_begin_profile_zone("Input Events")
         
@@ -566,7 +518,6 @@ main :: proc () {
                 }
             case .KEY_DOWN:
                 switch event.key.key {
-                case sdl.K_SPACE: space_down = true
                 case sdl.K_C:     debug.culling_enabled   = !debug.culling_enabled
                 case sdl.K_L:     debug.lod_enabled       = !debug.lod_enabled
                 case sdl.K_O:     debug.occlusion_enabled = !debug.occlusion_enabled
@@ -580,10 +531,6 @@ main :: proc () {
                 case sdl.K_MINUS: debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level-1, 0, cast(i32) len(stuff.depth_pyramid_mips)-1)
                 
                 case sdl.K_ESCAPE: quit = true
-                }
-            case .KEY_UP:
-                if event.key.key == sdl.K_SPACE {
-                    space_down = false
                 }
                 
             case .MOUSE_WHEEL:
@@ -611,11 +558,7 @@ main :: proc () {
         }
         
         if mouse_delta != 0 && left_down {
-            if space_down {
-                camera.p.xy += mouse_delta * {-1, 1} * delta_time * 5
-            } else {
-                object_rotation.yx += mouse_delta * delta_time
-            }
+            camera.p.xy += mouse_delta * {-1, 1} * delta_time * 5
         }
         
         ////////////////////////////////////////////////
@@ -835,18 +778,15 @@ main :: proc () {
             // @todo add a barrier after modifying the heap to ensure descriptor caches are flushed
         }
         
-        //
-        // @hack @race_condition the draw commands should obviously not be written to by the cpu, whilst the gpu is still 
-        // processing the previous draw commands. We need atleast MaxFramesInFlight different draw_buffers to prevent this 
-        // race condition, if the draws themselves change every frame, which is likely if the objects themselves are dynamic.
-        //
-        
-        draws: [] Draw // @cleanup what is this even used for?
-        if OBJ_Mode {
-            draws, _ = generate_draws(gpu, buffers.draws, object_rotation, textures[:], geometry)
-        } else {
-            copy(buffers.draws.cpu,  scene_draws[:])
-            draws = buffers.draws.cpu[:len(scene_draws)]
+        draw_count : u32
+        {
+            //
+            // @hack @race_condition the draw commands should obviously not be written to by the cpu, whilst the gpu is still 
+            // processing the previous draw commands. We need atleast MaxFramesInFlight different draw_buffers to prevent this 
+            // race condition, if the draws themselves change every frame, which is likely if the objects themselves are dynamic.
+            //
+            copy(buffers.draws.cpu, scene_draws[:])
+            draw_count = cast(u32) len(scene_draws)
         }
         
         ////////////////////////////////////////////////
@@ -905,8 +845,7 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        draw_count := cast(u32) len(draws)
-        cull_and_render(gpu, cmd, .early, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug, light_pos)
+        cull_and_render(gpu, cmd, .early, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug)
         stats_pool_query_index += 1
         
         ////////////////////////////////////////////////
@@ -951,7 +890,7 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        cull_and_render(gpu, cmd, .late, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug, light_pos)
+        cull_and_render(gpu, cmd, .late, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug)
         stats_pool_query_index += 1
         
         ////////////////////////////////////////////////
@@ -1230,44 +1169,6 @@ main :: proc () {
 
 ////////////////////////////////////////////////
 
-generate_draws :: proc (gpu: ^Gpu, draw_buffer: Gpu_Slice(Draw), object_rotation: v3, textures: [] Image, geometry: Geometry) -> ([] Draw, u32) {
-    cpu_profile_scope("Generate Draws")
-    draws := draw_buffer.cpu[:50_000]
-    
-    meshlet_visibility_count: u32
-    
-    entropy := seed_random_series(545114)
-    global_rotation := la.quaternion_from_euler_angles_f32(**(object_rotation * random_unilateral(&entropy, v3)), .XYX)
-    for &draw in draws {
-        p := random_bilateral(&entropy, v3) * {10, 10, 10} + {0, 0, -10}
-        
-        draw.p           = p
-        draw.scale       = linear_blend(cast(f32) .05, .8, power(random_unilateral(&entropy, f32), 8)) / 2
-        rotation        := la.quaternion_angle_axis(random_unilateral(&entropy, f32) * Tau, random_bilateral(&entropy, v3))
-        draw.orientation = rotation * global_rotation
-        
-        draw.albedo_texture = textures[random_between_u32(&entropy, 0, cast(u32) len(textures)-1)].sampled_index
-        
-        mesh, mesh_index := random_choice_index(&entropy, geometry.meshes[:])
-        
-        draw.mesh_index    = mesh_index
-        draw.vertex_offset = mesh.vertex_offset
-        
-        // @speed just ensure that the base lod has the most meshlets
-        meshlet_count: u32
-        for lod in mesh.lods[:mesh.lod_count] {
-            meshlet_count = max(meshlet_count, lod.meshlet_count)
-        }
-        
-        draw.meshlet_visibility_offset = meshlet_visibility_count
-        meshlet_visibility_count      += meshlet_count
-    }
-    
-    return draws, meshlet_visibility_count
-}
-
-////////////////////////////////////////////////
-
 the_cpu_profiler: ^profiler.Event_Table
 
 cpu_begin_profile_zone :: proc (name: string) {
@@ -1315,7 +1216,7 @@ get_next_image :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, frame_index: u64) ->
     return true
 }
 
-cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelines, shaders: Shaders, buffers: Buffers, bump: ^Bump_Allocator,  stats_pool: vk.QueryPool, query_index: u32, stuff: ^Render_Targets_And_Stuff, draw_count: u32, dvb_and_mvb_cleared: ^bool, view_from_world: m4, screen_from_view: m4, near_z, draw_distance: f32, debug: Debug, light_pos: v3) {
+cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelines, shaders: Shaders, buffers: Buffers, bump: ^Bump_Allocator,  stats_pool: vk.QueryPool, query_index: u32, stuff: ^Render_Targets_And_Stuff, draw_count: u32, dvb_and_mvb_cleared: ^bool, view_from_world: m4, screen_from_view: m4, near_z, draw_distance: f32, debug: Debug) {
     //
     // early pass - frustum cull             & fill objects that *were* visible last frame
     //  late pass - frustum & occlusion cull & fill objects that were *not* visible last frame
@@ -1387,8 +1288,6 @@ cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelin
         
         screen_size  = cast(v2) gpu.swapchain_size,
         view_from_world = view_from_world,
-        
-        light_pos = light_pos,
         
         depth_pyramid_index = stuff.depth_pyramid.sampled_index,
         draw_command_buffer       = buffers.draw_commands.gpu.p,

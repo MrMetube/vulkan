@@ -5,66 +5,7 @@ import "core:fmt"
 import "core:strings"
 
 import "../lib/meshoptimizer"
-import "../lib/tobj"
 import "vendor:cgltf"
-
-load_obj_mesh :: proc (geometry: ^Geometry, filepath: string) -> bool {
-    models, _, error := tobj.load_obj_filename(filepath, allocator = context.temp_allocator)
-    if error != nil {
-        fmt.eprintfln("Failed to load mesh from file %q", filepath)
-        return false
-    }
-    
-    model := models[0].mesh
-    
-    mesh_vertices := make([] Vertex, len(model.vertices), context.temp_allocator)
-    
-    has_uvs := len(model.texture_coords) != 0
-    
-    for &v, index in mesh_vertices {
-        n := model.normals[index]
-        p := model.vertices[index]
-        uv: v2
-        if has_uvs {
-            uv = model.texture_coords[index] * { 1, -1 }
-        }
-        
-        v = { 
-            p = p, 
-            n = pack_normal_or_tangent(n), 
-            t = {127, 127, 127, 254},
-            uv = cast(hv2) uv,
-        }
-    }
-    
-    mesh_indices := model.indices[:]
-    
-    ////////////////////////////////////////////////
-    // optimize mesh
-    
-    {
-        remap := make([] u32, len(mesh_indices), context.temp_allocator)
-        
-        vertex_count := meshoptimizer.generateVertexRemap(&remap[0], &mesh_indices[0], len(mesh_indices), &mesh_vertices[0], len(mesh_vertices), size_of(Vertex))
-        
-        result_vertices := make([] Vertex, vertex_count,   context.temp_allocator)
-        result_indices  := make([] u32, len(mesh_indices), context.temp_allocator)
-        
-        meshoptimizer.remapVertexBuffer(&result_vertices[0], &mesh_vertices[0], len(mesh_vertices), size_of(Vertex), &remap[0])
-        meshoptimizer.remapIndexBuffer(&result_indices[0],   &mesh_indices[0],  len(mesh_indices),                   &remap[0])
-        
-        mesh_vertices = result_vertices
-        mesh_indices  = result_indices
-    }
-    
-    append_mesh(geometry, mesh_vertices, mesh_indices)
-    return true
-}
-
-pack_normal_or_tangent :: proc (n: [$N] f32) -> [N] u8 {
-    result := cast([N] u8) (n * 127 + 127.5)
-    return result
-}
 
 //
 // @speed The loading from ssd and the memory overhead themselves are not the bottleneck. It is the 
@@ -274,6 +215,11 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
     }
     
     return true
+}
+
+pack_normal_or_tangent :: proc (n: [$N] f32) -> [N] u8 {
+    result := cast([N] u8) (n * 127 + 127.5)
+    return result
 }
 
 // stolen from zeux's niagara code
