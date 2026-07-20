@@ -51,7 +51,7 @@ load_obj_mesh :: proc (geometry: ^Geometry, filepath: string) -> bool {
         mesh_indices  = result_indices
     }
     
-    load_mesh(geometry, mesh_vertices, mesh_indices)
+    append_mesh(geometry, mesh_vertices, mesh_indices)
     return true
 }
 
@@ -95,15 +95,15 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
     vertices := make([dynamic] Vertex, context.temp_allocator)
     indices  := make([dynamic] u32,    context.temp_allocator)
     
-    Primitive :: struct { meshes_offset, primitive_count: int }
+    Primitive :: struct { mesh_offset, primitive_count: int }
     primitives := make([dynamic] Primitive, context.temp_allocator)
     
     for mesh in data.meshes {
-        append(&primitives, Primitive { len(geometry.meshes), len(mesh.primitives)})
+        mesh_offset := len(geometry.meshes)
         
         for &primitive in mesh.primitives {
-            assert(primitive.type == .triangles)
-            assert(primitive.indices != nil)
+            if primitive.type != .triangles { continue }
+            if primitive.indices == nil     { continue }
             
             find_accessor :: proc (primitive: ^cgltf.primitive, type: cgltf.attribute_type, index: i32 = 0) -> ^cgltf.accessor {
                 result: ^cgltf.accessor
@@ -174,8 +174,10 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
             
             _ = cgltf.accessor_unpack_indices(primitive.indices, &indices[0], size_of(indices[0]), len(indices))
             
-            load_mesh(geometry, vertices[:], indices[:])
+            append_mesh(geometry, vertices[:], indices[:])
         }
+        
+        append(&primitives, Primitive { mesh_offset , len(geometry.meshes) - mesh_offset})
     }
     
     // stolen from zeux's niagara code
@@ -270,7 +272,7 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
 
 ////////////////////////////////////////////////
 
-load_mesh :: proc (geometry: ^Geometry, mesh_vertices: [] Vertex, mesh_indices: [] u32) {
+append_mesh :: proc (geometry: ^Geometry, mesh_vertices: [] Vertex, mesh_indices: [] u32) {
     meshoptimizer.optimizeVertexCache(&mesh_indices[0],  &mesh_indices[0], len(mesh_indices),                    len(mesh_vertices))
     meshoptimizer.optimizeVertexFetch(&mesh_vertices[0], &mesh_indices[0], len(mesh_indices), &mesh_vertices[0], len(mesh_vertices), size_of(Vertex)) 
     
