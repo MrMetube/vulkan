@@ -357,16 +357,25 @@ run_command :: proc (cmd: ^Cmd, or_exit := true, keep := false, stdout: Command_
     return success
 }
 
-procs_flush :: proc (procs: ^Procs) {
-    for &p in procs {
-        _, _ = os.process_wait(p)
+procs_flush :: proc (procs: ^Procs) -> bool {
+    success := true
+    for p in procs {
+        state, wait_error := os.process_wait(p)
+        if wait_error != nil {
+            fmt.printfln("Wait error: %v", wait_error)
+            success = false
+        }
+        
+        if state.exit_code != 0 { success = false }
     }
     
     clear(procs)
+    
+    return success
 }
 
 procs_close :: proc (procs: ^Procs) {
-    for &p in procs {
+    for p in procs {
         _ = os.process_terminate(p)
     }
     

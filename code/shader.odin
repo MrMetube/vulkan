@@ -333,27 +333,6 @@ compile_shader_begin :: proc (cmd: ^Cmd, shader_output: string) {
     append(cmd, "-o", shader_output)
 }
 
-compile_shader_end :: proc (cmd: ^Cmd, shader_input: string) -> bool {
-    append(cmd, shader_input)
-    
-    stdout: string
-    stderr: string
-    if !run_command(cmd, or_exit = false, stdout = &stdout, stderr = &stderr) {
-        fmt.eprintfln("Failed to run command to compile shader '%v'")
-        return false
-    }
-    
-    
-    if stdout != "" { fmt.printfln("Shader compilation output:\n\n%v\n", stdout) }
-    
-    if stderr != "" {
-        fmt.printfln("Shader compilation error:\n\n%v\n", stderr)
-        return false
-    }
-    
-    return true
-}
-
 shader_grid_dimension_from_total_count :: proc (shader: ^Shader, x: u32 = 1, y: u32 = 1, z: u32 = 1) -> uv3 {
     total_count := uv3 { x, y, z }
     result := (total_count + shader.local_size-1) / shader.local_size

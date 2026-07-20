@@ -13,13 +13,13 @@ main :: proc () {
     
     parse_run_and_debug_arguments()
     
+    fmt.printfln("\nCompiling shaders:")
     // @copypasta from code.main: shader setup code
     code.generate_shader_api("data/shaders/api.generated.glsl")
     
     shaders: [dynamic] string
     get_all_files_with_extension(&shaders, "data/shaders", context.temp_allocator, ".frag", ".vert", ".mesh", ".task", ".comp")
     
-    any_shader_had_errors: bool
     for shader in shaders {
         // @copypasta from code.compile_and_load_shader
         output_directory := "build"
@@ -31,13 +31,36 @@ main :: proc () {
         
         code.compile_shader_begin(cmd, shader_output)
         
-        ok := code.compile_shader_end(cmd, shader)
-        if !ok { any_shader_had_errors = true }
+        append(cmd, shader)
+        
+        ok: bool
+        if !run_command(cmd, or_exit = false, stdout = os.stdout, stderr = os.stderr, async = procs) {
+            fmt.eprintfln("Failed to run command to compile shader '%v'")
+        }
     }
     
-    if strict_shaders && any_shader_had_errors {
-        fmt.printfln("\nFailed to compile shaders. Stopping build process.")
-        return
+    if strict_shaders {
+        success := true
+        states: [dynamic] os.Process_State
+        for p, index in procs {
+            state, _ := os.process_wait(p)
+            append(&states, state)
+        }
+        
+        for state, index in states {
+            if state.exit_code != 0 {
+                if success { fmt.printfln("") }
+                success = false
+                fmt.printfln("Error: Failed to compile %v:", shaders[index])
+            }
+        }
+        
+        if !success {
+            fmt.printfln("\nFailed to compile shaders. Stopping build process.")
+            os.exit(1)
+        }
+        
+        fmt.printfln("\nAll shaders compiled.\n")
     }
     
     if begin_build(cmd, "code", "engine.exe", .Kill) {
