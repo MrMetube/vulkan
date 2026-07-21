@@ -482,6 +482,7 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
             maintenance5   = true, // deprecates ShaderModule
             pushDescriptor = true, // remove the need for CmdBindVertexBuffers
             dynamicRenderingLocalRead = true, // allows rendering to an image and then copying into the swapchain image, whilst using dynamic_rendering
+            hostImageCopy = true,
         }
         
         f2 := vk.PhysicalDeviceFeatures2 {
@@ -872,6 +873,11 @@ gpu_allocate_texture :: proc (gpu: ^Gpu, desc: Texture_Desc) -> Image {
     case: unreachable()
     }
     
+    result: Image
+    result.format    = desc.format
+    result.size      = desc.size
+    result.mip_count = desc.mip_count
+    
     create_info := vk.ImageCreateInfo {
         sType = .IMAGE_CREATE_INFO,
         imageType     = desc.kind,
@@ -885,9 +891,6 @@ gpu_allocate_texture :: proc (gpu: ^Gpu, desc: Texture_Desc) -> Image {
         initialLayout = .UNDEFINED,
     }
     
-    result: Image
-    result.format = desc.format
-    result.size   = desc.size
     check(vk.CreateImage(gpu.device, &create_info, nil, &result.image))
     
     requirements: vk.MemoryRequirements
@@ -898,6 +901,50 @@ gpu_allocate_texture :: proc (gpu: ^Gpu, desc: Texture_Desc) -> Image {
     check(vk.BindImageMemory(gpu.device, result.image, result.memory, 0))
     
     return result
+}
+
+gpu_copy_to_texture_immediately :: proc (gpu: ^Gpu, texture: Image, data: [] u8) {
+    transition_info := vk.HostImageLayoutTransitionInfo {
+        sType = .HOST_IMAGE_LAYOUT_TRANSITION_INFO,
+        image = texture.image,
+        oldLayout = .UNDEFINED,
+        newLayout = .GENERAL,
+        subresourceRange = { aspectMask = { .COLOR }, levelCount = texture.mip_count, layerCount = 1 },
+    }
+    vk.TransitionImageLayout(gpu.device, 1, &transition_info)
+    
+    copies: [dynamic; 32] vk.MemoryToImageCopy
+    
+    block_size := get_block_size_from_format(texture.format)
+    
+    mip_offset: int
+    mip_size := texture.size.xy
+    for mip_level in 0..<texture.mip_count {
+        copy := vk.MemoryToImageCopy {
+            sType = .MEMORY_TO_IMAGE_COPY,
+            pHostPointer     = &data[mip_offset],
+            imageSubresource = { aspectMask = { .COLOR }, mipLevel = mip_level, layerCount = 1 },
+            imageExtent      = { mip_size.x, mip_size.y, 1 },
+        }
+        append(&copies, copy)
+        
+        // @copypasta from load_dds_texture
+        blocks     := (mip_size + 3) / 4
+        mip_offset += cast(int) (blocks.x * blocks.y) * block_size
+        
+        mip_size = vec_max(mip_size/2, 1)
+    }
+    assert(mip_offset == len(data))
+    
+    info := vk.CopyMemoryToImageInfo {
+        sType = .COPY_MEMORY_TO_IMAGE_INFO,
+        dstImage       = texture.image,
+        dstImageLayout = .GENERAL,
+        regionCount    = cast(u32) len(copies),
+        pRegions       = raw_data(&copies),
+    }
+    vk.CopyMemoryToImage(gpu.device, &info)
+    
 }
 
 select_memory_type_and_allocate :: proc (gpu: ^Gpu, requirements: vk.MemoryRequirements, memory: Memory_Kind, add_device_address_flag := false) -> vk.DeviceMemory {

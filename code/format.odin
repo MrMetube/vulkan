@@ -29,6 +29,7 @@ view_init :: proc "contextless" () {
 
 Magnitude_Kind :: enum {
     Data,
+    Bytes,
     Count,
 }
 
@@ -51,30 +52,38 @@ View_Magnitude_Formatter :: proc (info: ^fmt.Info, arg: any, verb: rune) -> bool
     view := cast(^View_Magnitude) arg.data
     
     value: f64
-    symbol: rune
+    symbol: string
     switch view.kind {
     case .Data:
         switch {
-        case view.value > 1000_000_000_000: symbol, value = 'T', cast(f64) view.value / 1000_000_000_000
-        case view.value > 1000_000_000:     symbol, value = 'G', cast(f64) view.value / 1000_000_000
-        case view.value > 1000_000:         symbol, value = 'M', cast(f64) view.value / 1000_000
-        case view.value > 1000:             symbol, value = 'k', cast(f64) view.value / 1000
-        case:                               symbol, value = ' ', cast(f64) view.value
+        case view.value > 1000_000_000_000: symbol, value = "T", cast(f64) view.value / 1000_000_000_000
+        case view.value > 1000_000_000:     symbol, value = "G", cast(f64) view.value / 1000_000_000
+        case view.value > 1000_000:         symbol, value = "M", cast(f64) view.value / 1000_000
+        case view.value > 1000:             symbol, value = "k", cast(f64) view.value / 1000
+        case:                               symbol, value = " ", cast(f64) view.value
+        }
+    case .Bytes:
+        switch {
+        case view.value > Terabyte: symbol, value = "Tb", cast(f64) view.value / Terabyte
+        case view.value > Gigabyte: symbol, value = "Gb", cast(f64) view.value / Gigabyte
+        case view.value > Megabyte: symbol, value = "Mb", cast(f64) view.value / Megabyte
+        case view.value > Kilobyte: symbol, value = "kb", cast(f64) view.value / Kilobyte
+        case:                       symbol, value = " b", cast(f64) view.value
         }
     case .Count:
         switch {
-        case view.value > 1000_000_000_000: symbol, value = 'T', cast(f64) view.value / 1000_000_000_000
-        case view.value > 1000_000_000:     symbol, value = 'B', cast(f64) view.value / 1000_000_000
-        case view.value > 1000_000:         symbol, value = 'M', cast(f64) view.value / 1000_000
-        case view.value > 1000:             symbol, value = 'k', cast(f64) view.value / 1000
-        case:                               symbol, value = ' ', cast(f64) view.value
+        case view.value > 1000_000_000_000: symbol, value = "T", cast(f64) view.value / 1000_000_000_000
+        case view.value > 1000_000_000:     symbol, value = "B", cast(f64) view.value / 1000_000_000
+        case view.value > 1000_000:         symbol, value = "M", cast(f64) view.value / 1000_000
+        case view.value > 1000:             symbol, value = "k", cast(f64) view.value / 1000
+        case:                               symbol, value = " ", cast(f64) view.value
         }
     }
     
     info.prec = view.precision
     info.prec_set = true
     fmt.fmt_float(info, value, 8 * size_of(view.value), 'f')
-    fmt.fmt_rune(info, symbol, 'v')
+    fmt.fmt_string(info, symbol, 'v')
     
     return true
 }

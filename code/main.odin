@@ -44,9 +44,12 @@ Render_Targets_And_Stuff :: struct {
 
 Image :: struct {
     image:  vk.Image,
-    format: vk.Format,
     memory: vk.DeviceMemory,
-    size:   uv3,
+    
+    format:    vk.Format,
+    size:      uv3,
+    mip_count: u32,
+    
     sampled_index: Texture_Index,
     storage_index: Texture_Index,
 }
@@ -370,50 +373,62 @@ main :: proc () {
             
             make_by_pointer(&textures, len(texture_paths), context.allocator)
             
-            cpu_begin_profile_zone("upload textures")
-            
-            upload := begin_uploading_textures(gpu, 2 * Gigabyte)
-            
-            texture_barriers   := make([] vk.ImageMemoryBarrier2, len(texture_paths), context.temp_allocator)
-            texture_descs      := make([] Texture_Desc,           len(texture_paths), context.temp_allocator)
-            texture_pixel_size := make([] int,                    len(texture_paths), context.temp_allocator)
-            texture_pixels     := make([] vk.DeviceAddress,       len(texture_paths), context.temp_allocator)
-            
             //
-            // @speed currently:
-            // - copy from ssd into cpu visible gpu staging memory
-            // - then allocate the gpu memory 
-            // - then let the gpu copy from staging into the textures memory
-            // 
-            // HostImageCopy would allow us to do the copy into the texture memory on the cpu.
-            // That would remove the need for the staging memory, but there was something about
-            // mipmaps that was unsatisfying. This copy can then also easily be moved to different 
-            // worker threads.
+            // @speed moving the copies to a queue will speedup the loading from ssd(~22%). It may or may not help
+            // with the drivers copy(~71%), depending on its ability to be parallelized. 
+            /// 0.957 / 1.34
+            /// 0.3 / 1.34
             //
-            
-            for texture_path, index in texture_paths {
-                file, open_error := os.open(texture_path); assert(open_error == nil)
-                pixel_size: int
-                texture_descs[index], pixel_size = parse_dds_texture_header(file)
-                texture_pixel_size[index] = pixel_size
+            // Read speed testing estimates a max speed of 6.5 Gb/s with a preallocated and mapped buffer.
+            // Here we currently load ~2.1 Gb.
+            /// 2.1 / 6.5
+            // Just loading the textures should take ~0.3s itself: which it does!
+            // The whole texture upload takes roughly 0.8-1.5s, so ~0.5-1.2s itself, which is mainly
+            // the copy into the texture by the cpu. A straight memcopy would be faster by the driver
+            // may need to swizzle the data based on the formats.
+            /// 2.1 / 0.957
+            /// 2.1 / 0.493
+            // Therefore we only reach speeds of ~2.2 Gb/s (a memcopy of the same data ~4.3Gb/s)
+            // So the driver's copy is roughly half as fast as a memcopy.
+            //
+            // (We could memcopy the drivers swizzled data back into our memory and cache the result.)
+            // (This cached data would then be loaded instead and could be memcopied.)
+            //
+            total_size: int
+            {
+                cpu_profile_scope("upload textures")
                 
-                cpu_data, gpu_data := bump_allocate(&upload.bump, cast(u32) pixel_size, alignment = 32)
+                texture_descs      := make([] Texture_Desc, len(texture_paths), context.temp_allocator)
+                texture_pixel_size := make([] int,          len(texture_paths), context.temp_allocator)
+                texture_file       := make([] ^os.File,     len(texture_paths), context.temp_allocator)
                 
-                read, read_error := os.read(file, cpu_data); assert(read_error == nil); assert(read == pixel_size)
-                os.close(file)
+                max_size : int
+                for texture_path, index in texture_paths {
+                    file, open_error := os.open(texture_path); assert(open_error == nil)
+                    texture_descs[index], texture_pixel_size[index] = parse_dds_texture_header(file)
+                    texture_file[index] = file
+                    
+                    pixel_size := texture_pixel_size[index]
+                    max_size = max(max_size, pixel_size)
+                    total_size += pixel_size
+                }
                 
-                texture_pixels[index] = gpu_data
+                copy_buffer := make([] u8, max_size, context.temp_allocator)
+                for index in 0..<len(texture_paths) {
+                    pixel_size := texture_pixel_size[index]
+                    file       := texture_file[index]
+                    buffer := copy_buffer[:pixel_size]
+                    read, read_error := os.read_full(file, buffer); assert(read_error == nil); assert(read == pixel_size)
+                    os.close(file)
+                    
+                    texture := gpu_allocate_texture(gpu, texture_descs[index])
+                    gpu_copy_to_texture_immediately(gpu, texture, buffer)
+                    
+                    textures[index] = texture
+                }
             }
             
-            for index in 0..<len(texture_paths) {
-                textures[index] = upload_texture(gpu, &upload, texture_descs[index], texture_pixels[index], texture_pixel_size[index])
-            }
-            
-            end_uploading_textures(gpu, &upload)
-            
-            cpu_end_profile_zone()
-            
-            print("  Loaded textures\n\n")
+            print("  Loaded textures: %vb\n\n", view_magnitude(total_size))
         }
         
         cpu_begin_profile_zone("upload geometry")
@@ -476,7 +491,7 @@ main :: proc () {
     
     gpu_profile_init(gpu)
     
-    stats_count: u32 = 3
+    stats_count : u32 : 3
     stats_pools: [MaxFramesInFlight] vk.QueryPool
     for &it in stats_pools {
         it = create_query_pool(gpu, stats_count, .MESH_PRIMITIVES_GENERATED_EXT)
@@ -486,9 +501,9 @@ main :: proc () {
     next_frame := cast(u64) MaxFramesInFlight+1
     frame_semaphore := gpu_create_timeline_semaphore(gpu, MaxFramesInFlight)
     
-    cpu_end_profile_zone()
+    pipelines: Pipelines
     
-    ////////////////////////////////////////////////
+    cpu_end_profile_zone()
     
     cpu_begin_profile_zone("Allocate GPU Bumps")
     frame_bump_allocators: [MaxFramesInFlight] Bump_Allocator
@@ -497,10 +512,6 @@ main :: proc () {
     }
     
     cpu_end_profile_zone()
-    
-    ////////////////////////////////////////////////
-    
-    pipelines: Pipelines
     
     ////////////////////////////////////////////////
     
@@ -1429,58 +1440,6 @@ grid_dimension_from_total_count :: proc (id: Shader_Id, x: u32 = 1, y: u32 = 1, 
     shader := get_shader(id)
     result := shader_grid_dimension_from_total_count(shader, x, y, z)
     return result
-}
-
-////////////////////////////////////////////////
-
-Texture_Upload :: struct {
-    cmd:       vk.CommandBuffer,
-    bump:      Bump_Allocator,
-    semaphore: vk.Semaphore,
-}
-
-begin_uploading_textures :: proc (gpu: ^Gpu, buffer_size: u32) -> Texture_Upload {
-    upload_bump := bump_allocator_make_temporary(gpu, buffer_size, usage = { .TRANSFER_SRC })
-    
-    cmd := gpu_begin_command_recording(gpu, gpu.transfer_command_pool)
-    upload_semaphore := gpu_create_timeline_semaphore(gpu, 0)
-    
-    result := Texture_Upload { cmd, upload_bump, upload_semaphore }
-    return result
-}
-
-upload_texture :: proc (gpu: ^Gpu, upload: ^Texture_Upload, description: Texture_Desc, data: vk.DeviceAddress, data_size: int) -> Image {
-    texture := gpu_allocate_texture(gpu, description)
-    
-    gpu_image_barriers(upload.cmd, {},
-        create_image_barrier_from_undefined(&texture, { .ALL_TRANSFER }, { .MEMORY_READ, .MEMORY_WRITE }),
-    )
-
-    block_size := get_block_size_from_format(description.format)
-    
-    mip_offset: int
-    mip_size := description.size.xy
-    for mip_level in 0..<description.mip_count {
-        gpu_copy_to_texture(upload.cmd, texture, data, mip_level = mip_level, mip_offset = mip_offset, mip_size = mip_size)
-        // @copypasta from load_dds_texture
-        blocks := (mip_size + 3) / 4
-        mip_offset += cast(int) blocks.x * cast(int) blocks.y * block_size
-        
-        mip_size = vec_max(mip_size/2, 1)
-    }
-    assert(mip_offset == data_size)
-    
-    return texture
-}
-
-end_uploading_textures :: proc (gpu: ^Gpu, upload: ^Texture_Upload) {
-    gpu_barrier(upload.cmd, { .ALL_TRANSFER }, { .ALL_GRAPHICS })
-    
-    gpu_submit(gpu.transfer_queue, { { upload.semaphore, { .ALL_COMMANDS }, 1} }, upload.cmd)
-    gpu_wait_semaphore(gpu, upload.semaphore, 1)
-    
-    gpu_destroy_semaphore(gpu, upload.semaphore)
-    bump_allocator_delete(gpu, &upload.bump)
 }
 
 ////////////////////////////////////////////////

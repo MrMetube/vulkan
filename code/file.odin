@@ -216,7 +216,7 @@ parse_dds_texture_header :: proc (data: ^os.File) -> (Texture_Desc, int) {
     description := default_texture_desc(
         size      = { header.dwWidth, header.dwHeight, 1 },
         mip_count = header.dwMipMapCount,
-        usage     = { .TRANSFER_DST, .SAMPLED },
+        usage     = { .TRANSFER_DST, .SAMPLED, .HOST_TRANSFER },
     )
     
     switch format4cc {
