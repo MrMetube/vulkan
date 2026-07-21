@@ -43,7 +43,10 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
     indices  := make([dynamic] u32,    context.temp_allocator)
     
     Primitive :: struct { mesh_offset, primitive_count: int }
-    primitives := make([dynamic] Primitive, context.temp_allocator)
+    primitives := make([dynamic] Primitive,       context.temp_allocator)
+    materials  := make([dynamic] ^cgltf.material, context.temp_allocator)
+    
+    first_mesh_offset := len(geometry.meshes)
     
     for mesh in data.meshes {
         mesh_offset := len(geometry.meshes)
@@ -139,10 +142,13 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
             _ = cgltf.accessor_unpack_indices(primitive.indices, &indices[0], size_of(indices[0]), len(indices))
             
             append_mesh(geometry, vertices[:], indices[:])
+            append(&materials, primitive.material)
         }
         
         append(&primitives, Primitive { mesh_offset , len(geometry.meshes) - mesh_offset})
     }
+    
+    assert(len(materials) + first_mesh_offset == len(geometry.meshes))
     
     for &node in data.nodes {
         if node.mesh != nil {
@@ -165,8 +171,7 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
                 draw.mesh_index    = cast(u32) (mesh_index + index)
                 draw.vertex_offset = geometry.meshes[draw.mesh_index].vertex_offset
                 
-                // @todo this will be incorrect if any meshes/primitives are skipped
-                material := node.mesh.primitives[index].material 
+                material := materials[draw.mesh_index - cast(u32) first_mesh_offset]
                 if material != nil {
                     if material.pbr_metallic_roughness.base_color_texture.texture != nil {
                         draw.albedo_texture = cast(Texture_Index) cgltf.texture_index(data, material.pbr_metallic_roughness.base_color_texture.texture)
@@ -175,6 +180,9 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
                     }
                     if material.normal_texture.texture != nil {
                         draw.normal_texture = cast(Texture_Index) cgltf.texture_index(data, material.normal_texture.texture)
+                    }
+                    if material.emissive_texture.texture != nil {
+                        draw.emmisive_texture = cast(Texture_Index) cgltf.texture_index(data, material.emissive_texture.texture)
                     }
                 }
             }

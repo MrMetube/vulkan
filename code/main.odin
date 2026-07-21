@@ -193,8 +193,9 @@ Draw :: struct { // :Shader:
     p:           v3,
     scale:       f32,
     
-    albedo_texture: Texture_Index, // @todo make proper zero values for these: 1x1 white pixel
-    normal_texture: Texture_Index, // @todo make proper zero values for these: ??
+    albedo_texture:   Texture_Index, // @todo make proper zero values for these: 1x1 white pixel
+    normal_texture:   Texture_Index, // @todo make proper zero values for these: ??
+    emmisive_texture: Texture_Index, // @todo make proper zero values for these: 1x1 black pixel
     
     mesh_index:    u32,
     vertex_offset: u32,
@@ -1454,7 +1455,8 @@ recreate_stuff :: proc (gpu: ^Gpu, stuff: ^Render_Targets_And_Stuff) {
     
     stuff.depth_pyramid = gpu_allocate_texture(gpu, default_texture_desc(size = {pyramid_size.x,       pyramid_size.y,       1}, format = .R32_SFLOAT,               usage = { .SAMPLED, .STORAGE, .TRANSFER_SRC },   mip_count = mip_count))
     stuff.depth_buffer  = gpu_allocate_texture(gpu, default_texture_desc(size = {gpu.swapchain_size.x, gpu.swapchain_size.y, 1}, format = stuff.depth_buffer.format, usage = { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED }))
-    stuff.color_buffer  = gpu_allocate_texture(gpu, default_texture_desc(size = {gpu.swapchain_size.x, gpu.swapchain_size.y, 1}, format = gpu.swapchain_format,      usage = { .COLOR_ATTACHMENT, .TRANSFER_SRC }))
+    // @volatile we want a non-srgb format for the color buffer, but need to then match its component layout to make the "copy to swapchain" not mess up.
+    stuff.color_buffer  = gpu_allocate_texture(gpu, default_texture_desc(size = {gpu.swapchain_size.x, gpu.swapchain_size.y, 1}, format = .B8G8R8A8_UNORM,      usage = { .COLOR_ATTACHMENT, .TRANSFER_SRC }))
     
     for i in 0..<mip_count {
         mip_size := pyramid_size

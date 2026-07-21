@@ -16,8 +16,9 @@ layout(descriptor_heap) uniform sampler   Samplers[];
 layout(location = 0) out vec4 pixel_result;
 
 void main() {
-    vec4 albedo = vec4(.5, .5, .5, 1);
-    vec4 nnormal = vec4(0, 0, 1, 0); // @naming
+    vec4 albedo   = vec4(.5, .5, .5, 1);
+    vec3 nnormal  = vec3(0, 0, 1); // @naming
+    vec3 emmisive = vec3(0);
     {
         Draw draw = data.draw_buffer[draw_index].v;
         vec2 uv = mesh_result.uv;
@@ -28,8 +29,11 @@ void main() {
             albedo = texture(sampler2D(Textures[nonuniformEXT(65536 + 1 + draw.albedo_texture)], Samplers[Sampler_Texture]), uv);
         }
         if (draw.normal_texture > 0) {
-            nnormal = texture(sampler2D(Textures[nonuniformEXT(65536 + 1 + draw.normal_texture)], Samplers[Sampler_Texture]), uv);
+            nnormal = texture(sampler2D(Textures[nonuniformEXT(65536 + 1 + draw.normal_texture)], Samplers[Sampler_Texture]), uv).rgb;
             nnormal = nnormal * 2 - 1;
+        }
+        if (draw.emmisive_texture > 0) {
+            emmisive = texture(sampler2D(Textures[nonuniformEXT(65536 + 1 + draw.emmisive_texture)], Samplers[Sampler_Texture]), uv).rgb;
         }
     }
     
@@ -38,8 +42,8 @@ void main() {
     vec3 normal = normalize(nnormal.x * mesh_result.tangent.xyz + nnormal.y * binormal + nnormal.z * mesh_result.normal);
     
     // @todo lighting
-    float ndotl = max(dot(normal, normalize(vec3(-1, 1, 1))), 0);
-    vec4 color = albedo * sqrt(ndotl + 0.005);
+    float ndotl = max(dot(normal, normalize(vec3(-1, 1, -1))), 0);
+    vec4 color = vec4(albedo.rgb * sqrt(ndotl + 0.005) + emmisive, albedo.a);
     
     #if Debug
         uint index = 0;
