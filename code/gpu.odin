@@ -474,6 +474,8 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
             synchronization2 = true,
             dynamicRendering = true, // remove the need for RenderPass and FrameBuffer objects
             maintenance4     = true, // needed to use layout(local_size...)
+            
+            shaderDemoteToHelperInvocation = true, // discard in fragment shaders
         }
         
         f14 := vk.PhysicalDeviceVulkan14Features {

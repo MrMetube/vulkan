@@ -186,6 +186,10 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
                         draw.emmisive_texture = cast(Texture_Index) cgltf.texture_index(data, material.emissive_texture.texture)
                     }
                 }
+                
+                if material != nil && material.alpha_mode != .opaque {
+                    draw.post_pass = true
+                }
             }
         }
         

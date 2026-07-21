@@ -10,6 +10,7 @@
 layout(local_size_x = TaskWidth, local_size_y = 1, local_size_z = 1) in;
 
 layout(constant_id = 0) const bool Late = false;
+layout(constant_id = 1) const bool Post = false;
 
 layout(push_constant) uniform _ { Draw_Data data; };
 
@@ -58,7 +59,7 @@ void main() {
         
         bool visible = true;
         bool skip    = false;
-        if (occlusion_enabled) {
+        if (!Post && occlusion_enabled) {
             // If we disabled occlusion culling, the cull status of draw calls with Late=false is never updated, because they are skipped
             if (!Late && meshlet_was_visible_last_frame == 0)                                visible = false;
             if ( Late && meshlet_was_visible_last_frame != 0 && mesh_was_visible_last_frame) skip    = true;

@@ -63,7 +63,7 @@ Depth_Mip :: struct {
     storage_index: Texture_Index,
 }
 
-Stage :: enum { early, late }
+Stage :: enum { early, late, post }
 Pipelines :: struct {
     culling:      [Stage] Pipeline,
     depth_reduce: Pipeline,
@@ -136,7 +136,7 @@ Cull_Data :: struct #all_or_none { // :Shader:
     lod_base: f32,
     lod_step: f32,
     
-    _: f32,
+    _: u32,
     
     // bindings
     depth_pyramid_index: Texture_Index,
@@ -198,6 +198,7 @@ Draw :: struct { // :Shader:
     emmisive_texture: Texture_Index, // @todo make proper zero values for these: 1x1 black pixel
     
     mesh_index:    u32,
+    post_pass:     b32,
     vertex_offset: u32,
     meshlet_visibility_offset: u32,
 }
@@ -723,7 +724,8 @@ main :: proc () {
                 immediately := !pipeline_is_valid(cull_pipeline)
                 
                 compute := get_shader(shaders.culling, immediately)
-                constants := [] Specialization_Constant { /* late = */ { b = stage == .late } }
+                constants := [] Specialization_Constant { /* late = */ { b = stage != .early }, /* post = */ { b = stage == .post } }
+                
                 cull_pipeline = gpu_create_compute_pipeline(gpu, compute, descriptor_heap, constants)
                 
                 print("Recreated %v cull_pipeline.\n", stage)
@@ -755,7 +757,7 @@ main :: proc () {
                 // :Stencil: 
                 
                 task, mesh, frag := get_shader(shaders.meshlet_task, immediately), get_shader(shaders.meshlet_mesh, immediately), get_shader(shaders.meshlet_frag, immediately)
-                constants := [] Specialization_Constant { /* late = */ { b = stage == .late } }
+                constants := [] Specialization_Constant { /* late = */ { b = stage != .early }, /* post = */ { b = stage == .post } }
                 
                 meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(gpu, task, mesh, frag, raster_description, descriptor_heap, constants)
                 
@@ -935,6 +937,9 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         cull_and_render(gpu, cmd, .late, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug)
+        stats_pool_query_index += 1
+        
+        cull_and_render(gpu, cmd, .post, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug)
         stats_pool_query_index += 1
         
         ////////////////////////////////////////////////
@@ -1270,6 +1275,7 @@ cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelin
     switch stage {
     case .early: cpu_label = "record early pass"
     case .late:  cpu_label = "record late pass"
+    case .post:  cpu_label = "record post pass"
     }
     cpu_profile_scope(cpu_label)
     
@@ -1342,10 +1348,16 @@ cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelin
         meshlet_visibility_buffer = buffers.meshlet_visibility.gpu.p,
     }
     
-    cull_label := stage == .early ? cast(cstring) "early culling" : "late culling"
+    cull_label: cstring
+    switch stage {
+    case .early: cull_label = "early culling"
+    case .late:  cull_label = "late culling"
+    case .post:  cull_label = "post culling"
+    }
     before_fill := vk.PipelineStageFlags2 { .DRAW_INDIRECT }
-    if stage == .late {
-        before_fill += { .PRE_RASTERIZATION_SHADERS }
+    switch stage {
+    case .early:       // nothing
+    case .late, .post: before_fill += { .PRE_RASTERIZATION_SHADERS }
     }
     
     gpu_labeled_region_begin(cmd, cull_label, {0.0, 0.6, 0.8, 1.0})
@@ -1366,8 +1378,10 @@ cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelin
         gpu_fill_memory(cmd, draw_group_count.gpu, 1, size_of(draw_group_count.cpu.yz), size_of(draw_group_count.cpu.x))
         
         before_dispatch := vk.PipelineStageFlags2 { .ALL_TRANSFER  }
-        if stage == .late {
-            before_dispatch += { .COMPUTE_SHADER } // depth pyramid
+        switch stage {
+        case .early: // nothing
+        case .late:  before_dispatch += { .COMPUTE_SHADER } // depth pyramid
+        case .post:  // nothing
         }
         
         gpu_barrier(cmd, before_dispatch, { .COMPUTE_SHADER })
@@ -1386,10 +1400,9 @@ cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelin
     case .early: 
         before_draw += { .BOTTOM_OF_PIPE }
         
-    case .late:  
+    case .late, .post:  
         before_draw += { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS  }
         after_draw  += { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS }
-    
     }
     gpu_barrier(cmd, before_draw, after_draw)
     
@@ -1406,7 +1419,7 @@ cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelin
             texture     = stuff.depth_buffer,
             view        = stuff.depth_view,
             load_op     = stage == .early ? .CLEAR : .LOAD,
-            store_op    = stage == .early ? .STORE : .DONT_CARE,
+            store_op    = stage != .post  ? .STORE : .DONT_CARE,
             clear_depth = 0,
         },
     }
@@ -1418,6 +1431,9 @@ cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelin
     case .late:
         gpu_profile_zone_begin("late rendering pass")
         gpu_labeled_region_begin(cmd, "late rendering pass", {0.6, 0.1, 07, 1.0})
+    case .post:
+        gpu_profile_zone_begin("post rendering pass")
+        gpu_labeled_region_begin(cmd, "post rendering pass", {0.6, 0.1, 07, 1.0})
     }
     
     gpu_begin_rendering(gpu, cmd, desc)

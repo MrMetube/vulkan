@@ -2,6 +2,9 @@
 
 #include "common.glsl"
 
+// layout(constant_id = 0) const bool Late = false; unused
+layout(constant_id = 1) const bool Post = false;
+
 layout(push_constant) uniform _ { Draw_Data data; };
 
 layout(location = 0) flat   in uint        draw_index;
@@ -45,6 +48,8 @@ void main() {
     float ndotl = max(dot(normal, normalize(vec3(-1, 1, -1))), 0);
     vec4 color = vec4(albedo.rgb * sqrt(ndotl + 0.005) + emmisive, albedo.a);
     
+    if (Post && albedo.a < 0.5) discard;
+    
     #if Debug
         uint index = 0;
         index = debug_index;
@@ -52,6 +57,7 @@ void main() {
         uint mhash = hash(index);
         color.rgb = vec3(float(mhash & 255), float((mhash >> 8) & 255), float((mhash >> 16) & 255)) / 255.0;
     #endif // Debug
+    
     
     pixel_result = color;
     // pixel_result.xyz = (normal + 1) / 2;

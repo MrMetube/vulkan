@@ -5,6 +5,7 @@
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(constant_id = 0) const bool Late = false;
+layout(constant_id = 1) const bool Post = false;
 
 layout(push_constant) uniform _ { Cull_Data data; };
 
@@ -18,6 +19,9 @@ void main() {
     
     if (draw_index >= data.draw_count) return;
     
+    Draw_p draw = data.draw_buffer[draw_index];
+    if (Post != draw.v.post_pass) return;
+    
     bool_p was_visible_last_frame = data.draw_visibility_buffer[draw_index];
     if (!Late && !was_visible_last_frame.v) return;
     
@@ -25,7 +29,6 @@ void main() {
     bool lod_enabled             = (data.flags & Flag_LevelOfDetail)    != 0;
     bool occlusion_enabled       = (data.flags & Flag_OcclusionCulling) != 0;
     
-    Draw_p draw = data.draw_buffer[draw_index];
     Mesh_p mesh = data.mesh_buffer[draw.v.mesh_index];
     
     uint meshlet_visibility_offset = draw.v.meshlet_visibility_offset;
@@ -71,7 +74,7 @@ void main() {
     // even if we have already done so in the Early pass. This ensures that previously-invisible 
     // meshlets which are now-visible of a now-visible mesh are drawn by the task/mesh shaders.
     //
-    if (visible && (!Late || !was_visible_last_frame.v || occlusion_enabled)) {
+    if (visible && (!Late || !was_visible_last_frame.v || occlusion_enabled || Post)) {
         uint lod_index = 0;
         if (lod_enabled) {
             // lod distance i = base * pow(step, i)
