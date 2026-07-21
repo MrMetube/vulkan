@@ -819,8 +819,7 @@ main :: proc () {
         check(vk.ResetCommandPool(gpu.device, gpu.command_pools[frame_index], {}))
         cpu_end_profile_zone()
         
-        // @api expecting the user to pass the frame index is a source for mistakes
-        cmd := gpu_begin_command_recording(gpu, gpu.command_pools[frame_index], gpu.general_queue)
+        cmd := gpu_begin_command_recording(gpu, gpu.command_pools[frame_index])
         
         gpu_profile_frame_begin(gpu, cmd, frame_index)
         
@@ -1403,7 +1402,7 @@ grid_dimension_from_total_count :: proc (id: Shader_Id, x: u32 = 1, y: u32 = 1, 
 begin_uploading_textures :: proc (gpu: ^Gpu, buffer_size: u32) -> (vk.CommandBuffer, Bump_Allocator, vk.Semaphore) {
     upload_bump := bump_allocator_make_temporary(gpu, buffer_size, usage = { .TRANSFER_SRC })
     
-    cmd := gpu_begin_command_recording(gpu, gpu.transfer_command_pool, gpu.transfer_queue)
+    cmd := gpu_begin_command_recording(gpu, gpu.transfer_command_pool)
     upload_semaphore := gpu_create_timeline_semaphore(gpu, 0)
     
     return cmd, upload_bump, upload_semaphore

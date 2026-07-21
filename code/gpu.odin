@@ -786,38 +786,6 @@ gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Me
     usage := usage
     usage += { .SHADER_DEVICE_ADDRESS }
     
-    /* 
-    
-               DEVICE_LOCAL               - static data, compute only buffers
-    .GPU     = DEVICE_LOCAL, HOST_VISIBLE - AMD specific, 256 Mb - dynamic per frame data, uniform data
-    .Default = HOST_VISIBLE HOST_COHERENT - over PCIe bus - dynamic data and staging buffers for copys to DEVICE_LOCAL only memory
-    
-    */
-    
-    /* 
-    
-    dynamic multicore by default
-    
-    split a regular call over all idle thread/cores
-    join on return
-    
-    make the main thread just do the regular call and let the other cores seamlessly "join" the workforce on the function
-    
-    
-    
-    Explore vkCmdSetEvent and vkCmdWaitEvents as an alternative for full barriers 
-    should only be used when a large distance in the command buffer between set and wait is possible
-    
-    */
-    
-    // @todo rethink these categories and make a better heuristic for the user, when to use which kind, without needing the test every single one.
-    flags := vk.MemoryPropertyFlags {}
-    switch memory {
-    case .Default:  flags = { .HOST_VISIBLE, .HOST_COHERENT, .DEVICE_LOCAL }
-    case .GPU:      flags = { .DEVICE_LOCAL }
-    case .Readback: flags = { .HOST_VISIBLE, .HOST_COHERENT, .HOST_CACHED }
-    }
-    
     alloc: GpuAllocation
     create_info := vk.BufferCreateInfo {
         sType = .BUFFER_CREATE_INFO,
@@ -829,15 +797,15 @@ gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Me
     
     requirements: vk.MemoryRequirements
     vk.GetBufferMemoryRequirements(gpu.device, alloc.buffer, &requirements)
-    
     requirements.alignment = max(requirements.alignment, cast(vk.DeviceSize) alignment)
-    alloc.memory = select_memory_type_and_allocate(gpu, requirements, flags, add_device_address_flag = true)
     
-    check(vk.BindBufferMemory(gpu.device, alloc.buffer, alloc.memory, 0))
+    alloc.memory = select_memory_type_and_allocate(gpu, requirements, memory, add_device_address_flag = true)
     
-    if .HOST_VISIBLE in flags {
+    if memory != .GPU {
         vk.MapMemory(gpu.device, alloc.memory, 0, cast(vk.DeviceSize) size, {}, &cpu_result)
     }
+    
+    check(vk.BindBufferMemory(gpu.device, alloc.buffer, alloc.memory, 0))
     
     adress_create_info := vk.BufferDeviceAddressInfo {
         sType = .BUFFER_DEVICE_ADDRESS_INFO,
@@ -919,27 +887,62 @@ gpu_allocate_texture :: proc (gpu: ^Gpu, desc: Texture_Desc) -> Image {
     
     result: Image
     result.format = desc.format
-    result.size = desc.size
+    result.size   = desc.size
     check(vk.CreateImage(gpu.device, &create_info, nil, &result.image))
     
     requirements: vk.MemoryRequirements
     vk.GetImageMemoryRequirements(gpu.device, result.image, &requirements)
     
-    result.memory = select_memory_type_and_allocate(gpu, requirements, { .DEVICE_LOCAL })
+    result.memory = select_memory_type_and_allocate(gpu, requirements, .GPU)
     
     check(vk.BindImageMemory(gpu.device, result.image, result.memory, 0))
     
     return result
 }
 
-select_memory_type_and_allocate :: proc (gpu: ^Gpu, requirements: vk.MemoryRequirements, flags: vk.MemoryPropertyFlags, add_device_address_flag := false) -> vk.DeviceMemory {
+select_memory_type_and_allocate :: proc (gpu: ^Gpu, requirements: vk.MemoryRequirements, memory: Memory_Kind, add_device_address_flag := false) -> vk.DeviceMemory {
+    
+    /* 
+    
+               DEVICE_LOCAL               - static data, compute only buffers
+    .GPU     = DEVICE_LOCAL, HOST_VISIBLE - AMD specific, 256 Mb - dynamic per frame data, uniform data
+    .Default = HOST_VISIBLE HOST_COHERENT - over PCIe bus - dynamic data and staging buffers for copys to DEVICE_LOCAL only memory
+    
+    */
+    
+    /* 
+    
+    dynamic multicore by default
+    
+    split a regular call over all idle thread/cores
+    join on return
+    
+    make the main thread just do the regular call and let the other cores seamlessly "join" the workforce on the function
+    
+    
+    
+    Explore vkCmdSetEvent and vkCmdWaitEvents as an alternative for full barriers 
+    should only be used when a large distance in the command buffer between set and wait is possible
+    
+    */
+    
+    // @todo rethink these categories and make a better heuristic for the user, when to use which kind, without needing the test every single one.
+    flags := vk.MemoryPropertyFlags {}
+    switch memory {
+    case .Default:  flags = { .HOST_VISIBLE, .HOST_COHERENT, .DEVICE_LOCAL }
+    case .GPU:      flags = { .DEVICE_LOCAL }
+    case .Readback: flags = { .HOST_VISIBLE, .HOST_COHERENT, .HOST_CACHED }
+    }
+    
     properties := gpu.memory_properties
     
     selected_memory_type_index: u32
     select: {
-        set := transmute(bit_set[0..=31; u32]) requirements.memoryTypeBits
+        Memory_Bits :: bit_set[0..<32; u32]
+        set   := transmute(Memory_Bits) requirements.memoryTypeBits
+        types := properties.memoryTypes[:properties.memoryTypeCount]
         
-        for type, i in properties.memoryTypes[:properties.memoryTypeCount] {
+        for type, i in types {
             if i in set && flags <= type.propertyFlags {
                 selected_memory_type_index = cast(u32) i
                 break select
@@ -1310,8 +1313,11 @@ destroy_pipeline :: proc (gpu: ^Gpu, pipeline: Pipeline) {
 
 // GpuQueue gpuCreateQueue(/* DEVICE & QUEUE CREATION DETAILS OMITTED */);
 
-// @todo queue is ignored, we need to allocate from a pool created with the correct queue_family_index
-gpu_begin_command_recording :: proc (gpu: ^Gpu, command_pool: vk.CommandPool, _: vk.Queue) -> vk.CommandBuffer {
+// @api begin recording takes the command pool of some queue, whilst the submit(which also ends the command buffer)
+// instead takes the queue. This requires that the pool is created on the queue used in the submit. This asymmetry
+// is not easily avoided as there is a One-to-Many relationship (queue to pool). We already have multiple graphics
+// queue pools(one per frame in flight) whilst only having a single pool on the transfer queue.
+gpu_begin_command_recording :: proc (gpu: ^Gpu, command_pool: vk.CommandPool) -> vk.CommandBuffer {
     info := vk.CommandBufferAllocateInfo {
         sType = .COMMAND_BUFFER_ALLOCATE_INFO,
         commandPool        = command_pool,
@@ -1369,12 +1375,12 @@ gpu_submit :: proc (queue: vk.Queue, semaphores: [] Semaphore_Submit, cmds: ..vk
     
     info := vk.SubmitInfo2 {
         sType = .SUBMIT_INFO_2,
-        waitSemaphoreInfoCount = cast(u32) len(waits),
-        pWaitSemaphoreInfos    = raw_data(&waits),
+        waitSemaphoreInfoCount   = cast(u32) len(waits),
+        pWaitSemaphoreInfos      = raw_data(&waits),
         signalSemaphoreInfoCount = cast(u32) len(signals),
         pSignalSemaphoreInfos    = raw_data(&signals),
-        commandBufferInfoCount = cast(u32) len(cmds),
-        pCommandBufferInfos    = &cmd_infos[0],
+        commandBufferInfoCount   = cast(u32) len(cmds),
+        pCommandBufferInfos      = raw_data(&cmd_infos),
     }
     
     check(vk.QueueSubmit2(queue, 1, &info, 0))

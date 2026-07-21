@@ -190,7 +190,7 @@ load_dds_texture :: proc (file_data: [] u8) -> (Texture_Desc, [] u8) {
     
     format4cc := string_from_parts(&header.ddspf.dwFourCC, 4)
     
-    // @todo properly handle different texture kinds and formats
+    // @correctness properly handle different texture kinds and formats
     
     header10: ^DDS_HEADER_DXT10
     if format4cc == "DX10" {

@@ -257,19 +257,54 @@ parse_shader :: proc (shader: ^Shader) {
     
     Id :: struct {
         opcode:   SpvOp,
-        type_id:  u32,
-        
-        set:     u32,
-        binding: u32,
-        
         constant: u32,
-        storage_class: SpvStorageClass,
-        sampled: u32,
     }
     
-    ids := make([] Id, id_bound, context.temp_allocator)
+    ////////////////////////////////////////////////
+    // copy-pasted from https://github.com/KhronosGroup/SPIRV-Headers/blob/main/include/spirv/unified1/spirv.h
     
-    for &id in ids { id.binding = 0xff }
+    SpvMagicNumber :: 0x07230203
+    
+    SpvExecutionMode :: enum  u32 {
+        LocalSize = 17,
+        LocalSizeId = 38,
+        // all other values were omitted
+    }
+    
+    SpvExecutionModel :: enum u32 { 
+        Vertex = 0,
+        Fragment = 4,
+        GLCompute = 5,
+        TaskNV = 5267,
+        MeshNV = 5268,
+        RayGenerationKHR = 5313,
+        RayGenerationNV = 5313,
+        IntersectionKHR = 5314,
+        IntersectionNV = 5314,
+        AnyHitKHR = 5315,
+        AnyHitNV = 5315,
+        ClosestHitKHR = 5316,
+        ClosestHitNV = 5316,
+        MissKHR = 5317,
+        MissNV = 5317,
+        CallableKHR = 5318,
+        CallableNV = 5318,
+        TaskEXT = 5364,
+        MeshEXT = 5365,
+        // all other values were omitted
+    }
+    
+    SpvOp:: enum u32 {
+        EntryPoint = 15,
+        ExecutionMode = 16,
+        Constant = 43,
+        ExecutionModeId = 331,
+        // all other values were omitted
+    }
+    
+    ////////////////////////////////////////////////
+    
+    ids := make([] Id, id_bound, context.temp_allocator)
     
     code := shader_code[5:]
     
@@ -280,51 +315,50 @@ parse_shader :: proc (shader: ^Shader) {
         word_count := cast(u16) ((code[0] >> 16) & 0xFFFF)
         
         #partial switch opcode {
-        case .EntryPoint:
-            execution_model := cast(SpvExecutionModel) code[1]
-            
-            #partial switch execution_model {
-            case .Vertex:     shader.stage = .VERTEX
-            case .Fragment:   shader.stage = .FRAGMENT
-            case .MeshEXT:    shader.stage = .MESH_EXT
-            case .TaskEXT:    shader.stage = .TASK_EXT
-            case .GLCompute:  shader.stage = .COMPUTE
-            }
-            
-        case .ExecutionMode:
-            mode := cast(SpvExecutionMode) code[2]
-            if mode == .LocalSize {
-                shader.local_size = { code[3], code[4], code[5] }
-            }
-            
-        case .ExecutionModeId:
-            mode := cast(SpvExecutionMode) code[2]
-            if mode == .LocalSizeId {
-                local_size = { cast(i32) code[3], cast(i32) code[4], cast(i32) code[5] }
-            }
-            
-        case .Constant:
-            id := code[2]
-            assert(ids[id].opcode == {})
-            
-            ids[id].opcode   = opcode
-            ids[id].type_id  = code[1]
-            ids[id].constant = code[3]
-        }
-            
-        code = code[word_count:]
-    }
-    
-    if shader.stage == .COMPUTE {
-        for it in 0..<3 {
-            if local_size[it] >= 0 {
-                assert(ids[local_size[it]].opcode == .Constant)
-                shader.local_size[it] = ids[local_size[it]].constant
-            }
-        }
-        
-        assert(shader.local_size != 0)
-    }
+            case .EntryPoint:
+                execution_model := cast(SpvExecutionModel) code[1]
+                
+                #partial switch execution_model {
+                    case .Vertex:     shader.stage = .VERTEX
+                    case .Fragment:   shader.stage = .FRAGMENT
+                    case .MeshEXT:    shader.stage = .MESH_EXT
+                    case .TaskEXT:    shader.stage = .TASK_EXT
+                    case .GLCompute:  shader.stage = .COMPUTE
+                }
+                
+                case .ExecutionMode:
+                    mode := cast(SpvExecutionMode) code[2]
+                    if mode == .LocalSize {
+                        shader.local_size = { code[3], code[4], code[5] }
+                    }
+                    
+                    case .ExecutionModeId:
+                        mode := cast(SpvExecutionMode) code[2]
+                        if mode == .LocalSizeId {
+                            local_size = { cast(i32) code[3], cast(i32) code[4], cast(i32) code[5] }
+                        }
+                        
+                        case .Constant:
+                            id := code[2]
+                            assert(ids[id].opcode == {})
+                            
+                            ids[id].opcode   = opcode
+                            ids[id].constant = code[3]
+                        }
+                        
+                        code = code[word_count:]
+                    }
+                    
+                    if shader.stage == .COMPUTE {
+                        for it in 0..<3 {
+                            if local_size[it] >= 0 {
+                                assert(ids[local_size[it]].opcode == .Constant)
+                                shader.local_size[it] = ids[local_size[it]].constant
+                            }
+                        }
+                        
+                        assert(shader.local_size != 0)
+                    }
 }
 
 compile_shader_begin :: proc (cmd: ^Cmd, shader_output: string) {
@@ -361,6 +395,11 @@ run_command :: proc (cmd: ^Cmd, or_exit := true, keep := false, stdout: Command_
     err2:    os.Error
     
     if async == nil {
+        _, out_is_file := stdout.(^os.File)
+        assert(!out_is_file, "synchronous execution already captures the output, so it can't we written to a file by the process itself")
+        _, err_is_file := stdout.(^os.File)
+        assert(!err_is_file, "synchronous execution already captures the output, so it can't we written to a file by the process itself")
+        
         state, output, error, err2 = os.process_exec(process_description, context.allocator)
     } else {
         if err, ok := stderr.(^os.File); ok do process_description.stderr = err
@@ -377,21 +416,17 @@ run_command :: proc (cmd: ^Cmd, or_exit := true, keep := false, stdout: Command_
     if async == nil {
         if output != nil {
             switch out in stdout {
-            case nil: 
-                fmt.println(cast(string) output)
-            case ^string: 
-                out^ = cast(string) output
-            case ^os.File: // nothing, already passed on exec
+            case nil:      fmt.println(cast(string) output)
+            case ^string:  out^ = cast(string) output
+            case ^os.File: unreachable()
             }
         }
         
         if error != nil {
             switch out in stderr {
-            case nil: 
-                fmt.eprintln(cast(string) error)
-            case ^string: 
-                out^ = cast(string) error
-            case ^os.File: // nothing, already passed on exec
+            case nil:      fmt.eprintln(cast(string) error)
+            case ^string:  out^ = cast(string) error
+            case ^os.File: unreachable()
             }
         }
         
@@ -405,527 +440,4 @@ run_command :: proc (cmd: ^Cmd, or_exit := true, keep := false, stdout: Command_
     if !keep do clear(cmd)
     
     return success
-}
-
-procs_flush :: proc (procs: ^Procs) {
-    for &p in procs {
-        _, _ = os.process_wait(p)
-    }
-    
-    clear(procs)
-}
-
-procs_close :: proc (procs: ^Procs) {
-    for &p in procs {
-        _ = os.process_terminate(p)
-    }
-    
-    clear(procs)
-}
-
-////////////////////////////////////////////////
-// copy-pasted from https://github.com/KhronosGroup/SPIRV-Headers/blob/main/include/spirv/unified1/spirv.h
-
-@(private="file")
-SpvMagicNumber :: 0x07230203
-
-@(private="file")
-SpvDecoration :: enum u32 {
-    RelaxedPrecision = 0,
-    SpecId = 1,
-    Block = 2,
-    BufferBlock = 3,
-    RowMajor = 4,
-    ColMajor = 5,
-    ArrayStride = 6,
-    MatrixStride = 7,
-    GLSLShared = 8,
-    GLSLPacked = 9,
-    CPacked = 10,
-    BuiltIn = 11,
-    NoPerspective = 13,
-    Flat = 14,
-    Patch = 15,
-    Centroid = 16,
-    Sample = 17,
-    Invariant = 18,
-    Restrict = 19,
-    Aliased = 20,
-    Volatile = 21,
-    Constant = 22,
-    Coherent = 23,
-    NonWritable = 24,
-    NonReadable = 25,
-    Uniform = 26,
-    UniformId = 27,
-    SaturatedConversion = 28,
-    Stream = 29,
-    Location = 30,
-    Component = 31,
-    Index = 32,
-    Binding = 33,
-    DescriptorSet = 34,
-    Offset = 35,
-    XfbBuffer = 36,
-    XfbStride = 37,
-    FuncParamAttr = 38,
-    FPRoundingMode = 39,
-    FPFastMathMode = 40,
-    LinkageAttributes = 41,
-    NoContraction = 42,
-    InputAttachmentIndex = 43,
-    Alignment = 44,
-    MaxByteOffset = 45,
-    AlignmentId = 46,
-    MaxByteOffsetId = 47,
-    // further extension and vendor specific values were deleted
-}
-
-
-@(private="file")
-SpvExecutionMode :: enum  u32 {
-    Invocations = 0,
-    SpacingEqual = 1,
-    SpacingFractionalEven = 2,
-    SpacingFractionalOdd = 3,
-    VertexOrderCw = 4,
-    VertexOrderCcw = 5,
-    PixelCenterInteger = 6,
-    OriginUpperLeft = 7,
-    OriginLowerLeft = 8,
-    EarlyFragmentTests = 9,
-    PointMode = 10,
-    Xfb = 11,
-    DepthReplacing = 12,
-    DepthGreater = 14,
-    DepthLess = 15,
-    DepthUnchanged = 16,
-    LocalSize = 17,
-    LocalSizeHint = 18,
-    InputPoints = 19,
-    InputLines = 20,
-    InputLinesAdjacency = 21,
-    Triangles = 22,
-    InputTrianglesAdjacency = 23,
-    Quads = 24,
-    Isolines = 25,
-    OutputVertices = 26,
-    OutputPoints = 27,
-    OutputLineStrip = 28,
-    OutputTriangleStrip = 29,
-    VecTypeHint = 30,
-    ContractionOff = 31,
-    Initializer = 33,
-    Finalizer = 34,
-    SubgroupSize = 35,
-    SubgroupsPerWorkgroup = 36,
-    SubgroupsPerWorkgroupId = 37,
-    LocalSizeId = 38,
-    LocalSizeHintId = 39,
-    NonCoherentColorAttachmentReadEXT = 4169,
-    NonCoherentDepthAttachmentReadEXT = 4170,
-    NonCoherentStencilAttachmentReadEXT = 4171,
-    SubgroupUniformControlFlowKHR = 4421,
-    PostDepthCoverage = 4446,
-    DenormPreserve = 4459,
-    DenormFlushToZero = 4460,
-    SignedZeroInfNanPreserve = 4461,
-    RoundingModeRTE = 4462,
-    RoundingModeRTZ = 4463,
-    // further extension and vendor specific values were deleted
-}
-
-@(private="file")
-SpvExecutionModel :: enum u32 { 
-    Vertex = 0,
-    TessellationControl = 1,
-    TessellationEvaluation = 2,
-    Geometry = 3,
-    Fragment = 4,
-    GLCompute = 5,
-    Kernel = 6,
-    TaskNV = 5267,
-    MeshNV = 5268,
-    RayGenerationKHR = 5313,
-    RayGenerationNV = 5313,
-    IntersectionKHR = 5314,
-    IntersectionNV = 5314,
-    AnyHitKHR = 5315,
-    AnyHitNV = 5315,
-    ClosestHitKHR = 5316,
-    ClosestHitNV = 5316,
-    MissKHR = 5317,
-    MissNV = 5317,
-    CallableKHR = 5318,
-    CallableNV = 5318,
-    TaskEXT = 5364,
-    MeshEXT = 5365,
-    Max = 0x7fffffff,
-}
-
-@(private="file")
-SpvStorageClass :: enum u32 {
-    UniformConstant = 0,
-    Input = 1,
-    Uniform = 2,
-    Output = 3,
-    Workgroup = 4,
-    CrossWorkgroup = 5,
-    Private = 6,
-    Function = 7,
-    Generic = 8,
-    PushConstant = 9,
-    AtomicCounter = 10,
-    Image = 11,
-    StorageBuffer = 12,
-    // further extension and vendor specific values were deleted
-}
-
-@(private="file")
-SpvOp:: enum u32 {
-    Nop = 0,
-    Undef = 1,
-    SourceContinued = 2,
-    Source = 3,
-    SourceExtension = 4,
-    Name = 5,
-    MemberName = 6,
-    String = 7,
-    Line = 8,
-    Extension = 10,
-    ExtInstImport = 11,
-    ExtInst = 12,
-    MemoryModel = 14,
-    EntryPoint = 15,
-    ExecutionMode = 16,
-    Capability = 17,
-    TypeVoid = 19,
-    TypeBool = 20,
-    TypeInt = 21,
-    TypeFloat = 22,
-    TypeVector = 23,
-    TypeMatrix = 24,
-    TypeImage = 25,
-    TypeSampler = 26,
-    TypeSampledImage = 27,
-    TypeArray = 28,
-    TypeRuntimeArray = 29,
-    TypeStruct = 30,
-    TypeOpaque = 31,
-    TypePointer = 32,
-    TypeFunction = 33,
-    TypeEvent = 34,
-    TypeDeviceEvent = 35,
-    TypeReserveId = 36,
-    TypeQueue = 37,
-    TypePipe = 38,
-    TypeForwardPointer = 39,
-    ConstantTrue = 41,
-    ConstantFalse = 42,
-    Constant = 43,
-    ConstantComposite = 44,
-    ConstantSampler = 45,
-    ConstantNull = 46,
-    SpecConstantTrue = 48,
-    SpecConstantFalse = 49,
-    SpecConstant = 50,
-    SpecConstantComposite = 51,
-    SpecConstantOp = 52,
-    Function = 54,
-    FunctionParameter = 55,
-    FunctionEnd = 56,
-    FunctionCall = 57,
-    Variable = 59,
-    ImageTexelPointer = 60,
-    Load = 61,
-    Store = 62,
-    CopyMemory = 63,
-    CopyMemorySized = 64,
-    AccessChain = 65,
-    InBoundsAccessChain = 66,
-    PtrAccessChain = 67,
-    ArrayLength = 68,
-    GenericPtrMemSemantics = 69,
-    InBoundsPtrAccessChain = 70,
-    Decorate = 71,
-    MemberDecorate = 72,
-    DecorationGroup = 73,
-    GroupDecorate = 74,
-    GroupMemberDecorate = 75,
-    VectorExtractDynamic = 77,
-    VectorInsertDynamic = 78,
-    VectorShuffle = 79,
-    CompositeConstruct = 80,
-    CompositeExtract = 81,
-    CompositeInsert = 82,
-    CopyObject = 83,
-    Transpose = 84,
-    SampledImage = 86,
-    ImageSampleImplicitLod = 87,
-    ImageSampleExplicitLod = 88,
-    ImageSampleDrefImplicitLod = 89,
-    ImageSampleDrefExplicitLod = 90,
-    ImageSampleProjImplicitLod = 91,
-    ImageSampleProjExplicitLod = 92,
-    ImageSampleProjDrefImplicitLod = 93,
-    ImageSampleProjDrefExplicitLod = 94,
-    ImageFetch = 95,
-    ImageGather = 96,
-    ImageDrefGather = 97,
-    ImageRead = 98,
-    ImageWrite = 99,
-    Image = 100,
-    ImageQueryFormat = 101,
-    ImageQueryOrder = 102,
-    ImageQuerySizeLod = 103,
-    ImageQuerySize = 104,
-    ImageQueryLod = 105,
-    ImageQueryLevels = 106,
-    ImageQuerySamples = 107,
-    ConvertFToU = 109,
-    ConvertFToS = 110,
-    ConvertSToF = 111,
-    ConvertUToF = 112,
-    UConvert = 113,
-    SConvert = 114,
-    FConvert = 115,
-    QuantizeToF16 = 116,
-    ConvertPtrToU = 117,
-    SatConvertSToU = 118,
-    SatConvertUToS = 119,
-    ConvertUToPtr = 120,
-    PtrCastToGeneric = 121,
-    GenericCastToPtr = 122,
-    GenericCastToPtrExplicit = 123,
-    Bitcast = 124,
-    SNegate = 126,
-    FNegate = 127,
-    IAdd = 128,
-    FAdd = 129,
-    ISub = 130,
-    FSub = 131,
-    IMul = 132,
-    FMul = 133,
-    UDiv = 134,
-    SDiv = 135,
-    FDiv = 136,
-    UMod = 137,
-    SRem = 138,
-    SMod = 139,
-    FRem = 140,
-    FMod = 141,
-    VectorTimesScalar = 142,
-    MatrixTimesScalar = 143,
-    VectorTimesMatrix = 144,
-    MatrixTimesVector = 145,
-    MatrixTimesMatrix = 146,
-    OuterProduct = 147,
-    Dot = 148,
-    IAddCarry = 149,
-    ISubBorrow = 150,
-    UMulExtended = 151,
-    SMulExtended = 152,
-    Any = 154,
-    All = 155,
-    IsNan = 156,
-    IsInf = 157,
-    IsFinite = 158,
-    IsNormal = 159,
-    SignBitSet = 160,
-    LessOrGreater = 161,
-    Ordered = 162,
-    Unordered = 163,
-    LogicalEqual = 164,
-    LogicalNotEqual = 165,
-    LogicalOr = 166,
-    LogicalAnd = 167,
-    LogicalNot = 168,
-    Select = 169,
-    IEqual = 170,
-    INotEqual = 171,
-    UGreaterThan = 172,
-    SGreaterThan = 173,
-    UGreaterThanEqual = 174,
-    SGreaterThanEqual = 175,
-    ULessThan = 176,
-    SLessThan = 177,
-    ULessThanEqual = 178,
-    SLessThanEqual = 179,
-    FOrdEqual = 180,
-    FUnordEqual = 181,
-    FOrdNotEqual = 182,
-    FUnordNotEqual = 183,
-    FOrdLessThan = 184,
-    FUnordLessThan = 185,
-    FOrdGreaterThan = 186,
-    FUnordGreaterThan = 187,
-    FOrdLessThanEqual = 188,
-    FUnordLessThanEqual = 189,
-    FOrdGreaterThanEqual = 190,
-    FUnordGreaterThanEqual = 191,
-    ShiftRightLogical = 194,
-    ShiftRightArithmetic = 195,
-    ShiftLeftLogical = 196,
-    BitwiseOr = 197,
-    BitwiseXor = 198,
-    BitwiseAnd = 199,
-    Not = 200,
-    BitFieldInsert = 201,
-    BitFieldSExtract = 202,
-    BitFieldUExtract = 203,
-    BitReverse = 204,
-    BitCount = 205,
-    DPdx = 207,
-    DPdy = 208,
-    Fwidth = 209,
-    DPdxFine = 210,
-    DPdyFine = 211,
-    FwidthFine = 212,
-    DPdxCoarse = 213,
-    DPdyCoarse = 214,
-    FwidthCoarse = 215,
-    EmitVertex = 218,
-    EndPrimitive = 219,
-    EmitStreamVertex = 220,
-    EndStreamPrimitive = 221,
-    ControlBarrier = 224,
-    MemoryBarrier = 225,
-    AtomicLoad = 227,
-    AtomicStore = 228,
-    AtomicExchange = 229,
-    AtomicCompareExchange = 230,
-    AtomicCompareExchangeWeak = 231,
-    AtomicIIncrement = 232,
-    AtomicIDecrement = 233,
-    AtomicIAdd = 234,
-    AtomicISub = 235,
-    AtomicSMin = 236,
-    AtomicUMin = 237,
-    AtomicSMax = 238,
-    AtomicUMax = 239,
-    AtomicAnd = 240,
-    AtomicOr = 241,
-    AtomicXor = 242,
-    Phi = 245,
-    LoopMerge = 246,
-    SelectionMerge = 247,
-    Label = 248,
-    Branch = 249,
-    BranchConditional = 250,
-    Switch = 251,
-    Kill = 252,
-    Return = 253,
-    ReturnValue = 254,
-    Unreachable = 255,
-    LifetimeStart = 256,
-    LifetimeStop = 257,
-    GroupAsyncCopy = 259,
-    GroupWaitEvents = 260,
-    GroupAll = 261,
-    GroupAny = 262,
-    GroupBroadcast = 263,
-    GroupIAdd = 264,
-    GroupFAdd = 265,
-    GroupFMin = 266,
-    GroupUMin = 267,
-    GroupSMin = 268,
-    GroupFMax = 269,
-    GroupUMax = 270,
-    GroupSMax = 271,
-    ReadPipe = 274,
-    WritePipe = 275,
-    ReservedReadPipe = 276,
-    ReservedWritePipe = 277,
-    ReserveReadPipePackets = 278,
-    ReserveWritePipePackets = 279,
-    CommitReadPipe = 280,
-    CommitWritePipe = 281,
-    IsValidReserveId = 282,
-    GetNumPipePackets = 283,
-    GetMaxPipePackets = 284,
-    GroupReserveReadPipePackets = 285,
-    GroupReserveWritePipePackets = 286,
-    GroupCommitReadPipe = 287,
-    GroupCommitWritePipe = 288,
-    EnqueueMarker = 291,
-    EnqueueKernel = 292,
-    GetKernelNDrangeSubGroupCount = 293,
-    GetKernelNDrangeMaxSubGroupSize = 294,
-    GetKernelWorkGroupSize = 295,
-    GetKernelPreferredWorkGroupSizeMultiple = 296,
-    RetainEvent = 297,
-    ReleaseEvent = 298,
-    CreateUserEvent = 299,
-    IsValidEvent = 300,
-    SetUserEventStatus = 301,
-    CaptureEventProfilingInfo = 302,
-    GetDefaultQueue = 303,
-    BuildNDRange = 304,
-    ImageSparseSampleImplicitLod = 305,
-    ImageSparseSampleExplicitLod = 306,
-    ImageSparseSampleDrefImplicitLod = 307,
-    ImageSparseSampleDrefExplicitLod = 308,
-    ImageSparseSampleProjImplicitLod = 309,
-    ImageSparseSampleProjExplicitLod = 310,
-    ImageSparseSampleProjDrefImplicitLod = 311,
-    ImageSparseSampleProjDrefExplicitLod = 312,
-    ImageSparseFetch = 313,
-    ImageSparseGather = 314,
-    ImageSparseDrefGather = 315,
-    ImageSparseTexelsResident = 316,
-    NoLine = 317,
-    AtomicFlagTestAndSet = 318,
-    AtomicFlagClear = 319,
-    ImageSparseRead = 320,
-    SizeOf = 321,
-    TypePipeStorage = 322,
-    ConstantPipeStorage = 323,
-    CreatePipeFromPipeStorage = 324,
-    GetKernelLocalSizeForSubgroupCount = 325,
-    GetKernelMaxNumSubgroups = 326,
-    TypeNamedBarrier = 327,
-    NamedBarrierInitialize = 328,
-    MemoryNamedBarrier = 329,
-    ModuleProcessed = 330,
-    ExecutionModeId = 331,
-    DecorateId = 332,
-    GroupNonUniformElect = 333,
-    GroupNonUniformAll = 334,
-    GroupNonUniformAny = 335,
-    GroupNonUniformAllEqual = 336,
-    GroupNonUniformBroadcast = 337,
-    GroupNonUniformBroadcastFirst = 338,
-    GroupNonUniformBallot = 339,
-    GroupNonUniformInverseBallot = 340,
-    GroupNonUniformBallotBitExtract = 341,
-    GroupNonUniformBallotBitCount = 342,
-    GroupNonUniformBallotFindLSB = 343,
-    GroupNonUniformBallotFindMSB = 344,
-    GroupNonUniformShuffle = 345,
-    GroupNonUniformShuffleXor = 346,
-    GroupNonUniformShuffleUp = 347,
-    GroupNonUniformShuffleDown = 348,
-    GroupNonUniformIAdd = 349,
-    GroupNonUniformFAdd = 350,
-    GroupNonUniformIMul = 351,
-    GroupNonUniformFMul = 352,
-    GroupNonUniformSMin = 353,
-    GroupNonUniformUMin = 354,
-    GroupNonUniformFMin = 355,
-    GroupNonUniformSMax = 356,
-    GroupNonUniformUMax = 357,
-    GroupNonUniformFMax = 358,
-    GroupNonUniformBitwiseAnd = 359,
-    GroupNonUniformBitwiseOr = 360,
-    GroupNonUniformBitwiseXor = 361,
-    GroupNonUniformLogicalAnd = 362,
-    GroupNonUniformLogicalOr = 363,
-    GroupNonUniformLogicalXor = 364,
-    GroupNonUniformQuadBroadcast = 365,
-    GroupNonUniformQuadSwap = 366,
-    CopyLogical = 400,
-    PtrEqual = 401,
-    PtrNotEqual = 402,
-    PtrDiff = 403,
-    // further extension and vendor specific values were deleted
 }
