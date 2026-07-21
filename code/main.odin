@@ -268,7 +268,7 @@ main :: proc () {
 	context.allocator = mem.tracking_allocator(&track)
     defer {
         for _, leak in track.allocation_map {
-            fmt.printf("%v leaked %m\n", leak.location, leak.size)
+            print("%v leaked %m\n", leak.location, leak.size)
         }
         assert(true)
     }
@@ -371,36 +371,6 @@ main :: proc () {
             make_by_pointer(&textures, len(texture_paths), context.allocator)
             
             cpu_begin_profile_zone("upload textures")
-            // Baseline - upload texture
-            //   1.517021s
-            //   1.593160s
-            // read all
-            //   920.647ms
-            //   922.142ms
-            // read all, parse all headers
-            //   963.964ms
-            //   984.104ms
-            //   - reverted
-            // merge barriers
-            //   1.039649s
-            //   1.018848s
-            // immediate copy to gpu
-            //   951.169ms
-            //   986.336ms
-            // os.read into bump's staging memory
-            //   1.027830s
-            //   1.169794s
-            //   1.111175s
-            // revert to simple upload_texture with gpu pointer
-            //   820.074ms
-            //   940.439ms
-            //   974.983ms
-            //   889.570ms
-            // merge header and pixel reads
-            //   847.783ms 
-            //   817.313ms
-            //   883.823ms
-            //   875.266ms
             
             upload := begin_uploading_textures(gpu, 2 * Gigabyte)
             
@@ -446,10 +416,12 @@ main :: proc () {
             print("  Loaded textures\n\n")
         }
         
+        cpu_begin_profile_zone("upload geometry")
         copy(buffers.vertices.cpu,     geometry.vertices[:])
         copy(buffers.meshlets.cpu,     geometry.meshlets[:])
         copy(buffers.meshlet_data.cpu, geometry.meshlet_data[:])
         copy(buffers.meshes.cpu,       geometry.meshes[:])
+        cpu_end_profile_zone()
         
         meshlet_visibility_count: u32
         for &draw in scene_draws {
@@ -742,7 +714,7 @@ main :: proc () {
                 constants := [] Specialization_Constant { /* late = */ { b = stage == .late } }
                 cull_pipeline = gpu_create_compute_pipeline(gpu, compute, descriptor_heap, constants)
                 
-                fmt.printfln("Recreated %v cull_pipeline.", stage)
+                print("Recreated %v cull_pipeline.\n", stage)
             }
         }
         
@@ -753,7 +725,7 @@ main :: proc () {
             compute := get_shader(shaders.depth_reduce, immediately)
             pipelines.depth_reduce = gpu_create_compute_pipeline(gpu, compute, descriptor_heap)
             
-            fmt.printfln("Recreated depth_pipeline.")
+            print("Recreated depth_pipeline.\n")
         }
         
         reloaded_meshlet_shaders := test_and_reset_shaders_was_modified(shaders.meshlet_task, shaders.meshlet_mesh, shaders.meshlet_frag)
@@ -775,7 +747,7 @@ main :: proc () {
                 
                 meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(gpu, task, mesh, frag, raster_description, descriptor_heap, constants)
                 
-                fmt.printfln("Recreated %v meshlet_pipeline.", stage)
+                print("Recreated %v meshlet_pipeline.\n", stage)
             }
         }    
         
@@ -796,7 +768,7 @@ main :: proc () {
             vert, frag := get_shader(shaders.ui_vert, immediately), get_shader(shaders.ui_frag, immediately)
             pipelines.ui = gpu_create_graphics_pipeline(gpu, vert, frag, raster_description, descriptor_heap)
             
-            fmt.printfln("Recreated ui_pipeline.")
+            print("Recreated ui_pipeline.\n")
         }
         
         ////////////////////////////////////////////////
@@ -1097,7 +1069,7 @@ main :: proc () {
             root := zones[0]
             total_time := profiler.clocks_to_seconds(root.duration_with_children)
             
-            fmt.printfln("---------------------\nCPU profile:")
+            print("---------------------\nCPU profile:\n")
             if false { // tree view
                 link: u32
                 for {
@@ -1107,14 +1079,14 @@ main :: proc () {
                     seconds               := profiler.clocks_to_seconds(zone.duration)
                     seconds_with_children := profiler.clocks_to_seconds(zone.duration_with_children)
                     
-                    fmt.printf("  %v", view_percentage(seconds_with_children/total_time))
-                    for _ in 0..<depth { fmt.printf("    ") }
-                    fmt.printf(" %v", xx(seconds))
+                    print("  %v", view_percentage(seconds_with_children/total_time))
+                    for _ in 0..<depth { print("    ") }
+                    print(" %v", xx(seconds))
                     if zone.duration_with_children != zone.duration {
-                        fmt.printf(" (with children %v)", xx(seconds_with_children))
+                        print(" (with children %v)", xx(seconds_with_children))
                     }
-                    fmt.printf(" - %v", zone.name)
-                    fmt.printfln("")
+                    print(" - %v", zone.name)
+                    print("\n")
                     
                     link = zone.depth_next_event
                     if link == 0 { break }
@@ -1154,16 +1126,16 @@ main :: proc () {
                     
                     percent := seconds/total_time
                     if percent < Omit_Below {
-                        fmt.printfln(" <%v ...", view_percentage(0.01))
+                        print(" <%v ...\n", view_percentage(0.01))
                         break
                     }
-                    fmt.printf("  %v", view_percentage(percent))
-                    fmt.printf(" %v", xx(seconds))
+                    print("  %v", view_percentage(percent))
+                    print(" %v", xx(seconds))
                     if zone.duration_with_children != zone.duration {
-                        fmt.printf(" (with children %v)", xx(seconds_with_children))
+                        print(" (with children %v)", xx(seconds_with_children))
                     }
-                    fmt.printf(" - %v", zone.name)
-                    fmt.printfln("")
+                    print(" - %v", zone.name)
+                    print("\n")
                     
                 }
             }
@@ -1477,7 +1449,6 @@ begin_uploading_textures :: proc (gpu: ^Gpu, buffer_size: u32) -> Texture_Upload
     return result
 }
 
-// @todo if the bump allocator cap would be exceeded, wait for uploads to complete and clear the bump.offset
 upload_texture :: proc (gpu: ^Gpu, upload: ^Texture_Upload, description: Texture_Desc, data: vk.DeviceAddress, data_size: int) -> Image {
     texture := gpu_allocate_texture(gpu, description)
     
@@ -1552,6 +1523,6 @@ destroy_stuff :: proc (gpu: ^Gpu, stuff: ^Render_Targets_And_Stuff) {
 ////////////////////////////////////////////////
 
 print_sdl_error_and_exit :: proc (loc := #caller_location) -> ! {
-    fmt.printf("%v:%v:%v: SDL call returned %v", loc.file_path, loc.line, loc.column, sdl.GetError())
+    print("%v:%v:%v: SDL call returned %v\n", loc.file_path, loc.line, loc.column, sdl.GetError())
     os.exit(1)
 }
