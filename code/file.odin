@@ -1,11 +1,14 @@
 #+vet explicit-allocators
 package main
 
+import "core:os"
+import "core:io"
+
 import win "core:sys/windows"
 
 ////////////////////////////////////////////////
 
-load_dds_texture :: proc (file_data: [] u8) -> (Texture_Desc, [] u8) {
+parse_dds_texture_header :: proc (data: ^os.File) -> (Texture_Desc, int) {
     DDS_HEADER :: struct #packed {
         dwSize:              win.DWORD,
         dwFlags:             win.DWORD,
@@ -179,22 +182,31 @@ load_dds_texture :: proc (file_data: [] u8) -> (Texture_Desc, [] u8) {
     DDCAPS2_CUBEMAP :: 0x200
     DDCAPS2_VOLUME  :: 0x200000
     
-    buffer := make_byte_buffer(file_data)
-    buffer.write_cursor = len(file_data)
+    buffer := os.to_reader(data)
     
-    magic := read_string(&buffer, 4)
+    magic_buffer: [4] u8
+    io.read_slice(buffer, magic_buffer[:])
+    magic := transmute(string) magic_buffer[:]
     assert(magic == "DDS ")
     
-    header := read(&buffer, DDS_HEADER)
-    assert(header.dwSize == size_of(header^))
+    read :: proc (s: io.Reader, $T: typeid) -> T {
+        result: T
+        n, err := io.read_full(s, slice_from_parts(u8, &result, size_of(T)))
+        assert(n == size_of(T))
+        assert(err == nil)
+        return result
+    }
+    
+    header := read(buffer, DDS_HEADER)
+    assert(header.dwSize == size_of(header))
     
     format4cc := string_from_parts(&header.ddspf.dwFourCC, 4)
     
     // @correctness properly handle different texture kinds and formats
     
-    header10: ^DDS_HEADER_DXT10
+    header10: DDS_HEADER_DXT10
     if format4cc == "DX10" {
-        read_into(&buffer, &header10)
+        header10 = read(buffer, DDS_HEADER_DXT10)
         assert(header10.resourceDimension == .TEXTURE2D)
     }
     
@@ -227,10 +239,7 @@ load_dds_texture :: proc (file_data: [] u8) -> (Texture_Desc, [] u8) {
     }
     assert(description.format != .UNDEFINED)
     
-    block_size := 16
-    #partial switch description.format {
-    case .BC1_RGBA_UNORM_BLOCK, .BC4_SNORM_BLOCK, .BC4_UNORM_BLOCK: block_size = 8
-    }
+    block_size := get_block_size_from_format(description.format)
     
     pixel_size: int
     mip_size := description.size.xy
@@ -241,9 +250,13 @@ load_dds_texture :: proc (file_data: [] u8) -> (Texture_Desc, [] u8) {
         mip_size = vec_max(mip_size/2, 1)
     }
     
-    pixel_data := read_slice(&buffer, [] u8, pixel_size)
-    
-    assert(read_everything(buffer))
-    
-    return description, pixel_data
+    return description, pixel_size
+}
+
+get_block_size_from_format :: proc (format: Format) -> int {
+    block_size := 16
+    #partial switch format {
+    case .BC1_RGBA_UNORM_BLOCK, .BC4_SNORM_BLOCK, .BC4_UNORM_BLOCK: block_size = 8
+    }
+    return block_size
 }

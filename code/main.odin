@@ -326,7 +326,7 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    cpu_begin_profile_zone("Allocate buffers")
+    cpu_begin_profile_zone("Allocate geometry buffers")
     
     buffers: Buffers
     // geometry data is just written and never read by the cpu
@@ -337,6 +337,8 @@ main :: proc () {
     
     // This is written by the cpu every frame in the worst case.
     buffers.draws = gpu_allocate(gpu, [] Draw, 256 * Megabyte / size_of(Draw), 16, Memory_Kind.Default)
+    
+    cpu_end_profile_zone()
     
     camera := Camera {
         p           = {0, 0, 0},
@@ -352,8 +354,6 @@ main :: proc () {
     max_draw_visibility_count: u32
     scene_draws: [dynamic] Draw
     {
-        cpu_profile_scope("Geometry loading")
-        
         {
             path := "niagara_bistro/bistro.gltf"
             texture_paths := make([dynamic] string, context.temp_allocator)
@@ -371,17 +371,76 @@ main :: proc () {
             make_by_pointer(&textures, len(texture_paths), context.allocator)
             
             cpu_begin_profile_zone("upload textures")
-            cmd, upload_bump, upload_semaphore := begin_uploading_textures(gpu, 2 * Gigabyte)
+            // Baseline - upload texture
+            //   1.517021s
+            //   1.593160s
+            // read all
+            //   920.647ms
+            //   922.142ms
+            // read all, parse all headers
+            //   963.964ms
+            //   984.104ms
+            //   - reverted
+            // merge barriers
+            //   1.039649s
+            //   1.018848s
+            // immediate copy to gpu
+            //   951.169ms
+            //   986.336ms
+            // os.read into bump's staging memory
+            //   1.027830s
+            //   1.169794s
+            //   1.111175s
+            // revert to simple upload_texture with gpu pointer
+            //   820.074ms
+            //   940.439ms
+            //   974.983ms
+            //   889.570ms
+            // merge header and pixel reads
+            //   847.783ms 
+            //   817.313ms
+            //   883.823ms
+            //   875.266ms
+            
+            upload := begin_uploading_textures(gpu, 2 * Gigabyte)
+            
+            texture_barriers   := make([] vk.ImageMemoryBarrier2, len(texture_paths), context.temp_allocator)
+            texture_descs      := make([] Texture_Desc,           len(texture_paths), context.temp_allocator)
+            texture_pixel_size := make([] int,                    len(texture_paths), context.temp_allocator)
+            texture_pixels     := make([] vk.DeviceAddress,       len(texture_paths), context.temp_allocator)
+            
+            //
+            // @speed currently:
+            // - copy from ssd into cpu visible gpu staging memory
+            // - then allocate the gpu memory 
+            // - then let the gpu copy from staging into the textures memory
+            // 
+            // HostImageCopy would allow us to do the copy into the texture memory on the cpu.
+            // That would remove the need for the staging memory, but there was something about
+            // mipmaps that was unsatisfying. This copy can then also easily be moved to different 
+            // worker threads.
+            //
+            
             for texture_path, index in texture_paths {
-                // @waste read into the bump allocator/gpu memory directly
-                data, error := read_entire_file(texture_path, context.temp_allocator)
-                assert(error == nil)
+                file, open_error := os.open(texture_path); assert(open_error == nil)
+                pixel_size: int
+                texture_descs[index], pixel_size = parse_dds_texture_header(file)
+                texture_pixel_size[index] = pixel_size
                 
-                description, pixel_data := load_dds_texture(data)
+                cpu_data, gpu_data := bump_allocate(&upload.bump, cast(u32) pixel_size, alignment = 32)
                 
-                textures[index] = upload_texture(gpu, cmd, &upload_bump, description, pixel_data)
+                read, read_error := os.read(file, cpu_data); assert(read_error == nil); assert(read == pixel_size)
+                os.close(file)
+                
+                texture_pixels[index] = gpu_data
             }
-            end_uploading_textures(gpu, cmd, &upload_bump, upload_semaphore)
+            
+            for index in 0..<len(texture_paths) {
+                textures[index] = upload_texture(gpu, &upload, texture_descs[index], texture_pixels[index], texture_pixel_size[index])
+            }
+            
+            end_uploading_textures(gpu, &upload)
+            
             cpu_end_profile_zone()
             
             print("  Loaded textures\n\n")
@@ -406,6 +465,8 @@ main :: proc () {
         }
         max_draw_visibility_count = meshlet_visibility_count
     }
+    
+    cpu_begin_profile_zone("Allocate render buffers")
     
     buffers.draw_commands      = gpu_allocate_slice(gpu, [] Draw_Command, TaskWidthLimit,                        memory = .GPU) 
     buffers.draw_visibility    = gpu_allocate_slice(gpu, [] u32,          256 * Megabyte / size_of(u32),         memory = .GPU, usage = { .STORAGE_BUFFER, .TRANSFER_DST })
@@ -1379,6 +1440,7 @@ cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelin
         gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
         gpu_set_scissor(cmd,  size = gpu.swapchain_size)
         
+        // @speed only record if requested by caller(i.e. when it will actually be displayed
         vk.CmdBeginQuery(cmd, stats_pool, query_index, {})
         
         gpu_set_pipeline(cmd, pipelines.meshlets[stage])
@@ -1399,70 +1461,55 @@ grid_dimension_from_total_count :: proc (id: Shader_Id, x: u32 = 1, y: u32 = 1, 
 
 ////////////////////////////////////////////////
 
-begin_uploading_textures :: proc (gpu: ^Gpu, buffer_size: u32) -> (vk.CommandBuffer, Bump_Allocator, vk.Semaphore) {
+Texture_Upload :: struct {
+    cmd:       vk.CommandBuffer,
+    bump:      Bump_Allocator,
+    semaphore: vk.Semaphore,
+}
+
+begin_uploading_textures :: proc (gpu: ^Gpu, buffer_size: u32) -> Texture_Upload {
     upload_bump := bump_allocator_make_temporary(gpu, buffer_size, usage = { .TRANSFER_SRC })
     
     cmd := gpu_begin_command_recording(gpu, gpu.transfer_command_pool)
     upload_semaphore := gpu_create_timeline_semaphore(gpu, 0)
     
-    return cmd, upload_bump, upload_semaphore
+    result := Texture_Upload { cmd, upload_bump, upload_semaphore }
+    return result
 }
 
 // @todo if the bump allocator cap would be exceeded, wait for uploads to complete and clear the bump.offset
-upload_texture :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, upload_bump: ^Bump_Allocator, description: Texture_Desc, data: [] u8) -> Image {
-    texture: Image
-    texture = gpu_allocate_texture(gpu, description)
+upload_texture :: proc (gpu: ^Gpu, upload: ^Texture_Upload, description: Texture_Desc, data: vk.DeviceAddress, data_size: int) -> Image {
+    texture := gpu_allocate_texture(gpu, description)
     
-    // @waste we should have loaded all data into here if possible
-    cpu_data, gpu_data := bump_allocate(upload_bump, cast(u32) len(data), alignment = 32)
-    copy(cpu_data, data)
-    
-    //
-    // @speed we can batch these barriers by doing a loop over all texture slots in textures: [] Image before the upload. There we make all these barries and then submit them once and then we do the rest.
-    // that requires that the texture descriptions are already loaded so we should do something like this:
-    //
-    // make a structure that mananger a texture upload task
-    //
-    // collect all texture file paths
-    // read all headers and make descriptions
-    // allocate all textures with their description
-    //   batch wait on the layout transitions
-    // load the pixel data directly into the bump allocator
-    //   if the cap is reached we wait for all already submitted copy commands and then clear the bump's .offset
-    // wait at the end for all uploads to finish and emit a single barrier on ALL_TRANSFER
-    // 
-    gpu_image_barriers(cmd, {},
+    gpu_image_barriers(upload.cmd, {},
         create_image_barrier_from_undefined(&texture, { .ALL_TRANSFER }, { .MEMORY_READ, .MEMORY_WRITE }),
     )
-    
-    // @copypasta from load_dds_texture
-    block_size := 16
-    #partial switch description.format {
-    case .BC1_RGBA_UNORM_BLOCK, .BC4_SNORM_BLOCK, .BC4_UNORM_BLOCK: block_size = 8
-    }
+
+    block_size := get_block_size_from_format(description.format)
     
     mip_offset: int
     mip_size := description.size.xy
     for mip_level in 0..<description.mip_count {
-        gpu_copy_to_texture(cmd, texture, gpu_data, mip_level = mip_level, mip_offset = mip_offset, mip_size = mip_size)
+        gpu_copy_to_texture(upload.cmd, texture, data, mip_level = mip_level, mip_offset = mip_offset, mip_size = mip_size)
         // @copypasta from load_dds_texture
         blocks := (mip_size + 3) / 4
         mip_offset += cast(int) blocks.x * cast(int) blocks.y * block_size
         
         mip_size = vec_max(mip_size/2, 1)
     }
-    assert(mip_offset == len(data))
+    assert(mip_offset == data_size)
     
     return texture
 }
 
-end_uploading_textures :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, upload_bump: ^Bump_Allocator, upload_semaphore: vk.Semaphore) {
-    gpu_barrier(cmd, { .ALL_TRANSFER }, { .ALL_GRAPHICS })
+end_uploading_textures :: proc (gpu: ^Gpu, upload: ^Texture_Upload) {
+    gpu_barrier(upload.cmd, { .ALL_TRANSFER }, { .ALL_GRAPHICS })
     
-    gpu_submit(gpu.transfer_queue, { { upload_semaphore, { .ALL_COMMANDS }, 1} }, cmd)
-    gpu_wait_semaphore(gpu, upload_semaphore, 1)
-    gpu_destroy_semaphore(gpu, upload_semaphore)
-    bump_allocator_delete(gpu, upload_bump)
+    gpu_submit(gpu.transfer_queue, { { upload.semaphore, { .ALL_COMMANDS }, 1} }, upload.cmd)
+    gpu_wait_semaphore(gpu, upload.semaphore, 1)
+    
+    gpu_destroy_semaphore(gpu, upload.semaphore)
+    bump_allocator_delete(gpu, &upload.bump)
 }
 
 ////////////////////////////////////////////////
