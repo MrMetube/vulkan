@@ -181,6 +181,7 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
                     if material.normal_texture.texture != nil {
                         draw.normal_texture = cast(Texture_Index) cgltf.texture_index(data, material.normal_texture.texture)
                     }
+                    // @todo load specular texture
                     if material.emissive_texture.texture != nil {
                         draw.emmisive_texture = cast(Texture_Index) cgltf.texture_index(data, material.emissive_texture.texture)
                     }

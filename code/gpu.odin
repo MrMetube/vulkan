@@ -1782,7 +1782,7 @@ create_descriptor_heap :: proc (gpu: ^Gpu) -> Descriptor_Heap {
     
     // :SamplerHack: fill samplers[0] with texture sampler and samplers[2] with depth sampler
     descriptor_size := resource_size // :SamplerHack:
-    write_descriptor(gpu, .LINEAR, .LINEAR,  .REPEAT,        .WEIGHTED_AVERAGE, result.samplers.cpu[0 * descriptor_size:][:sampler_size])
+    write_descriptor(gpu, .LINEAR, .LINEAR,  .REPEAT,        .WEIGHTED_AVERAGE, result.samplers.cpu[0 * descriptor_size:][:sampler_size], anisotropy = true)
     write_descriptor(gpu, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .WEIGHTED_AVERAGE, result.samplers.cpu[1 * descriptor_size:][:sampler_size])
     write_descriptor(gpu, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .MIN,              result.samplers.cpu[2 * descriptor_size:][:sampler_size])
     
