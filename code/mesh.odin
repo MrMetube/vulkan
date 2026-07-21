@@ -322,6 +322,10 @@ append_mesh :: proc (geometry: ^Geometry, mesh_vertices: [] Vertex, mesh_indices
     LOD_Error  :: 1e-2
     
     for &lod in mesh.lods {
+        lod.index_count  = cast(u32) len(lod_indices)
+        lod.index_offset = cast(u32) len(geometry.indices)
+        append(&geometry.indices, ..lod_indices)
+        
         lod.meshlet_offset = cast(u32) len(geometry.meshlets)
         lod.meshlet_count  = append_meshlets(geometry, mesh_vertices, lod_indices[:])
         mesh.lod_count += 1

@@ -379,13 +379,13 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
             gpu.physical_device = preferred != nil ? preferred : fallback
         }
         
-        gpu.heap_properties = vk.PhysicalDeviceDescriptorHeapPropertiesEXT {
-            sType = .PHYSICAL_DEVICE_DESCRIPTOR_HEAP_PROPERTIES_EXT,
-        }
-        gpu.device_properties = vk.PhysicalDeviceProperties2 { 
-            sType = .PHYSICAL_DEVICE_PROPERTIES_2,
-            pNext = &gpu.heap_properties,
-        }
+        
+        gpu.device_properties = { sType = .PHYSICAL_DEVICE_PROPERTIES_2 }
+        gpu.heap_properties   = { sType = .PHYSICAL_DEVICE_DESCRIPTOR_HEAP_PROPERTIES_EXT }
+        
+        ppNext := &gpu.device_properties.pNext
+        chain(&ppNext, &gpu.heap_properties)
+        
         vk.GetPhysicalDeviceProperties2(gpu.physical_device, &gpu.device_properties)
         
         fmt.printfln("Selected device: %v", cast(cstring) &gpu.device_properties.properties.deviceName[0])
@@ -395,9 +395,15 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
     ////////////////////////////////////////////////
     // Extensions
     
+    // ***-Developer achieved! Truely blessed.
+    chain :: proc (pppNext: ^^pmm, pNext: ^$T) {
+        pppNext^^ = pNext
+        pppNext^  = &pNext.pNext
+    }
+    
     {
         cpu_profile_scope("Device")
-        device_extensions := [] cstring { 
+        device_extensions := [dynamic; 8] cstring { 
             vk.KHR_SWAPCHAIN_EXTENSION_NAME,
             vk.EXT_MESH_SHADER_EXTENSION_NAME,
             vk.EXT_DESCRIPTOR_HEAP_EXTENSION_NAME,
@@ -414,13 +420,18 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
             desired_found := make([] b8, len(device_extensions), context.temp_allocator)
             
             for &it in extensions {
+                name := cast(cstring) &it.extensionName[0]
                 for desired, desired_index in device_extensions {
                     if desired_found[desired_index] { continue }
                     
-                    if desired == cast(cstring) &it.extensionName[0] {
+                    if desired == name {
                         desired_found[desired_index] = true
                         break
                     }
+                }
+                
+                if !raytracing_supported && name == vk.KHR_RAY_QUERY_EXTENSION_NAME {
+                    raytracing_supported = true
                 }
             }
             
@@ -519,6 +530,22 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
             shaderUntypedPointers = true,
         }
         
+        f_rayquery := vk.PhysicalDeviceRayQueryFeaturesKHR {
+            sType = .PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+            rayQuery = true,
+        }
+        
+        f_rayaccel := vk.PhysicalDeviceAccelerationStructureFeaturesKHR {
+            sType = .PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+            accelerationStructure = true,
+        }
+        
+        if raytracing_supported {
+            append(&device_extensions, vk.KHR_RAY_QUERY_EXTENSION_NAME)
+            append(&device_extensions, vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)
+            append(&device_extensions, vk.KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME)
+        }
+        
         queue_family_index: u32
         
         device_create_info := vk.DeviceCreateInfo {
@@ -533,19 +560,25 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
             },
             
             enabledExtensionCount   = cast(u32) len(device_extensions),
-            ppEnabledExtensionNames = raw_data(device_extensions),
+            ppEnabledExtensionNames = raw_data(&device_extensions),
         }
         
         ppNext := &device_create_info.pNext
-        ppNext^ = &f11; ppNext = &f11.pNext
-        ppNext^ = &f12; ppNext = &f12.pNext
-        ppNext^ = &f13; ppNext = &f13.pNext
-        ppNext^ = &f14; ppNext = &f14.pNext
-        ppNext^ = &f2;  ppNext = &f2.pNext
         
-        ppNext^ = &f_mesh; ppNext = &f_mesh.pNext
-        ppNext^ = &f_heap; ppNext = &f_heap.pNext
-        ppNext^ = &f_pointer; ppNext = &f_pointer.pNext
+        chain(&ppNext, &f11)
+        chain(&ppNext, &f12)
+        chain(&ppNext, &f13)
+        chain(&ppNext, &f14)
+        chain(&ppNext, &f2)
+        
+        chain(&ppNext, &f_mesh)
+        chain(&ppNext, &f_heap)
+        chain(&ppNext, &f_pointer)
+        
+        if raytracing_supported {
+            chain(&ppNext, &f_rayaccel)
+            chain(&ppNext, &f_rayquery)
+        }
         
         cpu_begin_profile_zone("Create Device Call")
         check(vk.CreateDevice(gpu.physical_device, &device_create_info, nil, &gpu.device))

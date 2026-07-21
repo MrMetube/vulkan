@@ -24,8 +24,8 @@ Sync_Validation :: false && Validation
 ////////////////////////////////////////////////
 
 Geometry :: struct {
-    // @todo this data is only temp allocated and should not be kept around after loading from ssd and uploading to gpu is done
     vertices:     [dynamic] Vertex,
+    indices:      [dynamic] u32,
     meshlets:     [dynamic] Meshlet,
     meshlet_data: [dynamic] u32,
     
@@ -83,6 +83,7 @@ Shaders :: struct {
 
 Buffers :: struct {
     vertices:     Gpu_Slice(Vertex),
+    indices:      Gpu_Slice(u32),
     meshlets:     Gpu_Slice(Meshlet),
     meshlet_data: Gpu_Slice(u32),
     meshes:       Gpu_Slice(Mesh),
@@ -92,6 +93,9 @@ Buffers :: struct {
     // @todo both need to be cleared to 1 on init. is allocated memory guarenteed to be zeroed? if so then we could make 0 the default by making them xx_occluded
     draw_visibility:    Gpu_Slice(u32),
     meshlet_visibility: Gpu_Slice(u32),
+    
+    bottom_level_acceleration_structures: vk.DeviceAddress,
+    top_level_acceleration_structures:    vk.DeviceAddress,
 }
 
 Debug :: struct {
@@ -102,6 +106,7 @@ Debug :: struct {
     occlusion_enabled: bool,
     display_pyramid:   bool,
     display_pyramid_mip_level: i32,
+    raytracing_enabled: bool,
     
     cpu_time:  f64,
     gpu_time:  f64,
@@ -217,6 +222,9 @@ Mesh :: struct { // :Shader:
 Mesh_LOD :: struct { // :Shader:
     meshlet_offset: u32,
     meshlet_count:  u32,
+    
+    index_offset: u32,
+    index_count:  u32,
 }
 
 Draw_Command :: struct { // :Shader:
@@ -263,6 +271,10 @@ UI_Draw :: struct { // :Shader:
     corner_radius: f32,
     highlight:     bool,
 }
+
+////////////////////////////////////////////////
+
+raytracing_supported: bool
 
 ////////////////////////////////////////////////
 
@@ -333,9 +345,15 @@ main :: proc () {
     
     cpu_begin_profile_zone("Allocate geometry buffers")
     
+    vertex_and_index_usage := vk.BufferUsageFlags { .STORAGE_BUFFER }
+    if raytracing_supported {
+        vertex_and_index_usage += { .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR }
+    }
+    
     buffers: Buffers
-    // geometry data is just written and never read by the cpu
-    buffers.vertices     = gpu_allocate_slice(gpu, [] Vertex,  256 * Megabyte / size_of(Vertex),  memory = .Default)
+    buffers.vertices     = gpu_allocate_slice(gpu, [] Vertex,  256 * Megabyte / size_of(Vertex),  memory = .Default, usage = vertex_and_index_usage)
+    // This is only used to build the acceleration structures, if we want to do regular draws it will also need .INDEX_BUFFER in its usage.
+    buffers.indices      = gpu_allocate_slice(gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = .Default, usage = vertex_and_index_usage)
     buffers.meshlets     = gpu_allocate_slice(gpu, [] Meshlet, 256 * Megabyte / size_of(Meshlet), memory = .Default)
     buffers.meshlet_data = gpu_allocate_slice(gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = .Default)
     buffers.meshes       = gpu_allocate_slice(gpu, [] Mesh,    256 * Megabyte / size_of(Mesh),    memory = .Default)
@@ -351,17 +369,29 @@ main :: proc () {
         fov_y       = 70 * RadiansFromDegrees,
     }
     
-    geometry: Geometry
-    
     textures: [] Image
     defer delete(textures, context.allocator)
     
+    // @todo make a separate allocator for all the scene and geometry setup that we free once before the frame loop
     max_draw_visibility_count: u32
     scene_draws: [dynamic] Draw
+    
+    bottom_levels: [] Acceleration_Structure
+    top_level:     Acceleration_Structure
     {
+        loading_scratch := context.temp_allocator
+        defer free_all(loading_scratch)
+        
+        geometry: Geometry
+        geometry.vertices.allocator     = loading_scratch
+        geometry.indices.allocator      = loading_scratch
+        geometry.meshlets.allocator     = loading_scratch
+        geometry.meshlet_data.allocator = loading_scratch
+        geometry.meshes.allocator       = loading_scratch
+        
         {
             path := "niagara_bistro/bistro.gltf"
-            texture_paths := make([dynamic] string, context.temp_allocator)
+            texture_paths := make([dynamic] string, loading_scratch)
             print("\nLoading scene: %v\n", path)
             
             cpu_begin_profile_zone("load scene")
@@ -400,9 +430,9 @@ main :: proc () {
             {
                 cpu_profile_scope("upload textures")
                 
-                texture_descs      := make([] Texture_Desc, len(texture_paths), context.temp_allocator)
-                texture_pixel_size := make([] int,          len(texture_paths), context.temp_allocator)
-                texture_file       := make([] ^os.File,     len(texture_paths), context.temp_allocator)
+                texture_descs      := make([] Texture_Desc, len(texture_paths), loading_scratch)
+                texture_pixel_size := make([] int,          len(texture_paths), loading_scratch)
+                texture_file       := make([] ^os.File,     len(texture_paths), loading_scratch)
                 
                 max_size : int
                 for texture_path, index in texture_paths {
@@ -415,7 +445,7 @@ main :: proc () {
                     total_size += pixel_size
                 }
                 
-                copy_buffer := make([] u8, max_size, context.temp_allocator)
+                copy_buffer := make([] u8, max_size, loading_scratch)
                 for index in 0..<len(texture_paths) {
                     pixel_size := texture_pixel_size[index]
                     file       := texture_file[index]
@@ -435,6 +465,7 @@ main :: proc () {
         
         cpu_begin_profile_zone("upload geometry")
         copy(buffers.vertices.cpu,     geometry.vertices[:])
+        copy(buffers.indices.cpu,      geometry.indices[:])
         copy(buffers.meshlets.cpu,     geometry.meshlets[:])
         copy(buffers.meshlet_data.cpu, geometry.meshlet_data[:])
         copy(buffers.meshes.cpu,       geometry.meshes[:])
@@ -453,7 +484,18 @@ main :: proc () {
             meshlet_visibility_count      += meshlet_count
         }
         max_draw_visibility_count = meshlet_visibility_count
+        
+        if raytracing_supported {
+            
+            // @todo which pool?
+            queue := gpu.transfer_queue
+            pool  := gpu.transfer_command_pool
+            
+            bottom_levels = build_bottom_level_acceleration_structures(gpu, queue, pool, &buffers, geometry, context.allocator, loading_scratch)
+            top_level = build_top_level_acceleration_structures(gpu, queue, pool, &buffers, scene_draws[:], bottom_levels, loading_scratch)
+        }
     }
+    
     
     cpu_begin_profile_zone("Allocate render buffers")
     
@@ -1165,6 +1207,7 @@ main :: proc () {
 	check(vk.DeviceWaitIdle(gpu.device))
     
     gpu_free(gpu, buffers.vertices)
+    gpu_free(gpu, buffers.indices)
     gpu_free(gpu, buffers.meshlets)
     gpu_free(gpu, buffers.meshlet_data)
     gpu_free(gpu, buffers.meshes)
@@ -1172,6 +1215,13 @@ main :: proc () {
     gpu_free(gpu, buffers.draw_commands)
     gpu_free(gpu, buffers.draw_visibility)
     gpu_free(gpu, buffers.meshlet_visibility)
+    gpu_free(gpu, buffers.bottom_level_acceleration_structures)
+    gpu_free(gpu, buffers.top_level_acceleration_structures)
+    
+    for it in bottom_levels {
+        vk.DestroyAccelerationStructureKHR(gpu.device, it.acceleration_structure, nil)
+    }
+    vk.DestroyAccelerationStructureKHR(gpu.device, top_level.acceleration_structure, nil)
     
     for &bump in frame_bump_allocators {
         bump_allocator_delete(gpu, &bump)
@@ -1206,12 +1256,6 @@ main :: proc () {
     delete(the_cpu_profile_zones)
     
     deinit_assets()
-    
-    // geometry
-    delete(geometry.vertices)
-    delete(geometry.meshlets)
-    delete(geometry.meshlet_data)
-    delete(geometry.meshes)
     
     delete(scene_draws)
 }
