@@ -101,34 +101,18 @@ GpuAllocation :: struct {
     offset: vk.DeviceSize,
 }
 
-Topology :: vk.PrimitiveTopology
-Cull     :: enum { None, CCW, CW, All }
 Blend    :: vk.BlendOp
 Factor   :: vk.BlendFactor
 
 Format :: vk.Format
 
 Raster_Desc :: struct {
-    topology:                     Topology,
-    cull:                         Cull,
-    alpha_to_coverage:            bool,
+    alpha_to_coverage:    bool,
     // support_dual_source_blending: bool,
-    sample_count:                 vk.SampleCountFlag,
-    depth_format:                 Format,
-    stencil_format:               Format,
-    color_targets:                [] Color_Target,
-    blendstate:                   ^Blend_Desc, // optional embedded blend state
-}
-
-DefaultRasterDesc :: Raster_Desc {
-    topology = .TRIANGLE_LIST,
-    sample_count = ._1,
-    cull = .CW,
-}
-
-Color_Target :: struct {
-    format:     Format,
-    write_mask: Color_Mask, // should default to { .R, .G, .B, .A }
+    depth_format:         Format,
+    stencil_format:       Format,
+    color_target_formats: [] Format,
+    blendstate:           ^Blend_Desc, // optional embedded blend state
 }
 
 Blend_Desc :: struct {
@@ -144,10 +128,9 @@ Blend_Desc :: struct {
 DefaultBlendDesc :: Blend_Desc {
     src_color_factor = .ONE,
     src_alpha_factor = .ONE,
-    color_write_mask = DefaulColorMask,
+    color_write_mask = { .R, .G, .B, .A },
 }
 
-DefaulColorMask :: Color_Mask { .R, .G, .B, .A }
 
 Color_Mask :: vk.ColorComponentFlags
 
@@ -403,12 +386,14 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
     
     {
         cpu_profile_scope("Device")
-        device_extensions := [dynamic; 8] cstring { 
+        device_extensions := [dynamic; 128] cstring { 
             vk.KHR_SWAPCHAIN_EXTENSION_NAME,
             vk.EXT_MESH_SHADER_EXTENSION_NAME,
             vk.EXT_DESCRIPTOR_HEAP_EXTENSION_NAME,
             vk.KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME,
             vk.KHR_SHADER_UNTYPED_POINTERS_EXTENSION_NAME,
+            
+            vk.EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME,
         }
         
         {
@@ -540,6 +525,12 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
             accelerationStructure = true,
         }
         
+        f_dynamic := vk.PhysicalDeviceExtendedDynamicState3FeaturesEXT {
+            sType = .PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT,
+            extendedDynamicState3RasterizationSamples = true,
+            extendedDynamicState3ColorWriteMask       = true,
+        }
+        
         if raytracing_supported {
             append(&device_extensions, vk.KHR_RAY_QUERY_EXTENSION_NAME)
             append(&device_extensions, vk.KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)
@@ -574,6 +565,7 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
         chain(&ppNext, &f_mesh)
         chain(&ppNext, &f_heap)
         chain(&ppNext, &f_pointer)
+        chain(&ppNext, &f_dynamic)
         
         if raytracing_supported {
             chain(&ppNext, &f_rayaccel)
@@ -1112,6 +1104,8 @@ Pipeline_Info :: struct {
     
     shader_stages:          [dynamic; 8] vk.PipelineShaderStageCreateInfo,
     module_infos:           [dynamic; 8] vk.ShaderModuleCreateInfo,
+    
+    is_mesh_pipeline: bool,
 }
 
 make_pipeline_info :: proc (info: ^Pipeline_Info, gpu: ^Gpu, heap: Descriptor_Heap, shaders: [] ^Shader, constants: [] Specialization_Constant) {
@@ -1167,6 +1161,10 @@ make_pipeline_info :: proc (info: ^Pipeline_Info, gpu: ^Gpu, heap: Descriptor_He
     
     // Shader creation
     for &shader in shaders {
+        if shader.stage == .MESH_EXT {
+            info.is_mesh_pipeline = true
+        }
+        
         append(&info.module_infos, vk.ShaderModuleCreateInfo {
             sType = .SHADER_MODULE_CREATE_INFO, 
             pNext = &info.heap_mapping,
@@ -1247,17 +1245,73 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
     
     // @incomplete expose all dynamic states that are core in 1.4, 
     // and remove their values below and from Raster_Desc if present.
-    // DEPTH_BIAS, BLEND_CONSTANTS, DEPTH_BOUNDS, STENCIL_COMPARE_MASK, STENCIL_WRITE_MASK, STENCIL_REFERENCE
-    dynamic_states := [] vk.DynamicState { .VIEWPORT, .SCISSOR, .LINE_WIDTH }
+    dynamic_states := [dynamic; 64] vk.DynamicState {
+        // @todo vk.PipelineVertexInputStateCreateInfo
+        
+        // replaces vk.PipelineViewportStateCreateInfo
+        .VIEWPORT_WITH_COUNT, .SCISSOR_WITH_COUNT, 
+        
+        // replaces parts of vk.PipelineRasterizationStateCreateInfo
+        .FRONT_FACE, .CULL_MODE, .LINE_WIDTH,
+        // @todo
+        // depthClampEnable:        b32,
+        // rasterizerDiscardEnable: b32,
+        // polygonMode:             PolygonMode,
+        // @api set_depth_bias_state
+        // depthBiasEnable:         b32,
+        // depthBiasConstantFactor: f32,
+        // depthBiasClamp:          f32,
+        // depthBiasSlopeFactor:    f32,
+        
+        // replaces parts of vk.PipelineMultisampleStateCreateInfo
+        .RASTERIZATION_SAMPLES_EXT,
+        // @todo
+        // sampleShadingEnable:   b32,
+        // minSampleShading:      f32,
+        // pSampleMask:           ^SampleMask,
+        // alphaToCoverageEnable: b32,
+        // alphaToOneEnable:      b32,
+        
+        // replaces parts of vkPipelineColorBlendAttachmentState (in vk.PipelineColorBlendStateCreateInfo.pAttachments)
+        .COLOR_WRITE_MASK_EXT,
+        // @todo
+        // flags:           PipelineColorBlendStateCreateFlags,
+        // logicOpEnable:   b32,
+        // logicOp:         LogicOp,
+        // attachmentCount: u32,
+        // pAttachments:    [^]PipelineColorBlendAttachmentState,
+        // blendConstants:  [4]f32,
+        // @todo from pAttachments: vk.PipelineColorBlendAttachmentState
+        // blendEnable:         b32,
+        // srcColorBlendFactor: BlendFactor,
+        // dstColorBlendFactor: BlendFactor,
+        // colorBlendOp:        BlendOp,
+        // srcAlphaBlendFactor: BlendFactor,
+        // dstAlphaBlendFactor: BlendFactor,
+        // alphaBlendOp:        BlendOp,
+        
+        // replaces parts of vk.PipelineDepthStencilStateCreateInfo
+        .DEPTH_TEST_ENABLE, .DEPTH_WRITE_ENABLE, .DEPTH_COMPARE_OP,
+        // @todo
+        // depthBoundsTestEnable: b32,
+        // @api set_stencil_state
+        // stencilTestEnable:     b32,
+        // front:                 StencilOpState,
+        // back:                  StencilOpState,
+        // minDepthBounds:        f32,
+        // maxDepthBounds:        f32,
+        
+    }
     
-    color_formats: [dynamic; 32] Format
-    for target in info.color_targets { append(&color_formats, target.format) }
+    // replaces vk.PipelineInputAssemblyStateCreateInfo
+    if !pipeline_info.is_mesh_pipeline {
+        append(&dynamic_states, vk.DynamicState.PRIMITIVE_TOPOLOGY)
+        append(&dynamic_states, vk.DynamicState.PRIMITIVE_RESTART_ENABLE)
+    }
     
     color_attachments: [dynamic; 32] vk.PipelineColorBlendAttachmentState
-    for target in info.color_targets {
-        attachment := vk.PipelineColorBlendAttachmentState {
-            colorWriteMask = target.write_mask,
-        }
+    for target in info.color_target_formats {
+        attachment := vk.PipelineColorBlendAttachmentState {}
         
         if info.blendstate != nil {
             attachment.blendEnable = true
@@ -1275,24 +1329,15 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
         append(&color_attachments, attachment)
     }
     
-    cull_mode:  vk.CullModeFlags
-    switch info.cull {
-    case .None: cull_mode = {}
-    case .CCW:  cull_mode = { .FRONT }
-    case .CW:   cull_mode = { .BACK  }
-    case .All:  cull_mode = { .FRONT, .BACK }
-    }
-    
-    create_info := vk.GraphicsPipelineCreateInfo {
+    info := vk.GraphicsPipelineCreateInfo {
         sType = .GRAPHICS_PIPELINE_CREATE_INFO,
         
         pNext = &vk.PipelineRenderingCreateInfo {
             sType = .PIPELINE_RENDERING_CREATE_INFO,
-            
             pNext = &pipeline_info.flags2,
             
-            colorAttachmentCount    = cast(u32) len(color_formats),
-            pColorAttachmentFormats = raw_data(&color_formats),
+            colorAttachmentCount    = cast(u32) len(info.color_target_formats),
+            pColorAttachmentFormats = raw_data(info.color_target_formats),
             depthAttachmentFormat   = info.depth_format,
             stencilAttachmentFormat = info.stencil_format,
         },
@@ -1300,70 +1345,28 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
         stageCount = cast(u32) len(pipeline_info.shader_stages),
         pStages    = &pipeline_info.shader_stages[0],
         
-        pInputAssemblyState = &vk.PipelineInputAssemblyStateCreateInfo {
-            sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-            topology = info.topology,
+        pDynamicState = &vk.PipelineDynamicStateCreateInfo {
+            sType = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+            dynamicStateCount = cast(u32) len(dynamic_states),
+            pDynamicStates    = raw_data(&dynamic_states),
         },
         
-        pVertexInputState = &vk.PipelineVertexInputStateCreateInfo {
-            sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        },
+        // can be removed once all fields can be dynamic state 
+        pVertexInputState   = pipeline_info.is_mesh_pipeline ? nil : &vk.PipelineVertexInputStateCreateInfo   { sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO  },
         
-        // @study can there be more than 1 with dynamic states?
-        pViewportState = &vk.PipelineViewportStateCreateInfo {
-            sType = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-            viewportCount = 1,
-            scissorCount  = 1,
-        },
-        
-        pRasterizationState = &vk.PipelineRasterizationStateCreateInfo {
-            sType = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-            cullMode  = cull_mode,
-            frontFace = .COUNTER_CLOCKWISE,
-            
-            // @todo which of these fields can by dynamic state?
-            // depthClampEnable:        b32,
-            // rasterizerDiscardEnable: b32,
-            // polygonMode:             PolygonMode,
-            // depthBiasEnable:         b32, -> ext dynamic state
-            // depthBiasConstantFactor: f32,
-            // depthBiasClamp:          f32,
-            // depthBiasSlopeFactor:    f32,
-        },
-        
-        // @incomplete
-        pMultisampleState = &vk.PipelineMultisampleStateCreateInfo {
-            sType = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-            rasterizationSamples = { info.sample_count },
-        },
-        
-        // @todo not exposed in info. can this be dynamic state?
-        pDepthStencilState = &vk.PipelineDepthStencilStateCreateInfo {
-            sType = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-            depthTestEnable  = true,
-            depthWriteEnable = true,
-            depthCompareOp   = .GREATER,
-            // :Stencil: stencilTestEnable
-        },
+        pRasterizationState = &vk.PipelineRasterizationStateCreateInfo { sType = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO },
+        pDepthStencilState  = &vk.PipelineDepthStencilStateCreateInfo  { sType = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO },
+        // Validation complains if this is a pointer and samples is not set
+        pMultisampleState   = &vk.PipelineMultisampleStateCreateInfo   { sType = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, rasterizationSamples = { ._1 } },
         
         pColorBlendState = &vk.PipelineColorBlendStateCreateInfo {
             sType = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
             attachmentCount = cast(u32) len(color_attachments),
             pAttachments    = raw_data(&color_attachments),
-            // @todo these field from the optional blend desc? can these be dynamic state?
-            // logicOpEnable:   b32,     -> ext dynamic state
-            // logicOp:         LogicOp, -> ext dynamic state
-            // blendConstants:  [4]f32,  -> dynamic state
-        },
-        
-        pDynamicState = &vk.PipelineDynamicStateCreateInfo {
-            sType = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-            dynamicStateCount = cast(u32) len(dynamic_states),
-            pDynamicStates    = raw_data(dynamic_states),
         },
     }
     
-    check(vk.CreateGraphicsPipelines(gpu.device, gpu.pipeline_cache, 1, &create_info, nil, &result.pipeline))
+    check(vk.CreateGraphicsPipelines(gpu.device, gpu.pipeline_cache, 1, &info, nil, &result.pipeline))
 }
 
 pipeline_is_valid :: proc (pipeline: Pipeline) -> bool {
@@ -1653,21 +1656,93 @@ gpu_wait_before :: proc (cmd: vk.CommandBuffer, stage: vk.PipelineStageFlags2, g
     unimplemented()
 }
 
+
+
 gpu_set_pipeline :: proc (cmd: vk.CommandBuffer, pipeline: Pipeline) {
     vk.CmdBindPipeline(cmd, pipeline.bind_point, pipeline.pipeline)
 }
 
 gpu_set_viewport :: proc (cmd: vk.CommandBuffer, offset: v2 = 0, size: v2, min_depth: f32 = 0, max_depth: f32 = 1) {
-    vk.CmdSetViewport(cmd, 0, 1, &vk.Viewport { offset.x, offset.y, size.x, size.y, min_depth, max_depth })
+    vk.CmdSetViewportWithCount(cmd, 1, &vk.Viewport { offset.x, offset.y, size.x, size.y, min_depth, max_depth })
 }
 
 gpu_set_scissor :: proc (cmd: vk.CommandBuffer, offset: iv2 = 0, size: uv2) {
-    vk.CmdSetScissor(cmd, 0, 1, &vk.Rect2D { offset = { **offset }, extent = { **size } })
+    vk.CmdSetScissorWithCount(cmd, 1, &vk.Rect2D { offset = { **offset }, extent = { **size } })
 }
 
-// @todo 
-// void gpuSetDepthStencilState(GpuCommandBuffer cb, GpuDepthStencilState state);
-// void gpuSetBlendState(GpuCommandBuffer cb, GpuBlendState state); 
+gpu_set_input_assembly_state :: proc (cmd: vk.CommandBuffer, primitive_topology: vk.PrimitiveTopology, restart_enabled: b32 = false) {
+    vk.CmdSetPrimitiveTopology(cmd,      primitive_topology)
+    vk.CmdSetPrimitiveRestartEnable(cmd, restart_enabled)
+    // vk.CmdSetPrimitiveRestartIndexEXT
+}
+
+gpu_set_depth_state :: proc (cmd: vk.CommandBuffer, depth_test_enable, depth_write_enable: b32, depth_compare_op: vk.CompareOp) {
+    vk.CmdSetDepthTestEnable(cmd,  depth_test_enable)
+    vk.CmdSetDepthWriteEnable(cmd, depth_write_enable)
+    vk.CmdSetDepthCompareOp(cmd,   depth_compare_op)
+}
+
+gpu_set_color_write_mask :: proc (cmd: vk.CommandBuffer, color_attachment_index: u32, color_write_mask: Color_Mask = { .R, .G, .B, .A }) {
+    // @speed the original call can set the mask for all attachments at once, but then we need arrays and pointers
+    color_write_mask := color_write_mask
+    vk.CmdSetColorWriteMaskEXT(cmd, color_attachment_index, 1, &color_write_mask)
+}
+
+gpu_set_cull_state :: proc (cmd: vk.CommandBuffer, cull_mode: vk.CullModeFlags, front_face: vk.FrontFace = .COUNTER_CLOCKWISE) {
+    vk.CmdSetCullMode(cmd,  cull_mode)
+    vk.CmdSetFrontFace(cmd, front_face)
+}
+
+gpu_set_rasterization_samples :: proc (cmd: vk.CommandBuffer, sample_count: vk.SampleCountFlag) {
+    vk.CmdSetRasterizationSamplesEXT(cmd, { sample_count })
+}
+
+// propably all non vendor specific dynamic state commands:
+// CmdSetAlphaToCoverageEnableEXT:            ProcCmdSetAlphaToCoverageEnableEXT
+// CmdSetAlphaToOneEnableEXT:                 ProcCmdSetAlphaToOneEnableEXT
+// CmdSetAttachmentFeedbackLoopEnableEXT:     ProcCmdSetAttachmentFeedbackLoopEnableEXT
+// CmdSetBlendConstants:                      ProcCmdSetBlendConstants
+// CmdSetColorBlendAdvancedEXT:               ProcCmdSetColorBlendAdvancedEXT
+// CmdSetColorBlendEnableEXT:                 ProcCmdSetColorBlendEnableEXT
+// CmdSetColorBlendEquationEXT:               ProcCmdSetColorBlendEquationEXT
+// CmdSetColorWriteEnableEXT:                 ProcCmdSetColorWriteEnableEXT
+// CmdSetConservativeRasterizationModeEXT:    ProcCmdSetConservativeRasterizationModeEXT
+// CmdSetDepthBias:                           ProcCmdSetDepthBias
+// CmdSetDepthBias2EXT:                       ProcCmdSetDepthBias2EXT
+// CmdSetDepthBiasEnable:                     ProcCmdSetDepthBiasEnable
+// CmdSetDepthBounds:                         ProcCmdSetDepthBounds
+// CmdSetDepthBoundsTestEnable:               ProcCmdSetDepthBoundsTestEnable
+// CmdSetDepthClampEnableEXT:                 ProcCmdSetDepthClampEnableEXT
+// CmdSetDepthClampRangeEXT:                  ProcCmdSetDepthClampRangeEXT
+// CmdSetDepthClipEnableEXT:                  ProcCmdSetDepthClipEnableEXT
+// CmdSetDepthClipNegativeOneToOneEXT:        ProcCmdSetDepthClipNegativeOneToOneEXT
+// CmdSetDiscardRectangleEXT:                 ProcCmdSetDiscardRectangleEXT
+// CmdSetDiscardRectangleEnableEXT:           ProcCmdSetDiscardRectangleEnableEXT
+// CmdSetDiscardRectangleModeEXT:             ProcCmdSetDiscardRectangleModeEXT
+// CmdSetEvent:                               ProcCmdSetEvent
+// CmdSetEvent2:                              ProcCmdSetEvent2
+// CmdSetExtraPrimitiveOverestimationSizeEXT: ProcCmdSetExtraPrimitiveOverestimationSizeEXT
+// CmdSetFragmentShadingRateKHR:              ProcCmdSetFragmentShadingRateKHR
+// CmdSetLogicOpEXT:                          ProcCmdSetLogicOpEXT
+// CmdSetLogicOpEnableEXT:                    ProcCmdSetLogicOpEnableEXT
+// CmdSetPatchControlPointsEXT:               ProcCmdSetPatchControlPointsEXT
+// CmdSetPolygonModeEXT:                      ProcCmdSetPolygonModeEXT
+// CmdSetProvokingVertexModeEXT:              ProcCmdSetProvokingVertexModeEXT
+// CmdSetRasterizationStreamEXT:              ProcCmdSetRasterizationStreamEXT
+// CmdSetRasterizerDiscardEnable:             ProcCmdSetRasterizerDiscardEnable
+// CmdSetRenderingAttachmentLocations:        ProcCmdSetRenderingAttachmentLocations
+// CmdSetRenderingInputAttachmentIndices:     ProcCmdSetRenderingInputAttachmentIndices
+// CmdSetSampleMaskEXT:                       ProcCmdSetSampleMaskEXT
+// CmdSetStencilCompareMask:                  ProcCmdSetStencilCompareMask
+// CmdSetStencilOp:                           ProcCmdSetStencilOp
+// CmdSetStencilOpEXT:                        ProcCmdSetStencilOpEXT
+// CmdSetStencilReference:                    ProcCmdSetStencilReference
+// CmdSetStencilTestEnable:                   ProcCmdSetStencilTestEnable
+// CmdSetStencilTestEnableEXT:                ProcCmdSetStencilTestEnableEXT
+// CmdSetStencilWriteMask:                    ProcCmdSetStencilWriteMask
+// CmdSetVertexInputEXT:                      ProcCmdSetVertexInputEXT
+
+
 
 gpu_begin_rendering :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, desc: Render_Pass_Desc) {
     render_size := gpu.swapchain_size

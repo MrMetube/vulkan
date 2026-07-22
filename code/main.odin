@@ -793,11 +793,9 @@ main :: proc () {
                 destroy_pipeline(gpu, meshlet_pipeline)
                 immediately := !pipeline_is_valid(meshlet_pipeline)
                 
-                raster_description := DefaultRasterDesc
+                raster_description: Raster_Desc
                 raster_description.depth_format = stuff.depth_buffer.format
-                raster_description.color_targets = {
-                    { format = stuff.color_buffer.format, write_mask = DefaulColorMask },
-                }
+                raster_description.color_target_formats = { stuff.color_buffer.format }
                 raster_description.blendstate = &Blend_Desc{ **DefaultBlendDesc }
                 // :Stencil: 
                 
@@ -814,10 +812,8 @@ main :: proc () {
             destroy_pipeline(gpu, pipelines.ui)
             immediately := !pipeline_is_valid(pipelines.ui)
             
-            raster_description := DefaultRasterDesc
-            raster_description.color_targets = {
-                { format = stuff.color_buffer.format, write_mask = DefaulColorMask },
-            }
+            raster_description: Raster_Desc
+            raster_description.color_target_formats = { stuff.color_buffer.format }
             raster_description.blendstate = &Blend_Desc { **DefaultBlendDesc }
             raster_description.blendstate.src_color_factor = .SRC_ALPHA
             raster_description.blendstate.dst_color_factor = .ONE_MINUS_SRC_ALPHA
@@ -1499,8 +1495,13 @@ cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelin
     }
     
     gpu_begin_rendering(gpu, cmd, desc)
+        
         gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
         gpu_set_scissor(cmd,  size = gpu.swapchain_size)
+        gpu_set_color_write_mask(cmd, 0, { .R, .G, .B, .A })
+        gpu_set_depth_state(cmd, depth_test_enable = true, depth_write_enable = true, depth_compare_op = .GREATER)
+        gpu_set_cull_state(cmd, { .BACK }, .COUNTER_CLOCKWISE)
+        gpu_set_rasterization_samples(cmd, ._1)
         
         // @speed only record if requested by caller(i.e. when it will actually be displayed
         vk.CmdBeginQuery(cmd, stats_pool, query_index, {})

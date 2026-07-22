@@ -62,7 +62,7 @@ void main() {
     uint top_level_index = data.frame_heap_offset + data.top_level_acceleration_structure_index;
     rayQueryEXT ray_query;
     rayQueryInitializeEXT(ray_query, top_levels[top_level_index], gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, mesh_result.p, 0, sun_direction, 1000);
-    // rayQueryProceedEXT(ray_query);
+    rayQueryProceedEXT(ray_query);
     
     if (rayQueryGetIntersectionTypeEXT(ray_query, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
         // hit nothing
