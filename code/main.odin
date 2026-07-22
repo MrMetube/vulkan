@@ -54,8 +54,10 @@ Image :: struct {
     storage_index: Texture_Index,
 }
 
+// @todo cleanup Texture_Index
 // @waste do we really need more then 65535 textures? how much memory would that many 1k (compressed) textures even require?
 Texture_Index :: distinct u32
+Sampler_Index :: distinct u32
 
 Depth_Mip :: struct {
     size: uv2,
@@ -106,7 +108,6 @@ Debug :: struct {
     occlusion_enabled: bool,
     display_pyramid:   bool,
     display_pyramid_mip_level: i32,
-    raytracing_enabled: bool,
     
     cpu_time:  f64,
     gpu_time:  f64,
@@ -171,7 +172,9 @@ Draw_Data :: struct #all_or_none { // :Shader:
     frustum:       [4] f32,
     
     // bindings
-    depth_pyramid_index: Texture_Index,
+    frame_heap_offset:                      u32,
+    depth_pyramid_index:                    Texture_Index,
+    top_level_acceleration_structure_index: u32,
     
     draw_command_buffer:       vk.DeviceAddress "Draw_Command", // task
     meshlet_visibility_buffer: vk.DeviceAddress "uint",         // task
@@ -830,21 +833,28 @@ main :: proc () {
         ////////////////////////////////////////////////
         // @waste texture management and draw "generation" only really need to happen once per "level load" as there is no streaming in of data.
         
+        // @todo Index type
+        frame_heap_offset: u32 // @todo can we just offset the heap's address when we bind it?
+        top_level_acceleration_structure_index: u32
         {
             cpu_profile_scope("Setup Descriptor Heap")
             
-            append_texture :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index_offset: ^Texture_Index, image: Image, sampled: bool, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) -> Texture_Index {
+            write_texture :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index_offset: ^Texture_Index, image: Image, sampled: bool, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) -> Texture_Index {
                 result := index_offset^
                 index_offset^ += 1
                 write_texture_to_heap(gpu, heap, result, image, sampled ? .SAMPLED_IMAGE : .STORAGE_IMAGE, mip_base, mip_count)
                 return result
             }
             
-            descriptor_offset := cast(Texture_Index) (DescriptorStaticLimit + frame_index * DescriptorPerFrameLimit)
+            descriptor_offset := cast(Texture_Index) (frame_index * DescriptorPerFrameLimit)
             
             // @todo add a null texture, which is a bright debug color so that uninitialized indices(0) are easy to find
             // nil_index := append_texture(gpu, &descriptor_heap, &descriptor_offset, nil_texture, true)
             descriptor_offset += 1
+            
+            // @todo make the null texture not part of the per frame offset, its very texture specific
+            frame_heap_offset = cast(u32) descriptor_offset
+            
             
             // @todo when would we not want to get the sample/storage descriptors of a texture we uploaded? should this not
             // just be part of the upload code?
@@ -852,17 +862,21 @@ main :: proc () {
             // @volatile draws assume that their texture indices start at index 0. Add some kind of base offset that the shader add to a draws
             // texture index(if its not 0?) to get its texture, or do this offsetting on draw generation on the cpu.
             for &texture in textures {
-                texture.sampled_index = append_texture(gpu, &descriptor_heap, &descriptor_offset, texture, true)
+                texture.sampled_index = write_texture(gpu, &descriptor_heap, &descriptor_offset, texture, true)
             }
             
-            stuff.depth_buffer.sampled_index  = append_texture(gpu, &descriptor_heap, &descriptor_offset, stuff.depth_buffer,  true)
-            stuff.depth_pyramid.sampled_index = append_texture(gpu, &descriptor_heap, &descriptor_offset, stuff.depth_pyramid, true)
-            stuff.depth_pyramid.storage_index = append_texture(gpu, &descriptor_heap, &descriptor_offset, stuff.depth_pyramid, false)
+            stuff.depth_buffer.sampled_index  = write_texture(gpu, &descriptor_heap, &descriptor_offset, stuff.depth_buffer,  true)
+            stuff.depth_pyramid.sampled_index = write_texture(gpu, &descriptor_heap, &descriptor_offset, stuff.depth_pyramid, true)
+            stuff.depth_pyramid.storage_index = write_texture(gpu, &descriptor_heap, &descriptor_offset, stuff.depth_pyramid, false)
             
             for &mip, mip_level in stuff.depth_pyramid_mips {
-                mip.sampled_index = append_texture(gpu, &descriptor_heap, &descriptor_offset, stuff.depth_pyramid, true,  cast(u32) mip_level, 1)
-                mip.storage_index = append_texture(gpu, &descriptor_heap, &descriptor_offset, stuff.depth_pyramid, false, cast(u32) mip_level, 1)
+                mip.sampled_index = write_texture(gpu, &descriptor_heap, &descriptor_offset, stuff.depth_pyramid, true,  cast(u32) mip_level, 1)
+                mip.storage_index = write_texture(gpu, &descriptor_heap, &descriptor_offset, stuff.depth_pyramid, false, cast(u32) mip_level, 1)
             }
+            
+            write_acceleration_structure_to_heap(gpu, &descriptor_heap, cast(u32) descriptor_offset, top_level)
+            top_level_acceleration_structure_index = cast(u32) descriptor_offset
+            descriptor_offset += 1
             
             // @todo add a barrier after modifying the heap to ensure descriptor caches are flushed
         }
@@ -933,7 +947,7 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        cull_and_render(gpu, cmd, .early, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug)
+        cull_and_render(gpu, cmd, .early, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug, frame_heap_offset, top_level_acceleration_structure_index)
         stats_pool_query_index += 1
         
         ////////////////////////////////////////////////
@@ -978,10 +992,10 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        cull_and_render(gpu, cmd, .late, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug)
+        cull_and_render(gpu, cmd, .late, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug, frame_heap_offset, top_level_acceleration_structure_index)
         stats_pool_query_index += 1
         
-        cull_and_render(gpu, cmd, .post, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug)
+        cull_and_render(gpu, cmd, .post, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug, frame_heap_offset, top_level_acceleration_structure_index)
         stats_pool_query_index += 1
         
         ////////////////////////////////////////////////
@@ -1221,6 +1235,7 @@ main :: proc () {
     for it in bottom_levels {
         vk.DestroyAccelerationStructureKHR(gpu.device, it.acceleration_structure, nil)
     }
+    delete(bottom_levels, context.allocator) // @volatile
     vk.DestroyAccelerationStructureKHR(gpu.device, top_level.acceleration_structure, nil)
     
     for &bump in frame_bump_allocators {
@@ -1309,7 +1324,7 @@ get_next_image :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, frame_index: u64) ->
     return true
 }
 
-cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelines, shaders: Shaders, buffers: Buffers, bump: ^Bump_Allocator,  stats_pool: vk.QueryPool, query_index: u32, stuff: ^Render_Targets_And_Stuff, draw_count: u32, dvb_and_mvb_cleared: ^bool, view_from_world: m4, screen_from_view: m4, near_z, draw_distance: f32, debug: Debug) {
+cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelines, shaders: Shaders, buffers: Buffers, bump: ^Bump_Allocator,  stats_pool: vk.QueryPool, query_index: u32, stuff: ^Render_Targets_And_Stuff, draw_count: u32, dvb_and_mvb_cleared: ^bool, view_from_world: m4, screen_from_view: m4, near_z, draw_distance: f32, debug: Debug, frame_heap_offset, top_level_acceleration_structure_index: u32) {
     //
     // early pass - frustum cull             & fill objects that *were* visible last frame
     //  late pass - frustum & occlusion cull & fill objects that were *not* visible last frame
@@ -1383,7 +1398,10 @@ cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelin
         screen_size  = cast(v2) gpu.swapchain_size,
         view_from_world = view_from_world,
         
-        depth_pyramid_index = stuff.depth_pyramid.sampled_index,
+        frame_heap_offset                      = frame_heap_offset,
+        depth_pyramid_index                    = stuff.depth_pyramid.sampled_index,
+        top_level_acceleration_structure_index = top_level_acceleration_structure_index,
+        
         draw_command_buffer       = buffers.draw_commands.gpu.p,
         draw_buffer               = buffers.draws.gpu.p,
         meshlet_buffer            = buffers.meshlets.gpu.p,

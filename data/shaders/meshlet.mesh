@@ -76,6 +76,7 @@ void main() {
         Mesh_Result result;
         
         result.uv       = unpackHalf2x16(vertex.v.uv);
+        result.p        = world_p;
         result.normal   = world_n;
         result.tangent  = world_t;
         

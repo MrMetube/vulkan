@@ -1794,13 +1794,13 @@ create_descriptor_heap :: proc (gpu: ^Gpu) -> Descriptor_Heap {
     resource_alignment  := max(gpu.heap_properties.bufferDescriptorAlignment, gpu.heap_properties.imageDescriptorAlignment)
     
     resource_reserved   := gpu.heap_properties.minResourceHeapReservedRange
-    resource_total_size := resource_reserved + resource_size * resource_count
+    resource_total_size := resource_size * resource_count + resource_reserved
     
     sampler_count      := cast(vk.DeviceSize) DescriptorSamplerLimit
     sampler_size       := gpu.heap_properties.samplerDescriptorSize
     sampler_alignment  := gpu.heap_properties.samplerDescriptorAlignment
     sampler_reserved   := gpu.heap_properties.minSamplerHeapReservedRange
-    sampler_total_size := sampler_reserved + sampler_size * sampler_count
+    sampler_total_size := sampler_size * sampler_count + sampler_reserved
     
     result: Descriptor_Heap
     result.resources = gpu_allocate_slice(gpu, [] u8, resource_total_size, alignment = cast(umm) resource_alignment, usage = { .DESCRIPTOR_HEAP_EXT } )
@@ -1815,11 +1815,10 @@ create_descriptor_heap :: proc (gpu: ^Gpu) -> Descriptor_Heap {
     result.resource_size = cast(u32) resource_size
     result.sampler_size  = cast(u32) sampler_size
     
-    // :SamplerHack: fill samplers[0] with texture sampler and samplers[2] with depth sampler
-    descriptor_size := resource_size // :SamplerHack:
-    write_descriptor(gpu, .LINEAR, .LINEAR,  .REPEAT,        .WEIGHTED_AVERAGE, result.samplers.cpu[0 * descriptor_size:][:sampler_size], anisotropy = true)
-    write_descriptor(gpu, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .WEIGHTED_AVERAGE, result.samplers.cpu[1 * descriptor_size:][:sampler_size])
-    write_descriptor(gpu, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .MIN,              result.samplers.cpu[2 * descriptor_size:][:sampler_size])
+    // :SamplerHack:
+    /* Texture */ write_sampler_to_heap(gpu, &result, 0, .LINEAR, .LINEAR,  .REPEAT,        .WEIGHTED_AVERAGE, anisotropy = true)
+    /* Filter  */ write_sampler_to_heap(gpu, &result, 1, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .WEIGHTED_AVERAGE)
+    /* Depth   */ write_sampler_to_heap(gpu, &result, 2, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .MIN)
     
     return result
 }
@@ -1830,15 +1829,14 @@ destroy_descriptor_heap :: proc (gpu: ^Gpu, heap: Descriptor_Heap) {
 }
 
 gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: ^Descriptor_Heap) {
-    byte_size :: proc (s: Gpu_Slice($T)) -> vk.DeviceSize {
-        return cast(vk.DeviceSize) len(s.cpu) * size_of(T)
-    }
+    #assert(type_of(heap.samplers)  == Gpu_Slice(u8))
+    #assert(type_of(heap.resources) == Gpu_Slice(u8))
     
     sampler_info := vk.BindHeapInfoEXT {
         sType = .BIND_HEAP_INFO_EXT,
         heapRange = {
             address = heap.samplers.gpu.p,
-            size    = byte_size(heap.samplers),
+            size    = cast(vk.DeviceSize) len(heap.samplers.cpu),
         },
         reservedRangeOffset = heap.sampler_reserved_offset,
         reservedRangeSize   = heap.sampler_reserved_size,
@@ -1846,9 +1844,9 @@ gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: ^Descriptor_Heap) {
     
     resource_info := vk.BindHeapInfoEXT {
         sType = .BIND_HEAP_INFO_EXT,
-        heapRange = { 
+        heapRange = {
             address = heap.resources.gpu.p,
-            size    = byte_size(heap.resources),
+            size    = cast(vk.DeviceSize) len(heap.resources.cpu),
         },
         reservedRangeOffset = heap.resource_reserved_offset,
         reservedRangeSize   = heap.resource_reserved_size,
@@ -1859,22 +1857,15 @@ gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: ^Descriptor_Heap) {
 }
 
 write_texture_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: Texture_Index, image: Image, image_type: vk.DescriptorType, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) {
-    descriptor_size := heap.resource_size
-    descriptor_slot := heap.resources.cpu[cast(u32) index * descriptor_size:][:descriptor_size]
-    write_descriptor(gpu, image.image, image.format, mip_base, mip_count, image_type, descriptor_slot)
-}
-
-write_descriptor :: proc { write_descriptor_image, write_descriptor_buffer, write_descriptor_sampler }
-write_descriptor_image :: proc (gpu: ^Gpu, image: vk.Image, format: vk.Format, mip_base: u32, mip_count: u32, type: vk.DescriptorType, descriptor_heap_slot: [] u8) {
-    aspect_mask := get_image_aspect_mask(format)
+    aspect_mask := get_image_aspect_mask(image.format)
     
     image_info := vk.ImageDescriptorInfoEXT {
         sType = .IMAGE_DESCRIPTOR_INFO_EXT,
         pView = &vk.ImageViewCreateInfo {
             sType = .IMAGE_VIEW_CREATE_INFO,
-            image    = image,
+            image    = image.image,
             viewType = .D2,
-            format   = format,
+            format   = image.format,
             subresourceRange = { aspectMask = aspect_mask, baseMipLevel = mip_base, levelCount = mip_count, layerCount = 1 },
         },
         layout = .GENERAL,
@@ -1882,28 +1873,36 @@ write_descriptor_image :: proc (gpu: ^Gpu, image: vk.Image, format: vk.Format, m
     
     info := vk.ResourceDescriptorInfoEXT {
         sType = .RESOURCE_DESCRIPTOR_INFO_EXT,
-        type = type,
+        type = image_type,
         data = { pImage = &image_info },
     }
     
-    range := vk.HostAddressRangeEXT { address = raw_data(descriptor_heap_slot), size = len(descriptor_heap_slot) }
+    offset := cast(u32) index * heap.resource_size
+    range := vk.HostAddressRangeEXT {
+        address = &heap.resources.cpu[offset],
+        size = cast(int) heap.resource_size
+    }
     check(vk.WriteResourceDescriptorsEXT(gpu.device, 1, &info, &range))
 }
 
-write_descriptor_buffer :: proc (gpu: ^Gpu, address: vk.DeviceAddress, size: vk.DeviceSize, type: vk.DescriptorType, descriptor_heap_slot: [] u8) {
-    buffer_info := vk.DeviceAddressRangeEXT { address = address, size = size }
+write_acceleration_structure_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: u32, structure: Acceleration_Structure) {
+    address_info := vk.DeviceAddressRangeKHR { address = structure.address }
     
     info := vk.ResourceDescriptorInfoEXT {
         sType = .RESOURCE_DESCRIPTOR_INFO_EXT,
-        type = type,
-        data = { pAddressRange =  &buffer_info },
+        type = .ACCELERATION_STRUCTURE_KHR,
+        data = { pAddressRange = &address_info },
     }
     
-    range := vk.HostAddressRangeEXT { address = raw_data(descriptor_heap_slot), size = len(descriptor_heap_slot) }
+    offset := index * heap.resource_size
+    range := vk.HostAddressRangeEXT {
+        address = &heap.resources.cpu[offset],
+        size = cast(int) heap.resource_size
+    }
     check(vk.WriteResourceDescriptorsEXT(gpu.device, 1, &info, &range))
 }
 
-write_descriptor_sampler :: proc (gpu: ^Gpu, filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, address_mode: vk.SamplerAddressMode, reduction_mode: vk.SamplerReductionMode, descriptor_heap_slot: [] u8, anisotropy: b32 = false) {
+write_sampler_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: Sampler_Index, filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, address_mode: vk.SamplerAddressMode, reduction_mode: vk.SamplerReductionMode, anisotropy: b32 = false) {
     info := vk.SamplerCreateInfo {
         sType = .SAMPLER_CREATE_INFO,
         
@@ -1931,7 +1930,11 @@ write_descriptor_sampler :: proc (gpu: ^Gpu, filter: vk.Filter, mipmap_mode: vk.
         info.pNext = &reduction_info
     }
     
-    range := vk.HostAddressRangeEXT { address = raw_data(descriptor_heap_slot), size = len(descriptor_heap_slot) }
+    sampler_offset := cast(u32) index * heap.sampler_size
+    range := vk.HostAddressRangeEXT {
+        address = &heap.samplers.cpu[sampler_offset], 
+        size = cast(int) heap.sampler_size
+    }
     check(vk.WriteSamplerDescriptorsEXT(gpu.device, 1, &info, &range))
 }
 

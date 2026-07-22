@@ -29,6 +29,7 @@ struct Task_Result {
 };
 
 struct Mesh_Result {
+    vec3 p;
     vec3 normal;
     vec4 tangent;
     vec2 uv;

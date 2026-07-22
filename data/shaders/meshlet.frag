@@ -1,5 +1,11 @@
 #version 460
 
+#define Raytrace 0
+
+#if Raytrace
+#extension GL_EXT_ray_query: require
+#endif // Raytrace
+
 #include "common.glsl"
 
 // layout(constant_id = 0) const bool Late = false; unused
@@ -15,6 +21,10 @@ layout(location = 6) flat   in uint debug_index;
 
 layout(descriptor_heap) uniform texture2D Textures[];
 layout(descriptor_heap) uniform sampler   Samplers[];
+#if Raytrace
+layout(descriptor_heap) uniform accelerationStructureEXT top_levels[];
+#endif // Raytrace
+
 
 layout(location = 0) out vec4 pixel_result;
 
@@ -26,17 +36,17 @@ void main() {
         Draw draw = data.draw_buffer[draw_index].v;
         vec2 uv = mesh_result.uv;
         
-        // @volatile heap StaticLimit. just move those to the end of the heap and forget about them.
+        // @volatile the draws should have the correct index *or* the data should provide the per frame offset
         // @speed if the texture index is uniform over the lanes, then nonuniformEXT() is a pessimisation.
         if (draw.albedo_texture > 0) {
-            albedo = texture(sampler2D(Textures[nonuniformEXT(65536 + 1 + draw.albedo_texture)], Samplers[Sampler_Texture]), uv);
+            albedo = texture(sampler2D(Textures[nonuniformEXT(data.frame_heap_offset + draw.albedo_texture)], Samplers[Sampler_Texture]), uv);
         }
         if (draw.normal_texture > 0) {
-            nnormal = texture(sampler2D(Textures[nonuniformEXT(65536 + 1 + draw.normal_texture)], Samplers[Sampler_Texture]), uv).rgb;
+            nnormal = texture(sampler2D(Textures[nonuniformEXT(data.frame_heap_offset + draw.normal_texture)], Samplers[Sampler_Texture]), uv).rgb;
             nnormal = nnormal * 2 - 1;
         }
         if (draw.emmisive_texture > 0) {
-            emmisive = texture(sampler2D(Textures[nonuniformEXT(65536 + 1 + draw.emmisive_texture)], Samplers[Sampler_Texture]), uv).rgb;
+            emmisive = texture(sampler2D(Textures[nonuniformEXT(data.frame_heap_offset + draw.emmisive_texture)], Samplers[Sampler_Texture]), uv).rgb;
         }
     }
     
@@ -45,7 +55,22 @@ void main() {
     vec3 normal = normalize(nnormal.x * mesh_result.tangent.xyz + nnormal.y * binormal + nnormal.z * mesh_result.normal);
     
     // @todo lighting
-    float ndotl = max(dot(normal, normalize(vec3(-1, 1, -1))), 0);
+    vec3 sun_direction = normalize(vec3(-1, 1, -1));
+    float ndotl = max(dot(normal, sun_direction), 0);
+    
+#if Raytrace
+    uint top_level_index = data.frame_heap_offset + data.top_level_acceleration_structure_index;
+    rayQueryEXT ray_query;
+    rayQueryInitializeEXT(ray_query, top_levels[top_level_index], gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, mesh_result.p, 0, sun_direction, 1000);
+    // rayQueryProceedEXT(ray_query);
+    
+    if (rayQueryGetIntersectionTypeEXT(ray_query, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
+        // hit nothing
+    } else {
+        // ndotl *= 0.1;
+    }
+#endif // Raytrace
+    
     vec4 color = vec4(albedo.rgb * sqrt(ndotl + 0.005) + emmisive, albedo.a);
     
     if (Post && albedo.a < 0.5) discard;

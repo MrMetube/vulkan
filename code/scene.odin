@@ -50,6 +50,7 @@ build_bottom_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, 
             pGeometries   = &vk.AccelerationStructureGeometryKHR {
                 sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
                 
+                flags = { .OPAQUE },
                 geometryType = .TRIANGLES,
                 geometry = {
                     triangles = {
@@ -130,7 +131,7 @@ build_top_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, com
         
         instance = {
             transform           = { transmute([3][4] f32) transform },
-            mask                = 0xFF,
+            mask                = 0xFF, // @volatile must agree with the rayQuery's in shaders
             instanceCustomIndex = cast(u32) index,
             instanceShaderBindingTableRecordOffset = 0,
             accelerationStructureReference = cast(u64) bottom_level_acceleration_structures[draw.mesh_index].address,
@@ -150,6 +151,7 @@ build_top_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, com
         pGeometries   = &vk.AccelerationStructureGeometryKHR {
             sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
             
+            flags = { .OPAQUE },
             geometryType = .INSTANCES,
             geometry = {
                 instances = {
