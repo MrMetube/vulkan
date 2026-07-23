@@ -176,16 +176,16 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
                 material := materials[draw.mesh_index - cast(u32) first_mesh_offset]
                 if material != nil {
                     if material.pbr_metallic_roughness.base_color_texture.texture != nil {
-                        draw.albedo_texture = cast(Texture_Index) cgltf.texture_index(data, material.pbr_metallic_roughness.base_color_texture.texture)
+                        draw.albedo_texture = cast(u32) cgltf.texture_index(data, material.pbr_metallic_roughness.base_color_texture.texture)
                     } else if material.pbr_specular_glossiness.diffuse_texture.texture != nil {
-                        draw.albedo_texture = cast(Texture_Index) cgltf.texture_index(data, material.pbr_specular_glossiness.diffuse_texture.texture)
+                        draw.albedo_texture = cast(u32) cgltf.texture_index(data, material.pbr_specular_glossiness.diffuse_texture.texture)
                     }
                     if material.normal_texture.texture != nil {
-                        draw.normal_texture = cast(Texture_Index) cgltf.texture_index(data, material.normal_texture.texture)
+                        draw.normal_texture = cast(u32) cgltf.texture_index(data, material.normal_texture.texture)
                     }
                     // @todo load specular texture
                     if material.emissive_texture.texture != nil {
-                        draw.emmisive_texture = cast(Texture_Index) cgltf.texture_index(data, material.emissive_texture.texture)
+                        draw.emmisive_texture = cast(u32) cgltf.texture_index(data, material.emissive_texture.texture)
                     }
                 }
                 

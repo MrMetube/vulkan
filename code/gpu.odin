@@ -101,6 +101,11 @@ GpuAllocation :: struct {
     offset: vk.DeviceSize,
 }
 
+// @study which other caches might need to be flushed explicitely by specifying a hazard?
+Hazards :: bit_set[enum {
+    descriptors, 
+}]
+
 Blend    :: vk.BlendOp
 Factor   :: vk.BlendFactor
 
@@ -204,7 +209,7 @@ Descriptor_Heap :: struct {
 ////////////////////////////////////////////////
 
 gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
-    cpu_profile_procedure()
+    profile_procedure()
     
     gpu: Gpu
     
@@ -226,7 +231,7 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
         vk.load_proc_addresses_global(get_instance_proc)
         
         {
-            cpu_profile_scope("Vulkan Instance")
+            profile_scope("Vulkan Instance")
             
             instance_extension_names: [dynamic; 16] cstring
             if ODIN_OS == .Windows {
@@ -281,9 +286,9 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
                 }
             }
             
-            cpu_begin_profile_zone("Create Instance Call")
+            profile_zone_begin("Create Instance Call")
             check(vk.CreateInstance(&instance_create_info, nil, &gpu.instance))
-            cpu_end_profile_zone()
+            profile_zone_end()
             
             vk.load_proc_addresses_instance(gpu.instance)
             
@@ -385,7 +390,7 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
     }
     
     {
-        cpu_profile_scope("Device")
+        profile_scope("Device")
         device_extensions := [dynamic; 128] cstring { 
             vk.KHR_SWAPCHAIN_EXTENSION_NAME,
             vk.EXT_MESH_SHADER_EXTENSION_NAME,
@@ -572,9 +577,9 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
             chain(&ppNext, &f_rayquery)
         }
         
-        cpu_begin_profile_zone("Create Device Call")
+        profile_zone_begin("Create Device Call")
         check(vk.CreateDevice(gpu.physical_device, &device_create_info, nil, &gpu.device))
-        cpu_end_profile_zone()
+        profile_zone_end()
         
         vk.load_proc_addresses_device(gpu.device)
         
@@ -616,7 +621,7 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
     
     ////////////////////////////////////////////////
     
-    cpu_begin_profile_zone("Swapchain")
+    profile_zone_begin("Swapchain")
     get_swapchain_format: {
         format_count: u32
         check(vk.GetPhysicalDeviceSurfaceFormatsKHR(gpu.physical_device, gpu.surface, &format_count, nil))
@@ -643,7 +648,7 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
     
     ok := gpu_recreate_swapchain_if_needed(&gpu, vsync)
     assert(ok)
-    cpu_end_profile_zone()
+    profile_zone_end()
     
     return gpu
 }
@@ -739,9 +744,9 @@ gpu_recreate_swapchain_if_needed :: proc (gpu: ^Gpu, vsync: bool, force_recreati
     
     previous_image_count := cast(u32) len(gpu.swapchain_images)
     
-    cpu_begin_profile_zone("Create Swapchain Call")
+    profile_zone_begin("Create Swapchain Call")
     check(vk.CreateSwapchainKHR(gpu.device, &swapchain_create_info, nil, &gpu.swapchain))
-    cpu_end_profile_zone()
+    profile_zone_end()
     
     image_count: u32
     check(vk.GetSwapchainImagesKHR(gpu.device, gpu.swapchain, &image_count, nil))
@@ -1309,7 +1314,7 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
     }
     
     color_attachments: [dynamic; 32] vk.PipelineColorBlendAttachmentState
-    for target in info.color_target_formats {
+    for _ in info.color_target_formats {
         attachment := vk.PipelineColorBlendAttachmentState {}
         
         if info.blendstate != nil {
@@ -1592,7 +1597,7 @@ gpu_fill_memory_slice   :: proc (cmd: vk.CommandBuffer, destination: Gpu_Slice($
     vk.CmdFillBuffer(cmd, buffer, offset, size, value)
 }
 
-gpu_barrier :: proc (cmd: vk.CommandBuffer, before, after: vk.PipelineStageFlags2) {
+gpu_barrier :: proc (cmd: vk.CommandBuffer, before, after: vk.PipelineStageFlags2, hazards: Hazards = {}) {
     info := vk.DependencyInfo {
         sType = .DEPENDENCY_INFO,
         
@@ -1606,6 +1611,10 @@ gpu_barrier :: proc (cmd: vk.CommandBuffer, before, after: vk.PipelineStageFlags
             srcAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
             dstAccessMask = { .MEMORY_READ, .MEMORY_WRITE },
         },
+    }
+    
+    if .descriptors in hazards {
+        info.pMemoryBarriers[0].dstAccessMask += { .SAMPLER_HEAP_READ_EXT, .RESOURCE_HEAP_READ_EXT }
     }
     
     vk.CmdPipelineBarrier2(cmd, &info)
@@ -1743,9 +1752,7 @@ gpu_set_rasterization_samples :: proc (cmd: vk.CommandBuffer, sample_count: vk.S
 
 
 
-gpu_begin_rendering :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, desc: Render_Pass_Desc) {
-    render_size := gpu.swapchain_size
-    
+gpu_begin_rendering :: proc (cmd: vk.CommandBuffer, desc: Render_Pass_Desc, render_size: uv2) {
     color_attachments: [dynamic; 64] vk.RenderingAttachmentInfo
     for target in desc.color_targets {
         it := append_into(&color_attachments)
@@ -1930,9 +1937,7 @@ gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: ^Descriptor_Heap) {
     vk.CmdBindResourceHeapEXT(cmd, &resource_info)
 }
 
-// @todo VK_ACCESS_2_RESOURCE_HEAP_READ_BIT_EXT or VK_ACCESS_2_SAMPLER_HEAP_READ_BIT_EXT. are the barrier bits
-// @speed this can write multiple descriptors in a single call, so we could expose a version that passes a base index and then a slice of images
-write_texture_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: Texture_Index, image: Image, image_type: vk.DescriptorType, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) {
+write_texture_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: u32, image: Image, image_type: vk.DescriptorType, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) {
     aspect_mask := get_image_aspect_mask(image.format)
     
     image_info := vk.ImageDescriptorInfoEXT {
@@ -1953,10 +1958,10 @@ write_texture_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: Texture
         data = { pImage = &image_info },
     }
     
-    offset := cast(u32) index * heap.resource_size
+    offset := index * heap.resource_size
     range := vk.HostAddressRangeEXT {
         address = &heap.resources.cpu[offset],
-        size    = cast(int) heap.resource_size
+        size    = cast(int) heap.resource_size,
     }
     check(vk.WriteResourceDescriptorsEXT(gpu.device, 1, &info, &range))
 }
@@ -1973,12 +1978,12 @@ write_acceleration_structure_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap,
     offset := index * heap.resource_size
     range := vk.HostAddressRangeEXT {
         address = &heap.resources.cpu[offset],
-        size    = cast(int) heap.resource_size
+        size    = cast(int) heap.resource_size,
     }
     check(vk.WriteResourceDescriptorsEXT(gpu.device, 1, &info, &range))
 }
 
-write_sampler_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: Sampler_Index, filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, address_mode: vk.SamplerAddressMode, reduction_mode: vk.SamplerReductionMode, anisotropy: b32 = false) {
+write_sampler_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: u32, filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, address_mode: vk.SamplerAddressMode, reduction_mode: vk.SamplerReductionMode, anisotropy: b32 = false) {
     info := vk.SamplerCreateInfo {
         sType = .SAMPLER_CREATE_INFO,
         
@@ -2006,10 +2011,10 @@ write_sampler_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: Sampler
         info.pNext = &reduction_info
     }
     
-    sampler_offset := cast(u32) index * heap.sampler_size
+    sampler_offset := index * heap.sampler_size
     range := vk.HostAddressRangeEXT {
         address = &heap.samplers.cpu[sampler_offset], 
-        size    = cast(int) heap.sampler_size
+        size    = cast(int) heap.sampler_size,
     }
     check(vk.WriteSamplerDescriptorsEXT(gpu.device, 1, &info, &range))
 }

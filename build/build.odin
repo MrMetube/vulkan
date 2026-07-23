@@ -59,27 +59,25 @@ compile_shaders :: proc () {
         }
     }
     
-    if strict_shaders {
-        success := true
-        states: [dynamic] os.Process_State
-        for p, index in procs {
-            state, _ := os.process_wait(p)
-            append(&states, state)
-        }
-        
-        for state, index in states {
-            if state.exit_code != 0 {
-                if success { fmt.printfln("") }
-                success = false
-                fmt.printfln("Error: Failed to compile %v:", shaders[index])
-            }
-        }
-        
-        if !success {
-            fmt.printfln("\nFailed to compile shaders. Stopping build process.")
-            os.exit(1)
-        }
-        
-        fmt.printfln("\nAll shaders compiled.\n")
+    success := true
+    states: [dynamic] os.Process_State
+    for p, index in procs {
+        state, _ := os.process_wait(p)
+        append(&states, state)
     }
+    
+    for state, index in states {
+        if state.exit_code != 0 {
+            if success { fmt.printfln("") }
+            success = false
+            fmt.printfln("Error: Failed to compile %v:", shaders[index])
+        }
+    }
+    
+    if !success {
+        fmt.printfln("\nFailed to compile shaders. Stopping build process.")
+        os.exit(1)
+    }
+    
+    fmt.printfln("\nAll shaders compiled.\n")
 }
