@@ -975,7 +975,6 @@ gpu_copy_to_texture_immediately :: proc (gpu: ^Gpu, texture: Image, data: [] u8)
 }
 
 select_memory_type_and_allocate :: proc (gpu: ^Gpu, requirements: vk.MemoryRequirements, memory: Memory_Kind, add_device_address_flag := false) -> vk.DeviceMemory {
-    
     /* 
     
                DEVICE_LOCAL               - static data, compute only buffers
@@ -1931,6 +1930,8 @@ gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: ^Descriptor_Heap) {
     vk.CmdBindResourceHeapEXT(cmd, &resource_info)
 }
 
+// @todo VK_ACCESS_2_RESOURCE_HEAP_READ_BIT_EXT or VK_ACCESS_2_SAMPLER_HEAP_READ_BIT_EXT. are the barrier bits
+// @speed this can write multiple descriptors in a single call, so we could expose a version that passes a base index and then a slice of images
 write_texture_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: Texture_Index, image: Image, image_type: vk.DescriptorType, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) {
     aspect_mask := get_image_aspect_mask(image.format)
     
@@ -1955,7 +1956,7 @@ write_texture_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: Texture
     offset := cast(u32) index * heap.resource_size
     range := vk.HostAddressRangeEXT {
         address = &heap.resources.cpu[offset],
-        size = cast(int) heap.resource_size
+        size    = cast(int) heap.resource_size
     }
     check(vk.WriteResourceDescriptorsEXT(gpu.device, 1, &info, &range))
 }
@@ -1972,7 +1973,7 @@ write_acceleration_structure_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap,
     offset := index * heap.resource_size
     range := vk.HostAddressRangeEXT {
         address = &heap.resources.cpu[offset],
-        size = cast(int) heap.resource_size
+        size    = cast(int) heap.resource_size
     }
     check(vk.WriteResourceDescriptorsEXT(gpu.device, 1, &info, &range))
 }
@@ -2008,7 +2009,7 @@ write_sampler_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: Sampler
     sampler_offset := cast(u32) index * heap.sampler_size
     range := vk.HostAddressRangeEXT {
         address = &heap.samplers.cpu[sampler_offset], 
-        size = cast(int) heap.sampler_size
+        size    = cast(int) heap.sampler_size
     }
     check(vk.WriteSamplerDescriptorsEXT(gpu.device, 1, &info, &range))
 }

@@ -170,6 +170,7 @@ Draw_Data :: struct #all_or_none { // :Shader:
     near_z, far_z: f32,
     pyramid_size:  v2,
     frustum:       [4] f32,
+    sun_direction: v3,
     
     // bindings
     frame_heap_offset:                      u32,
@@ -378,7 +379,7 @@ main :: proc () {
     // @todo make a separate allocator for all the scene and geometry setup that we free once before the frame loop
     max_draw_visibility_count: u32
     scene_draws: [dynamic] Draw
-    
+    sun_direction: v3
     bottom_levels: [] Acceleration_Structure
     top_level:     Acceleration_Structure
     {
@@ -398,7 +399,7 @@ main :: proc () {
             print("\nLoading scene: %v\n", path)
             
             cpu_begin_profile_zone("load scene")
-            if !load_scene(&geometry, path, &scene_draws, &camera, &texture_paths) {
+            if !load_scene(&geometry, path, &scene_draws, &camera, &texture_paths, &sun_direction) {
                 os.exit(1)
             }
             cpu_end_profile_zone()
@@ -489,13 +490,12 @@ main :: proc () {
         max_draw_visibility_count = meshlet_visibility_count
         
         if raytracing_supported {
-            
             // @todo which pool?
-            queue := gpu.transfer_queue
-            pool  := gpu.transfer_command_pool
+            queue := gpu.general_queue
+            pool  := gpu.command_pools[0]
             
-            bottom_levels = build_bottom_level_acceleration_structures(gpu, queue, pool, &buffers, geometry, context.allocator, loading_scratch)
-            top_level = build_top_level_acceleration_structures(gpu, queue, pool, &buffers, scene_draws[:], bottom_levels, loading_scratch)
+            bottom_levels = build_bottom_level_acceleration_structures(gpu, queue, pool, &buffers, geometry, context.allocator,   loading_scratch)
+            top_level     = build_top_level_acceleration_structures(   gpu, queue, pool, &buffers, scene_draws[:], bottom_levels, loading_scratch)
         }
     }
     
@@ -943,7 +943,7 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        cull_and_render(gpu, cmd, .early, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug, frame_heap_offset, top_level_acceleration_structure_index)
+        cull_and_render(gpu, cmd, .early, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug, frame_heap_offset, top_level_acceleration_structure_index, sun_direction)
         stats_pool_query_index += 1
         
         ////////////////////////////////////////////////
@@ -988,10 +988,10 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        cull_and_render(gpu, cmd, .late, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug, frame_heap_offset, top_level_acceleration_structure_index)
+        cull_and_render(gpu, cmd, .late, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug, frame_heap_offset, top_level_acceleration_structure_index, sun_direction)
         stats_pool_query_index += 1
         
-        cull_and_render(gpu, cmd, .post, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug, frame_heap_offset, top_level_acceleration_structure_index)
+        cull_and_render(gpu, cmd, .post, pipelines, shaders, buffers, bump, stats_pool, stats_pool_query_index, &stuff, draw_count, &dvb_and_mvb_cleared, view_from_world, screen_from_view, near_z, draw_distance, debug, frame_heap_offset, top_level_acceleration_structure_index, sun_direction)
         stats_pool_query_index += 1
         
         ////////////////////////////////////////////////
@@ -1063,6 +1063,7 @@ main :: proc () {
                 
                 gpu_set_viewport(cmd, size = cast(v2) gpu.swapchain_size)
                 gpu_set_scissor(cmd,  size = gpu.swapchain_size)
+                gpu_set_input_assembly_state(cmd, .TRIANGLE_LIST)
                 
                 gpu_set_pipeline(cmd, pipelines.ui)
                 gpu_draw_indirect(cmd, ui_draw_command.gpu, ui_data.gpu)
@@ -1320,7 +1321,8 @@ get_next_image :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, frame_index: u64) ->
     return true
 }
 
-cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelines, shaders: Shaders, buffers: Buffers, bump: ^Bump_Allocator,  stats_pool: vk.QueryPool, query_index: u32, stuff: ^Render_Targets_And_Stuff, draw_count: u32, dvb_and_mvb_cleared: ^bool, view_from_world: m4, screen_from_view: m4, near_z, draw_distance: f32, debug: Debug, frame_heap_offset, top_level_acceleration_structure_index: u32) {
+// @todo a State :: struct for all rendering state that is not vulkan and just application related
+cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelines, shaders: Shaders, buffers: Buffers, bump: ^Bump_Allocator,  stats_pool: vk.QueryPool, query_index: u32, stuff: ^Render_Targets_And_Stuff, draw_count: u32, dvb_and_mvb_cleared: ^bool, view_from_world: m4, screen_from_view: m4, near_z, draw_distance: f32, debug: Debug, frame_heap_offset, top_level_acceleration_structure_index: u32, sun_direction: v3) {
     //
     // early pass - frustum cull             & fill objects that *were* visible last frame
     //  late pass - frustum & occlusion cull & fill objects that were *not* visible last frame
@@ -1380,6 +1382,10 @@ cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelin
     }
     cull_data.cpu.draw_group_count = draw_group_count.gpu.p
     
+    // @todo would it be simpler to split this by stage and let there be multiple pointers in the push constant instead of the fixed single one right now?
+    // that would mean that pipeline creation would need to know the amount of stages in the pipeline and allocate a pointer per stage
+    // then the apis would need to take a pointer per stage and push its data correctly
+    // if the user then wants to use a single struct and not split everything, they can just pass the same pointer twice.
     draw_data := bump_allocate(bump, Draw_Data)
     draw_data.cpu^ = {
         pyramid_size = cast(v2) stuff.depth_pyramid.size.xy,
@@ -1391,8 +1397,9 @@ cull_and_render :: proc (gpu: ^Gpu, cmd: vk.CommandBuffer, stage: Stage, pipelin
         
         flags = shader_culling_flags,
         
-        screen_size  = cast(v2) gpu.swapchain_size,
+        screen_size     = cast(v2) gpu.swapchain_size,
         view_from_world = view_from_world,
+        sun_direction   = sun_direction,
         
         frame_heap_offset                      = frame_heap_offset,
         depth_pyramid_index                    = stuff.depth_pyramid.sampled_index,

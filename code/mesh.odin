@@ -14,7 +14,7 @@ import "vendor:cgltf"
 // have their access synchronized, so that no 2 threads use the same memory and that no thread uses
 // memory that was freed, if any buffer needed to be reallocated to grow.
 //
-load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Draw, camera: ^Camera, texture_paths: ^[dynamic] string) -> bool {
+load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Draw, camera: ^Camera, texture_paths: ^[dynamic] string, sun_direction: ^v3) -> bool {
     path := fmt.ctprint(filepath)
     
     options: cgltf.options
@@ -150,6 +150,8 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
     
     assert(len(materials) + first_mesh_offset == len(geometry.meshes))
     
+    sun_direction^ = normalize(v3{-1, 1, -1})
+    
     for &node in data.nodes {
         if node.mesh != nil {
             world_matrix: m4
@@ -204,6 +206,13 @@ load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Dra
             camera.p           = t
             camera.orientation = r
             camera.fov_y       = cam.data.perspective.yfov
+        }
+        
+        if node.light != nil && node.light.type == .directional {
+            world_matrix: m4
+            cgltf.node_transform_world(&node, raw_data(&world_matrix))
+            t, _, _ := decompose_transform(world_matrix)
+            sun_direction^ = t
         }
     }
     
@@ -283,18 +292,28 @@ decompose_transform :: proc (m: m4) -> (translation: v3, rotation: q32, scale: v
 }
 
 append_mesh :: proc (geometry: ^Geometry, mesh_vertices: [] Vertex, mesh_indices: [] u32) {
+    remap := make([] u32, len(mesh_indices), context.temp_allocator)
+    unique_vertex_count := meshoptimizer.generateVertexRemap(raw_data(remap), raw_data(mesh_indices), len(mesh_indices), raw_data(mesh_vertices), len(mesh_vertices), size_of(mesh_vertices[0]))
+    
+    meshoptimizer.remapVertexBuffer(&mesh_vertices[0], &mesh_vertices[0], len(mesh_vertices), size_of(mesh_vertices[0]), &remap[0])
+    meshoptimizer.remapIndexBuffer(&mesh_indices[0],   &mesh_indices[0],  len(mesh_indices),                             &remap[0])
+    
+    mesh_vertices := mesh_vertices
+    mesh_vertices = mesh_vertices[:unique_vertex_count]
+    
+    ////////////////////////////////////////////////
+    
     meshoptimizer.optimizeVertexCache(&mesh_indices[0],  &mesh_indices[0], len(mesh_indices),                    len(mesh_vertices))
     meshoptimizer.optimizeVertexFetch(&mesh_vertices[0], &mesh_indices[0], len(mesh_indices), &mesh_vertices[0], len(mesh_vertices), size_of(Vertex)) 
     
     vertex_offset := cast(u32) len(geometry.vertices)
     append(&geometry.vertices, ..mesh_vertices)
     
-    mesh_vertices := mesh_vertices
     mesh_vertices  = geometry.vertices[vertex_offset:][:len(mesh_vertices)]
     
     mesh := append_into(&geometry.meshes)
-    mesh.vertex_offset  = vertex_offset
-    mesh.vertex_count   = cast(u32) len(mesh_vertices)
+    mesh.vertex_offset = vertex_offset
+    mesh.vertex_count  = cast(u32) len(mesh_vertices)
     
     ////////////////////////////////////////////////
     // compute cone for backface culling
@@ -322,8 +341,8 @@ append_mesh :: proc (geometry: ^Geometry, mesh_vertices: [] Vertex, mesh_indices
     LOD_Error  :: 1e-2
     
     for &lod in mesh.lods {
-        lod.index_count  = cast(u32) len(lod_indices)
         lod.index_offset = cast(u32) len(geometry.indices)
+        lod.index_count  = cast(u32) len(lod_indices)
         append(&geometry.indices, ..lod_indices)
         
         lod.meshlet_offset = cast(u32) len(geometry.meshlets)

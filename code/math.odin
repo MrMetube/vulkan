@@ -349,7 +349,7 @@ length_squared :: proc(vec: $V/ [$N] $T) -> T {
 }
 
 normalize :: proc(vec: $V) -> V {
-    result = vec / length(vec)
+    result := vec / length(vec)
     return result
 }
 

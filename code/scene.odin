@@ -22,9 +22,9 @@ build_bottom_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, 
     triangle_counts := make([] u32, len(geometry.meshes), scratch)
     
     build_infos     := make([] vk.AccelerationStructureBuildGeometryInfoKHR, len(geometry.meshes), scratch)
-    build_offsets   := make([] umm,                                          len(geometry.meshes), scratch)
-    scratch_offsets := make([] umm,                                          len(geometry.meshes), scratch)
+    blas_offsets    := make([] umm,                                          len(geometry.meshes), scratch)
     blas_sizes      := make([] umm,                                          len(geometry.meshes), scratch)
+    scratch_offsets := make([] umm,                                          len(geometry.meshes), scratch)
     
     ////////////////////////////////////////////////
     
@@ -50,7 +50,6 @@ build_bottom_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, 
             pGeometries   = &vk.AccelerationStructureGeometryKHR {
                 sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
                 
-                flags = { .OPAQUE },
                 geometryType = .TRIANGLES,
                 geometry = {
                     triangles = {
@@ -71,7 +70,7 @@ build_bottom_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, 
         scratch_size: umm
         blas_sizes[index], scratch_size = __get_acceleration_structure_sizes(gpu, build_info, &triangle_counts[index])
         
-        build_offsets[index]   = total_build_size
+        blas_offsets[index]    = total_build_size
         scratch_offsets[index] = total_scratch_size
         
         total_build_size   += align(AccelerationStructureAlignment, blas_sizes[index])
@@ -95,7 +94,7 @@ build_bottom_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, 
     for &result, index in results {
         build_info := &build_infos[index]
         
-        result = __create_acceleration_structure(gpu, .BOTTOM_LEVEL, buffers.bottom_level_acceleration_structures, blas_sizes[index], build_offsets[index])
+        result = __create_acceleration_structure(gpu, .BOTTOM_LEVEL, buffers.bottom_level_acceleration_structures, blas_sizes[index], blas_offsets[index])
         build_info.dstAccelerationStructure  = result.acceleration_structure
         build_info.scratchData.deviceAddress = scratch_buffer + cast(vk.DeviceAddress) scratch_offsets[index]
         
@@ -112,10 +111,12 @@ build_bottom_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, 
 }
 
 build_top_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, command_pool: vk.CommandPool, buffers: ^Buffers, draws: [] Draw, bottom_level_acceleration_structures: [] Acceleration_Structure, scratch: Allocator) -> Acceleration_Structure {
-    instances := gpu_allocate_slice(gpu, [] vk.AccelerationStructureInstanceKHR, len(draws), usage = { .STORAGE_BUFFER, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR })
+    assert(len(draws) <= (1 << 24), "More draws than representable by the instanceCustomIndex")
+    
+    instance_count := cast(u32) len(draws)
+    instances := gpu_allocate_slice(gpu, [] vk.AccelerationStructureInstanceKHR, instance_count, usage = { .STORAGE_BUFFER, .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR })
     defer gpu_free(gpu, instances)
     
-    assert(len(draws) <= (1 << 24), "More draws than representable by the instanceCustomIndex")
     for &instance, index in instances.cpu {
         draw := draws[index]
         
@@ -129,13 +130,14 @@ build_top_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, com
             t[2,0], t[2,1], t[2,2], draw.p.z,
         }
         
-        instance = {
+        it := vk.AccelerationStructureInstanceKHR {
             transform           = { transmute([3][4] f32) transform },
             mask                = 0xFF, // @volatile must agree with the rayQuery's in shaders
             instanceCustomIndex = cast(u32) index,
-            instanceShaderBindingTableRecordOffset = 0,
             accelerationStructureReference = cast(u64) bottom_level_acceleration_structures[draw.mesh_index].address,
         }
+        
+        instance = it
     }
     
     ////////////////////////////////////////////////
@@ -151,7 +153,6 @@ build_top_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, com
         pGeometries   = &vk.AccelerationStructureGeometryKHR {
             sType = .ACCELERATION_STRUCTURE_GEOMETRY_KHR,
             
-            flags = { .OPAQUE },
             geometryType = .INSTANCES,
             geometry = {
                 instances = {
@@ -161,8 +162,6 @@ build_top_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, com
             },
         },
     }
-    
-    instance_count := cast(u32) len(draws)
     
     tlas_size, scratch_size := __get_acceleration_structure_sizes(gpu, &build_info, &instance_count)
     
