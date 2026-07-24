@@ -27,20 +27,22 @@ Sync_Validation :: false && Validation
 
 State :: struct {
     near_z: f32,
-    draw_distance: f32, // @todo in which space is this tested?, make this world space units
+    // @correctness draw_distance/far_z is tested in view space, but that is just a translation and rotation right now. 
+    // If we also scale, then this value is no longer also a world space distance. In that case we need to actually take
+    // the cameras position and view direction, find the point at the draw distance and transform it into view space, 
+    // where we then take its distance from the origin as the draw distance.
+    draw_distance: f32, 
     
     sun_direction: v3,
     camera: Camera,
-    debug: Debug, // @naming
-    
-    dvb_and_mvb_cleared: bool, // @cleanup
+    debug:  Debug, // @naming
     
     absolute_frame_index: u64,
     
     
-    // @todo this should not be kept between frames, its state that we just interpret from the physical inputs and not something we determine
-    // It is just here, because we don't have a real input system and just directly take the sdl events which only notify us of changes and not
-    // states themselves.
+    // @todo this should not be kept between frames, its state that we just interpret from the physical inputs and not 
+    // something we determine. It is just here, because we don't have a real input system and just directly take the 
+    // sdl events which only notify us of changes and not states themselves.
     left_down: bool,
     mouse_p:   v2,
     last_time: time.Tick,
@@ -67,6 +69,8 @@ Frame :: struct {
     
     frame_heap_offset: u32,
     top_level_acceleration_structure_index: u32,
+    
+    clear_dvb_and_mvb: bool, // @cleanup
 }
 
 Render_Targets :: struct {
@@ -206,7 +210,7 @@ DebugFlag_OcclusionCulling :: (1 << 2)
 
 // @todo It would be way simpler if a bit wasteful to just always pass the shader all buffer addresses (buffers: Buffers).
 Draw_Data :: struct #all_or_none { // :Shader:
-    view_from_world:  m4, // @todo alignment requirements
+    view_from_world: m4, // @todo alignment requirements
     
     screen_size: v2,
     flags: u32,
@@ -416,10 +420,10 @@ main :: proc () {
         
         // @todo why are we allocating them wastefully before copying into them? Just before the copy we know exactly how much memory we will need.
         // Draws is the exception unless we really only have static geometry and nothing dynamic. 
-        // So we basically need a static and a dynamic set(each also needs top and bottom level acceleration structures). 
+        // So we basically need a static and a dynamic set(each also needs top and bottom level acceleration structures).
+        
         buffers.vertices     = gpu_allocate_slice(gpu, [] Vertex,  256 * Megabyte / size_of(Vertex),  memory = .Default, usage = vertex_and_index_usage)
-        // This is only used to build the acceleration structures, if we want to do regular draws it will also need .INDEX_BUFFER in its usage.
-        buffers.indices      = gpu_allocate_slice(gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = .Default, usage = vertex_and_index_usage)
+        buffers.indices      = gpu_allocate_slice(gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = .Default, usage = vertex_and_index_usage + { .INDEX_BUFFER })
         buffers.meshlets     = gpu_allocate_slice(gpu, [] Meshlet, 256 * Megabyte / size_of(Meshlet), memory = .Default)
         buffers.meshlet_data = gpu_allocate_slice(gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = .Default)
         buffers.meshes       = gpu_allocate_slice(gpu, [] Mesh,    256 * Megabyte / size_of(Mesh),    memory = .Default)
@@ -461,10 +465,10 @@ main :: proc () {
             make_by_pointer(&textures, len(texture_paths), context.allocator)
             
             //
-            // @speed moving the copies to a queue will speedup the loading from ssd(~22%). It may or may not help
+            // @speed Moving the copies to a queue will speedup the loading from ssd(~22%). It may or may not help
             // with the drivers copy(~71%), depending on its ability to be parallelized. 
             /// 0.957 / 1.34
-            /// 0.3 / 1.34
+            /// 0.3   / 1.34
             //
             // Read speed testing estimates a max speed of 6.5 Gb/s with a preallocated and mapped buffer.
             // Here we currently load ~2.1 Gb.
@@ -478,8 +482,17 @@ main :: proc () {
             // Therefore we only reach speeds of ~2.2 Gb/s (a memcopy of the same data ~4.3Gb/s)
             // So the driver's copy is roughly half as fast as a memcopy.
             //
-            // (We could memcopy the drivers swizzled data back into our memory and cache the result.)
-            // (This cached data would then be loaded instead and could be memcopied.)
+            // https://developer.nvidia.com/blog/advanced-api-performance-async-copy/
+            // This article recommends using a copy-queue as NVidia has dedicated async copy engines.
+            // It might be the case that the swizzleling already saturates the cpu's memory bandwidth,
+            // but that should be specifically tested.
+            // 
+            // 1. Check out async copy and/or async compute for copy work and synchronize with the 
+            //    graphics via semaphores.
+            // 2. (optional) Test if the drivers cpu copy is truely bottlenecked if multiple threads
+            //    call into it at once.
+            // 3. Even if the ssd load is not the biggest part, we can still multithread it. Either
+            //    use worker threads, or check out OS native IO rings.
             //
             total_size: int
             {
@@ -555,8 +568,6 @@ main :: proc () {
         buffers.draw_commands      = gpu_allocate_slice(gpu, [] Draw_Command, TaskWidthLimit,                        memory = .GPU) 
         buffers.draw_visibility    = gpu_allocate_slice(gpu, [] u32,          256 * Megabyte / size_of(u32),         memory = .GPU, usage = { .STORAGE_BUFFER, .TRANSFER_DST })
         buffers.meshlet_visibility = gpu_allocate_slice(gpu, [] u32,          (meshlet_visibility_count + 31) / 32,  memory = .GPU, usage = { .STORAGE_BUFFER, .TRANSFER_DST })
-        
-        state.dvb_and_mvb_cleared = false
     }
     
     profile_zone_end()
@@ -635,6 +646,9 @@ main :: proc () {
         
         frame: Frame
         if state.absolute_frame_index == 0 { frame.print_profile = true }
+        
+        // @todo this needs to happen whenever the scene is loaded
+        if state.absolute_frame_index == 0 { frame.clear_dvb_and_mvb = true }
         
         profile_zone_begin("Input Events")
         
@@ -722,7 +736,6 @@ main :: proc () {
         state.absolute_frame_index += 1
         
         if gpu_recreate_swapchain_if_needed(gpu, state.debug.vsync, vsync_changed) {
-            // @cleanup
             ok := get_next_image(gpu, frame_semaphore, frame.index)
             assert(ok)
         }
@@ -1295,6 +1308,7 @@ print_cpu_profile :: proc (zones: [] profiler.Zone) {
 ////////////////////////////////////////////////
 
 get_next_image :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, frame_index: u64) -> bool {
+    // @todo use swapchain maintenance to not need the assert outside this call
     info := vk.AcquireNextImageInfoKHR {
         sType = .ACQUIRE_NEXT_IMAGE_INFO_KHR,
         
@@ -1356,14 +1370,9 @@ cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelin
         mesh_buffer            = buffers.meshes.gpu.p,
         draw_visibility_buffer = buffers.draw_visibility.gpu.p,
         draw_command_buffer    = buffers.draw_commands.gpu.p,
-        draw_group_count       = {}, // @volatile must be assigned later when its allocated from the frame bump
+        draw_group_count       = draw_group_count.gpu.p
     }
-    cull_data.cpu.draw_group_count = draw_group_count.gpu.p
     
-    // @todo would it be simpler to split this by stage and let there be multiple pointers in the push constant instead of the fixed single one right now?
-    // that would mean that pipeline creation would need to know the amount of stages in the pipeline and allocate a pointer per stage
-    // then the apis would need to take a pointer per stage and push its data correctly
-    // if the user then wants to use a single struct and not split everything, they can just pass the same pointer twice.
     draw_data := bump_allocate(frame.bump, Draw_Data)
     draw_data.cpu^ = {
         pyramid_size = cast(v2) render_targets.depth_pyramid.size.xy,
@@ -1409,8 +1418,7 @@ cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelin
         
         if stage == .early {
             // @todo this is stupidly redundant
-            if !state.dvb_and_mvb_cleared {
-                state.dvb_and_mvb_cleared = true
+            if frame.clear_dvb_and_mvb {
                 gpu_fill_memory(cmd, buffers.draw_visibility,    frame.draw_count, 0)
                 gpu_fill_memory(cmd, buffers.meshlet_visibility, len(buffers.meshlet_visibility.cpu), 0)
             }
@@ -1430,7 +1438,7 @@ cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelin
         gpu_barrier(cmd, before_dispatch, { .COMPUTE_SHADER })
         
         gpu_set_pipeline(cmd, pipelines.culling[stage])
-        gpu_dispatch(cmd, cull_data.gpu, grid_dimension_from_total_count(shaders.culling, x = frame.draw_count))
+        gpu_dispatch(cmd, cull_data.gpu.p, grid_dimension_from_total_count(shaders.culling, x = frame.draw_count))
         
     gpu_profile_zone_end()
     gpu_labeled_region_end(cmd)
@@ -1450,6 +1458,7 @@ cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelin
     gpu_barrier(cmd, before_draw, after_draw)
     
     desc := Render_Pass_Desc {
+        render_area = rect_zero_dimension(frame.screen_size),
         color_targets = { { 
             texture     = render_targets.color_buffer,
             view        = render_targets.color_view,
@@ -1479,7 +1488,7 @@ cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelin
         gpu_labeled_region_begin(cmd, "post rendering pass", {0.6, 0.1, 07, 1.0})
     }
     
-    gpu_begin_rendering(cmd, desc, frame.screen_size)
+    gpu_begin_rendering(cmd, desc)
         
         gpu_set_viewport(cmd, size = cast(v2) frame.screen_size)
         gpu_set_scissor(cmd,  size = frame.screen_size)
@@ -1491,7 +1500,7 @@ cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelin
         vk.CmdBeginQuery(cmd, frame.stats_pool, frame.query_index, {})
         
         gpu_set_pipeline(cmd, pipelines.meshlets[stage])
-        gpu_draw_mesh_tasks_indirect(cmd, draw_group_count.gpu, 1, draw_data.gpu)
+        gpu_draw_mesh_tasks_indirect(cmd, draw_group_count.gpu, 1, draw_data.gpu.p, draw_data.gpu.p, draw_data.gpu.p)
         
         vk.CmdEndQuery(cmd, frame.stats_pool, frame.query_index)
         frame.query_index += 1
@@ -1527,7 +1536,7 @@ generate_depth_pyramid :: proc (cmd: vk.CommandBuffer, pipelines: Pipelines, sha
             depth_data.cpu.output_index = mip.storage_index
         }
         
-        gpu_dispatch(cmd, depth_data.gpu, grid_dimension_from_total_count(shaders.depth_reduce, **mip.size))
+        gpu_dispatch(cmd, depth_data.gpu.p, grid_dimension_from_total_count(shaders.depth_reduce, **mip.size))
         
         gpu_barrier(cmd, { .COMPUTE_SHADER }, { .COMPUTE_SHADER })
     }
@@ -1598,17 +1607,17 @@ render_ui :: proc (cmd: vk.CommandBuffer, pipelines: Pipelines, render_targets: 
     
     // @todo decide if the users passes a z with which to do depth testing
     desc := Render_Pass_Desc {
+        render_area = rect_zero_dimension(frame.screen_size),
         color_targets = { { texture = render_targets.color_buffer, view = render_targets.color_view, load_op = .LOAD, store_op = .STORE } },
     }
-    // @todo should render_size be part of the Render_Pass_Desc
-    gpu_begin_rendering(cmd, desc, frame.screen_size)
+    gpu_begin_rendering(cmd, desc)
     
     gpu_set_viewport(cmd, size = cast(v2) frame.screen_size)
     gpu_set_scissor(cmd,  size = frame.screen_size)
     gpu_set_input_assembly_state(cmd, .TRIANGLE_LIST)
     
     gpu_set_pipeline(cmd, pipelines.ui)
-    gpu_draw_indirect(cmd, ui_draw_command.gpu, ui_data.gpu)
+    gpu_draw_indirect(cmd, ui_draw_command.gpu, ui_data.gpu.p, ui_data.gpu.p)
     
     gpu_end_rendering(cmd)
 }

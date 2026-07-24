@@ -3,7 +3,10 @@
 #include "common.glsl"
 #include "colors.glsl"
 
-layout(push_constant) uniform _ { UI_Data data; };
+layout(push_constant) uniform _ {
+    UI_Data _vert;
+    UI_Data data;
+};
 
 layout(location = 0) flat in uint draw_index;
 

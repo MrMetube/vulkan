@@ -12,7 +12,11 @@
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-layout(push_constant) uniform _ { Draw_Data data; };
+layout(push_constant) uniform _ {
+    Draw_Data _task;
+    Draw_Data  data;
+    Draw_Data _frag;
+};
 
 taskPayloadSharedEXT Task_Result task_result;
 layout(triangles, max_vertices = MaxVertices, max_primitives = MaxTriangles) out;

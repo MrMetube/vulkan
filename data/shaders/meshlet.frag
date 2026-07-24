@@ -11,7 +11,11 @@
 // layout(constant_id = 0) const bool Late = false; unused
 layout(constant_id = 1) const bool Post = false;
 
-layout(push_constant) uniform _ { Draw_Data data; };
+layout(push_constant) uniform _ {
+    Draw_Data _task;
+    Draw_Data _mesh;
+    Draw_Data  data;
+};
 
 layout(location = 0) flat   in uint        draw_index;
 layout(location = 1) smooth in Mesh_Result mesh_result;

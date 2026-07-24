@@ -180,9 +180,11 @@ Render_Target :: struct {
 }
 
 Render_Pass_Desc :: struct {
+    render_area:    Rectangle(uv2),
+    
+    color_targets:  [] Render_Target,
     depth_target:   Render_Target,
     stencil_target: Render_Target,
-    color_targets:  [] Render_Target,
 }
 
 DescriptorStaticLimit   :: 65536 // static resource descriptors
@@ -1114,7 +1116,7 @@ Pipeline_Info :: struct {
 
 make_pipeline_info :: proc (info: ^Pipeline_Info, gpu: ^Gpu, heap: Descriptor_Heap, shaders: [] ^Shader, constants: [] Specialization_Constant) {
     // universal Descriptor Heap mapping
-    info.mappings[0] = { // texture array descriptor
+    info.mappings[0] = { // resource descriptors
         sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
         descriptorSet = 1,
         firstBinding = 0,
@@ -1138,7 +1140,7 @@ make_pipeline_info :: proc (info: ^Pipeline_Info, gpu: ^Gpu, heap: Descriptor_He
     
     info.heap_mapping = vk.ShaderDescriptorSetAndBindingMappingInfoEXT { 
         sType = .SHADER_DESCRIPTOR_SET_AND_BINDING_MAPPING_INFO_EXT,
-        mappingCount = 2,
+        mappingCount = len(info.mappings),
         pMappings    = &info.mappings[0],
     }
     
@@ -1752,7 +1754,7 @@ gpu_set_rasterization_samples :: proc (cmd: vk.CommandBuffer, sample_count: vk.S
 
 
 
-gpu_begin_rendering :: proc (cmd: vk.CommandBuffer, desc: Render_Pass_Desc, render_size: uv2) {
+gpu_begin_rendering :: proc (cmd: vk.CommandBuffer, desc: Render_Pass_Desc) {
     color_attachments: [dynamic; 64] vk.RenderingAttachmentInfo
     for target in desc.color_targets {
         it := append_into(&color_attachments)
@@ -1767,10 +1769,13 @@ gpu_begin_rendering :: proc (cmd: vk.CommandBuffer, desc: Render_Pass_Desc, rend
         it.clearValue.color.float32 = target.clear_color
     }
     
+    extent := rect_get_dimension(desc.render_area)
+    offset := rect_get_min(desc.render_area)
+    
     rendering_info := vk.RenderingInfo {
         sType = .RENDERING_INFO, 
         
-        renderArea = { extent = { **render_size } },
+        renderArea = { extent = { **extent }, offset = { **(cast(iv2) offset) } },
         layerCount = 1,
         
         colorAttachmentCount = cast(u32) len(color_attachments),
@@ -1811,37 +1816,40 @@ gpu_end_rendering :: proc (cmd: vk.CommandBuffer) {
 // void gpuDrawMeshlets(GpuCommandBuffer cb, void* meshletDataGpu, void* pixelDataGpu, uvec3 dim);
 
 // @api we may want to allow the pipeline to have a push constant per stage. For that we need the shaders to each declare the push data to be N pointers to their respective data. Then the pipeline layout and this command both needs to declare the correct size of 3 pointers and their offsets in the push data.
-gpu_push_constants :: proc (cmd: vk.CommandBuffer, data: Gpu_Pointer($T), heap := false) {
-    data := data
-    info := vk.PushDataInfoEXT {
-        sType = .PUSH_DATA_INFO_EXT,
-        data  = { address = &data.p, size = size_of(data.p) },
+gpu_push_constants :: proc (cmd: vk.CommandBuffer, data: ..vk.DeviceAddress) {
+    for it, index in data {
+        it := it
+        info := vk.PushDataInfoEXT {
+            sType  = .PUSH_DATA_INFO_EXT,
+            data   = { address = &it, size = size_of(it) },
+            offset = cast(u32) index * size_of(it),
+        }
+        vk.CmdPushDataEXT(cmd, &info)
     }
-    vk.CmdPushDataEXT(cmd, &info)
 }
 
-gpu_dispatch :: proc (cmd: vk.CommandBuffer, data: Gpu_Pointer($T), grid_dimensions: uv3) {
-    gpu_push_constants(cmd, data)
+gpu_dispatch :: proc (cmd: vk.CommandBuffer, comp_data: vk.DeviceAddress, grid_dimensions: uv3) {
+    gpu_push_constants(cmd, comp_data)
     
     vk.CmdDispatch(cmd, **grid_dimensions)
 }
 
-gpu_dispatch_indirect :: proc (cmd: vk.CommandBuffer, data: Gpu_Pointer($T), grid_dimensions: Gpu_Pointer(uv3)) {
-    gpu_push_constants(cmd, data)
+gpu_dispatch_indirect :: proc (cmd: vk.CommandBuffer, comp_data: vk.DeviceAddress, grid_dimensions: Gpu_Pointer(uv3)) {
+    gpu_push_constants(cmd, comp_data)
     
     buffer, offset := gpu_reflect_get_buffer(grid_dimensions.p)
     vk.CmdDispatchIndirect(cmd, buffer, offset)
 }
 
-gpu_draw_indirect :: proc (cmd: vk.CommandBuffer, commands: Gpu_Pointer($C), data: Gpu_Pointer($T)) {
-    gpu_push_constants(cmd, data)
+gpu_draw_indirect :: proc (cmd: vk.CommandBuffer, commands: Gpu_Pointer($C), vert_data, frag_data: vk.DeviceAddress) {
+    gpu_push_constants(cmd, vert_data, frag_data)
     
     commands, commands_base_offset := gpu_reflect_get_buffer(commands.p)
     vk.CmdDrawIndirect(cmd, commands, commands_base_offset, 1, size_of(C))
 }
 
-gpu_draw_indexed_instanced_indirect :: proc (cmd: vk.CommandBuffer, draws: Gpu_Pointer($D), max_count: u32, data: Gpu_Pointer($T)) {
-    gpu_push_constants(cmd, data)
+gpu_draw_indexed_instanced_indirect :: proc (cmd: vk.CommandBuffer, draws: Gpu_Pointer($D), max_count: u32, vert_data, frag_data: vk.DeviceAddress) {
+    gpu_push_constants(cmd, vert_data, frag_data)
     
     draws, draws_base_offset := gpu_reflect_get_buffer(draws.p)
     vk.CmdDrawIndexedIndirect(cmd, draws, draws_base_offset + cast(vk.DeviceSize) draw_offset, max_count, size_of(D))
@@ -1849,8 +1857,8 @@ gpu_draw_indexed_instanced_indirect :: proc (cmd: vk.CommandBuffer, draws: Gpu_P
 
 // @speed The extension device_address_commands would remove the need to ever have a vk.Buffer for any command.
 // But its not supported on my RTX 3070 ._.
-gpu_draw_mesh_tasks_indirect :: proc (cmd: vk.CommandBuffer, grid_dimensions: Gpu_Pointer(uv3), count: u32, data: Gpu_Pointer($T)) {
-    gpu_push_constants(cmd, data)
+gpu_draw_mesh_tasks_indirect :: proc (cmd: vk.CommandBuffer, grid_dimensions: Gpu_Pointer(uv3), count: u32, task_data, mesh_data, frag_data: vk.DeviceAddress) {
+    gpu_push_constants(cmd, task_data, mesh_data, frag_data)
     
     grid_dimensions, offset := gpu_reflect_get_buffer(grid_dimensions.p)
     vk.CmdDrawMeshTasksIndirectEXT(cmd, grid_dimensions, offset, count, size_of(uv3))
