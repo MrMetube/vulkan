@@ -1905,8 +1905,8 @@ create_descriptor_heap :: proc (gpu: ^Gpu) -> Descriptor_Heap {
 }
 
 destroy_descriptor_heap :: proc (gpu: ^Gpu, heap: Descriptor_Heap) {
-    gpu_free_pointer(gpu, heap.samplers.gpu.p)
-    gpu_free_pointer(gpu, heap.resources.gpu.p)
+    gpu_free(gpu, heap.samplers)
+    gpu_free(gpu, heap.resources)
 }
 
 gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: ^Descriptor_Heap) {

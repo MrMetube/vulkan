@@ -100,7 +100,7 @@ gpu_profile_write_timestamp :: proc (kind: profiler.Event_Kind, zone_index: int)
     vk.CmdWriteTimestamp2(prof.cb, { .ALL_COMMANDS }, prof.pool, query_index)
 }
 
-gpu_profile_collate_times :: proc (gpu: ^Gpu, print: bool, frame_index: u64) {
+gpu_profile_collate_events :: proc (gpu: ^Gpu, frame_index: u64) {
     prof := &the_gpu_profiler.states[frame_index]
     
     assert(prof.pool != 0)
@@ -124,28 +124,30 @@ gpu_profile_collate_times :: proc (gpu: ^Gpu, print: bool, frame_index: u64) {
     events := profiler.swap_active_array_and_get_events(prof.event_table)
     
     profiler.collate_events(events, &prof.zones, nil)
+}
+
+gpu_print_profile :: proc (gpu: ^Gpu, frame_index: u64) {
+    prof := &the_gpu_profiler.states[frame_index]
+    zones := prof.zones
+    if len(zones) == 0 { return }
     
-    if print {
-        zones := prof.zones
+    fmt.printfln("---------------------\nGPU profile:")
+    link: u32
+    for {
+        zone := zones[link]
+        depth := zone.depth_of_the_event
         
-        fmt.printfln("---------------------\nGPU profile:")
-        link: u32
-        for {
-            zone := zones[link]
-            depth := zone.depth_of_the_event
-            
-            xx :: proc (seconds: f64) -> time.Duration { return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 10 * time.Nanosecond)  }
-            
-            for _ in 0..<depth { fmt.printf("    ") }
-            fmt.printf("%v: %v", zone.name, xx(gpu_timestamp_to_seconds(gpu, zone.duration)))
-            if zone.duration_with_children != zone.duration {
-                fmt.printf(" (with children %v)", xx(gpu_timestamp_to_seconds(gpu, zone.duration_with_children)))
-            }
-            fmt.printfln("")
-            
-            link = zone.depth_next_event
-            if link == 0 { break }
+        xx :: proc (seconds: f64) -> time.Duration { return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 10 * time.Nanosecond)  }
+        
+        for _ in 0..<depth { fmt.printf("    ") }
+        fmt.printf("%v: %v", zone.name, xx(gpu_timestamp_to_seconds(gpu, zone.duration)))
+        if zone.duration_with_children != zone.duration {
+            fmt.printf(" (with children %v)", xx(gpu_timestamp_to_seconds(gpu, zone.duration_with_children)))
         }
+        fmt.printfln("")
+        
+        link = zone.depth_next_event
+        if link == 0 { break }
     }
 }
 

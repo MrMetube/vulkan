@@ -1,6 +1,8 @@
 #+vet explicit-allocators
 package main
 
+import "base:runtime"
+
 import "core:fmt"
 import "core:mem"
 import "core:os"
@@ -29,10 +31,12 @@ State :: struct {
     
     sun_direction: v3,
     camera: Camera,
+    debug: Debug, // @naming
     
-    dvb_and_mvb_cleared: bool,
+    dvb_and_mvb_cleared: bool, // @cleanup
     
     absolute_frame_index: u64,
+    
     
     // @todo this should not be kept between frames, its state that we just interpret from the physical inputs and not something we determine
     // It is just here, because we don't have a real input system and just directly take the sdl events which only notify us of changes and not
@@ -47,6 +51,8 @@ Frame :: struct {
     index: u64,
     delta_time: f32,
     
+    print_profile: bool,
+    
     bump: ^Bump_Allocator,
     stats_pool: vk.QueryPool,
     query_index: u32,
@@ -55,6 +61,7 @@ Frame :: struct {
     
     draw_count: u32,
     
+    frustum: [4] f32,
     view_from_world:  m4,
     screen_from_view: m4,
     
@@ -147,10 +154,12 @@ Debug :: struct {
     
     cpu_time:  f64,
     gpu_time:  f64,
-    early_rendering_time: f64,
-    late_rendering_time:  f64,
-    early_cull_time: f64,
-    late_cull_time:  f64,
+    cull_time_early: f64,
+    cull_time_late:  f64,
+    cull_time_post:  f64,
+    rendering_time_early: f64,
+    rendering_time_late:  f64,
+    rendering_time_post:  f64,
 }
 
 Camera :: struct {
@@ -348,7 +357,16 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    debug := Debug {
+    state: State
+    state.camera = Camera {
+        p           = {0, 0, 0},
+        orientation = 1,
+        fov_y       = 70 * RadiansFromDegrees,
+    }
+    state.near_z = 0.01
+    state.draw_distance = 1000
+    
+    state.debug = {
         vsync = true,
         
         culling_enabled   = true,
@@ -358,6 +376,8 @@ main :: proc () {
         // lod_enabled       = true,
     }
     
+    ////////////////////////////////////////////////
+    
     profile_zone_begin("OS Metrics sleep")
     profiler.init_os_metrics()
     profile_zone_end()
@@ -366,7 +386,7 @@ main :: proc () {
     {
         props     := sdl.GetWindowProperties(window)
         hinstance := sdl.GetPointerProperty(props, sdl.PROP_WINDOW_WIN32_INSTANCE_POINTER, nil)
-        gpu^ = gpu_init(hinstance, debug.vsync)
+        gpu^ = gpu_init(hinstance, state.debug.vsync)
     }
     
     profile_zone_begin("Create Render Target")
@@ -383,17 +403,8 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    state: State
-    state.camera = Camera {
-        p           = {0, 0, 0},
-        orientation = 1,
-        fov_y       = 70 * RadiansFromDegrees,
-    }
-    state.near_z = 0.01
-    state.draw_distance = 1000
-    
-    ////////////////////////////////////////////////
-    
+    // @todo collect Buffers, textures and draws and top_level and maybe others into a Scene struct, because their lifetime is as long as the scene is active.
+    // @todo make a separate allocator for all the scene and geometry setup that we free once before the frame loop
     buffers: Buffers
     {
         profile_scope("Allocate geometry buffers")
@@ -403,6 +414,9 @@ main :: proc () {
             vertex_and_index_usage += { .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR }
         }
         
+        // @todo why are we allocating them wastefully before copying into them? Just before the copy we know exactly how much memory we will need.
+        // Draws is the exception unless we really only have static geometry and nothing dynamic. 
+        // So we basically need a static and a dynamic set(each also needs top and bottom level acceleration structures). 
         buffers.vertices     = gpu_allocate_slice(gpu, [] Vertex,  256 * Megabyte / size_of(Vertex),  memory = .Default, usage = vertex_and_index_usage)
         // This is only used to build the acceleration structures, if we want to do regular draws it will also need .INDEX_BUFFER in its usage.
         buffers.indices      = gpu_allocate_slice(gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = .Default, usage = vertex_and_index_usage)
@@ -416,7 +430,6 @@ main :: proc () {
     textures: [] Image
     defer delete(textures, context.allocator)
     
-    // @todo make a separate allocator for all the scene and geometry setup that we free once before the frame loop
     scene_draws:   [dynamic] Draw
     bottom_levels: [] Acceleration_Structure
     top_level:     Acceleration_Structure
@@ -438,7 +451,7 @@ main :: proc () {
             
             profile_zone_begin("load scene")
             if !load_scene(&geometry, path, &scene_draws, &state.camera, &texture_paths, &state.sun_direction) {
-                os.exit(1)
+                runtime.exit(1)
             }
             profile_zone_end()
             
@@ -542,6 +555,8 @@ main :: proc () {
         buffers.draw_commands      = gpu_allocate_slice(gpu, [] Draw_Command, TaskWidthLimit,                        memory = .GPU) 
         buffers.draw_visibility    = gpu_allocate_slice(gpu, [] u32,          256 * Megabyte / size_of(u32),         memory = .GPU, usage = { .STORAGE_BUFFER, .TRANSFER_DST })
         buffers.meshlet_visibility = gpu_allocate_slice(gpu, [] u32,          (meshlet_visibility_count + 31) / 32,  memory = .GPU, usage = { .STORAGE_BUFFER, .TRANSFER_DST })
+        
+        state.dvb_and_mvb_cleared = false
     }
     
     profile_zone_end()
@@ -612,14 +627,14 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        // @speed similarly the timestamps should only be collected if we need them. As we currently only look at the last rendered frame, we should only take them if we then also print them. In the future we may want to store more than one frame, but for now this would be better.
         // @cleanup move into Frame
-        print_profile_and_stats: bool
+        
         mouse_delta: v2
         mouse_wheel_delta: f32
         vsync_changed: bool
         
-        if state.absolute_frame_index == 0 { print_profile_and_stats = true }
+        frame: Frame
+        if state.absolute_frame_index == 0 { frame.print_profile = true }
         
         profile_zone_begin("Input Events")
         
@@ -642,6 +657,7 @@ main :: proc () {
                     state.left_down = false
                 }
             case .KEY_DOWN:
+                debug := &state.debug
                 switch event.key.key {
                 case sdl.K_C:     debug.culling_enabled   = !debug.culling_enabled
                 case sdl.K_L:     debug.lod_enabled       = !debug.lod_enabled
@@ -650,7 +666,7 @@ main :: proc () {
                 
                 case sdl.K_V:     debug.vsync = !debug.vsync; vsync_changed = true
                 
-                case sdl.K_I:     print_profile_and_stats = true
+                case sdl.K_I:     frame.print_profile = true
                 
                 case sdl.K_PLUS:  debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level+1, 0, cast(i32) len(render_targets.depth_pyramid_mips)-1)
                 case sdl.K_MINUS: debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level-1, 0, cast(i32) len(render_targets.depth_pyramid_mips)-1)
@@ -662,18 +678,19 @@ main :: proc () {
                 mouse_wheel_delta = event.wheel.y
             }
         }
+        profile_zone_end()
         
         // Don't waste the users time by waiting and rendering another frame.
-        if state.quit { break }
-        
-        profile_zone_end()
+        if state.quit {
+            profile_zone_end() // Frame
+            break
+        }
         
         window_event_delta := time.tick_since(window_event_begin)
         
         ////////////////////////////////////////////////
         
         cpu_delta:  f64
-        frame: Frame
         {
             current_time  := time.tick_now()
             delta_tick    := time.tick_diff(state.last_time, current_time)
@@ -704,7 +721,7 @@ main :: proc () {
         frame.index                 = state.absolute_frame_index % MaxFramesInFlight
         state.absolute_frame_index += 1
         
-        if gpu_recreate_swapchain_if_needed(gpu, debug.vsync, vsync_changed) {
+        if gpu_recreate_swapchain_if_needed(gpu, state.debug.vsync, vsync_changed) {
             // @cleanup
             ok := get_next_image(gpu, frame_semaphore, frame.index)
             assert(ok)
@@ -740,21 +757,26 @@ main :: proc () {
                 }
             }
             
-            gpu_profile_collate_times(gpu, print_profile_and_stats, frame.index)
+            gpu_profile_collate_events(gpu, frame.index)
             
             gpu_delta             := gpu_profile_get_zone_duration(gpu, frame.index, "Frame")
-            early_rendering_delta := gpu_profile_get_zone_duration(gpu, frame.index, "early rendering pass")
-            late_rendering_delta  := gpu_profile_get_zone_duration(gpu, frame.index, "late rendering pass")
-            early_cull_delta      := gpu_profile_get_zone_duration(gpu, frame.index, "early culling")
-            late_cull_delta       := gpu_profile_get_zone_duration(gpu, frame.index, "late culling")
+            cull_delta_early      := gpu_profile_get_zone_duration(gpu, frame.index, "early culling")
+            cull_delta_late       := gpu_profile_get_zone_duration(gpu, frame.index, "late culling")
+            cull_delta_post       := gpu_profile_get_zone_duration(gpu, frame.index, "post culling")
+            rendering_delta_early := gpu_profile_get_zone_duration(gpu, frame.index, "early rendering pass")
+            rendering_delta_late  := gpu_profile_get_zone_duration(gpu, frame.index, "late rendering pass")
+            rendering_delta_post  := gpu_profile_get_zone_duration(gpu, frame.index, "post rendering pass")
             
             blend_factor_k := time_smoothed_blend_factor(7, cpu_delta)
             
+            debug := &state.debug
             debug.cpu_time             = linear_blend(cpu_delta,             debug.cpu_time,             blend_factor_k)
-            debug.early_cull_time      = linear_blend(early_cull_delta,      debug.early_cull_time,      blend_factor_k)
-            debug.late_cull_time       = linear_blend(late_cull_delta,       debug.late_cull_time,       blend_factor_k)
-            debug.early_rendering_time = linear_blend(early_rendering_delta, debug.early_rendering_time, blend_factor_k)
-            debug.late_rendering_time  = linear_blend(late_rendering_delta,  debug.late_rendering_time,  blend_factor_k)
+            debug.cull_time_early      = linear_blend(cull_delta_early,      debug.cull_time_early,      blend_factor_k)
+            debug.cull_time_late       = linear_blend(cull_delta_late,       debug.cull_time_late,       blend_factor_k)
+            debug.cull_time_post       = linear_blend(cull_delta_post,       debug.cull_time_post,       blend_factor_k)
+            debug.rendering_time_early = linear_blend(rendering_delta_early, debug.rendering_time_early, blend_factor_k)
+            debug.rendering_time_late  = linear_blend(rendering_delta_late,  debug.rendering_time_late,  blend_factor_k)
+            debug.rendering_time_post  = linear_blend(rendering_delta_post,  debug.rendering_time_post,  blend_factor_k)
             // this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
             if gpu_delta >= 0 {
                 debug.gpu_time = linear_blend(gpu_delta, debug.gpu_time, blend_factor_k)
@@ -766,12 +788,14 @@ main :: proc () {
             
             profile_zone_begin("Update window title")
             sb := strings.builder_make(context.temp_allocator)
-            fmt.sbprintf(&sb, "%v tri, cpu: %.3v, gpu: %.3v (early cull %.3v, early render %.3v, late cull %.3v, late render %.3v)", 
+            fmt.sbprintf(&sb, "%v tri, cpu: %.3v, gpu: %.3v (early cull %.3v, early render %.3v, late cull %.3v, late render %.3v, post cull %.3v, post render %.3v)", 
                 view_magnitude(triangle_count, kind = .Count),
                 view(debug.cpu_time), view(debug.gpu_time), 
-                view(debug.early_cull_time), view(debug.early_rendering_time), view(debug.late_cull_time), view(debug.late_rendering_time),
+                view(debug.cull_time_early), view(debug.rendering_time_early), 
+                view(debug.cull_time_late), view(debug.rendering_time_late),
+                view(debug.cull_time_post), view(debug.rendering_time_post),
             )
-            fmt.sbprintf(&sb, ", Features: ")
+            fmt.sbprintf(&sb, ", [ ")
             if debug.vsync {
                 fmt.sbprintf(&sb, "VSync ")
             }
@@ -786,13 +810,19 @@ main :: proc () {
             }
             extra: string
             if debug.display_pyramid {
-                extra = fmt.sbprintf(&sb, ", displaying depth mip level %v", debug.display_pyramid_mip_level)
+                extra = fmt.sbprintf(&sb, ", displaying depth mip level %v ", debug.display_pyramid_mip_level)
             }
+            fmt.sbprintf(&sb, "]")
             
             title := strings.to_cstring(&sb)
             sdl.SetWindowTitle(window, title)
            
             profile_zone_end()
+        }
+        
+        if frame.print_profile {
+            gpu_print_profile(gpu, frame.index)
+            print_cpu_profile(the_cpu_profile_zones[:])
         }
         
         ////////////////////////////////////////////////
@@ -893,6 +923,18 @@ main :: proc () {
             oriented := cast(m4) la.matrix3_from_quaternion(state.camera.orientation)
             frame.view_from_world  = la.inverse(translate(oriented, state.camera.p))
             frame.screen_from_view = projection_reversed_z_infinite_far_plane(state.camera.fov_y, cast(f32) gpu.swapchain_size.x / cast(f32) gpu.swapchain_size.y, state.near_z)
+            
+            if state.debug.culling_enabled {
+                frustum_x := get_row_v4(frame.screen_from_view, 3) + get_row_v4(frame.screen_from_view, 0) // x + w < 0
+                frustum_y := get_row_v4(frame.screen_from_view, 3) + get_row_v4(frame.screen_from_view, 1) // y + w > 0
+                frustum_x /= length(frustum_x.xyz)
+                frustum_y /= length(frustum_y.xyz)
+                
+                frame.frustum[0] = frustum_x.x
+                frame.frustum[1] = frustum_x.z
+                frame.frustum[2] = frustum_y.y
+                frame.frustum[3] = frustum_y.z
+            }
         }
         
         ////////////////////////////////////////////////
@@ -985,13 +1027,13 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        cull_and_render(cmd, .early, pipelines, shaders, buffers, &render_targets, debug, &state, &frame)
+        cull_and_render(cmd, .early, pipelines, shaders, buffers, &render_targets, &state, &frame)
         
         generate_depth_pyramid(cmd, pipelines, shaders, render_targets, frame)
         
-        cull_and_render(cmd, .late, pipelines, shaders, buffers, &render_targets, debug, &state, &frame)
+        cull_and_render(cmd, .late, pipelines, shaders, buffers, &render_targets, &state, &frame)
         
-        cull_and_render(cmd, .post, pipelines, shaders, buffers, &render_targets, debug, &state, &frame)
+        cull_and_render(cmd, .post, pipelines, shaders, buffers, &render_targets, &state, &frame)
         
         if false {
             render_ui(cmd, pipelines, render_targets, state, frame)
@@ -1004,22 +1046,23 @@ main :: proc () {
             source_image    := &render_targets.color_buffer
             swapchain_image := &gpu.swapchain_images[gpu.image_index]
             
-            if debug.display_pyramid {
+            if state.debug.display_pyramid {
                 source_image = &render_targets.depth_pyramid
             }
             
             gpu_barrier(cmd, { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }, { .ALL_TRANSFER })
             
-            if !debug.display_pyramid {
+            if !state.debug.display_pyramid {
                 vk.CmdCopyImage(cmd, source_image.image, .GENERAL, swapchain_image.image, .GENERAL, 1, &vk.ImageCopy {
                     srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     extent         = { **swapchain_image.size },
                 })
             } else {
-                mip_size  := cast(iv2) render_targets.depth_pyramid_mips[debug.display_pyramid_mip_level].size
+                mip_index := cast(u32) state.debug.display_pyramid_mip_level
+                mip_size  := cast(iv2) render_targets.depth_pyramid_mips[mip_index].size
                 vk.CmdBlitImage(cmd, source_image.image, .GENERAL, swapchain_image.image, .GENERAL, 1, &vk.ImageBlit {
-                    srcSubresource = { aspectMask = { .COLOR }, layerCount = 1, mipLevel = cast(u32) debug.display_pyramid_mip_level },
+                    srcSubresource = { aspectMask = { .COLOR }, layerCount = 1, mipLevel = mip_index },
                     dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     srcOffsets = { {0, 0, 0}, { mip_size.x, mip_size.y, 1 }},
                     dstOffsets = { {0, 0, 0}, { **(cast(iv3) swapchain_image.size) }},
@@ -1051,93 +1094,48 @@ main :: proc () {
         ////////////////////////////////////////////////
         
         profile_zone_end()
-        
-        if print_profile_and_stats {
-            profile_scope("print cpu profile")
-            
-            zones := the_cpu_profile_zones
-            
-            xx :: proc (seconds: f64) -> time.Duration { return cast(time.Duration) (seconds * cast(f64) time.Second) }
-            root := zones[0]
-            total_time := profiler.clocks_to_seconds(root.duration_with_children)
-            
-            print("---------------------\nCPU profile:\n")
-            if !false { // tree view
-                link: u32
-                for {
-                    zone := zones[link]
-                    depth := zone.depth_of_the_event
-                    
-                    seconds               := profiler.clocks_to_seconds(zone.duration)
-                    seconds_with_children := profiler.clocks_to_seconds(zone.duration_with_children)
-                    
-                    print("  %v", view_percentage(seconds_with_children/total_time))
-                    for _ in 0..<depth { print("    ") }
-                    print(" %v", xx(seconds))
-                    if zone.duration_with_children != zone.duration {
-                        print(" (with children %v)", xx(seconds_with_children))
-                    }
-                    print(" - %v", zone.name)
-                    print("\n")
-                    
-                    link = zone.depth_next_event
-                    if link == 0 { break }
-                }
-            } else { // zone view
-                // @todo map only cares about name, durations and should also keep a hitcount, the tree data is not correct afterwards
-                zone_map := make(map[string] profiler.Zone, context.temp_allocator)
-                
-                for zone in zones {
-                    if zone.name not_in zone_map {
-                        zone_map[zone.name] = zone
-                    } else {
-                        entry := &zone_map[zone.name]
-                        entry.duration               += zone.duration
-                        entry.duration_with_children += zone.duration_with_children
-                    }
-                }
-                
-                zone_list := make([dynamic] profiler.Zone, context.temp_allocator)
-                
-                for _, zone in zone_map {
-                    append(&zone_list, zone)
-                }
-                
-                slice.sort_by(zone_list[:], proc (a, b: profiler.Zone) -> bool {
-                    return a.duration > b.duration
-                })
-                
-                
-                // @todo also print total time
-                // @todo make a toggle for omission
-                Omit_Below :: 0 // 0.01
-                for zone in zone_list {
-                    // @todo also print hitcount and avg duration per hit (mean?)
-                    seconds               := profiler.clocks_to_seconds(zone.duration)
-                    seconds_with_children := profiler.clocks_to_seconds(zone.duration_with_children)
-                    
-                    percent := seconds/total_time
-                    if percent < Omit_Below {
-                        print(" <%v ...\n", view_percentage(0.01))
-                        break
-                    }
-                    print("  %v", view_percentage(percent))
-                    print(" %v", xx(seconds))
-                    if zone.duration_with_children != zone.duration {
-                        print(" (with children %v)", xx(seconds_with_children))
-                    }
-                    print(" - %v", zone.name)
-                    print("\n")
-                }
-            }
-        }
     }
+    
     
     ////////////////////////////////////////////////
     // Cleanup and Shutdown
     
+    profiler.swap_active_array_and_get_events(the_cpu_profiler)
+    
+    profile_zone_begin("Cleanup")
+    
+    profile_zone_begin("wait and handles")
 	check(vk.DeviceWaitIdle(gpu.device))
     
+    for it in bottom_levels {
+        vk.DestroyAccelerationStructureKHR(gpu.device, it.acceleration_structure, nil)
+    }
+    delete(bottom_levels, context.allocator) // @volatile
+    vk.DestroyAccelerationStructureKHR(gpu.device, top_level.acceleration_structure, nil)
+    
+    for stage in Stage {
+        destroy_pipeline(gpu, pipelines.meshlets[stage])
+        destroy_pipeline(gpu, pipelines.culling[stage])
+    }
+    destroy_pipeline(gpu, pipelines.depth_reduce)
+    destroy_pipeline(gpu, pipelines.ui)
+    
+    vk.DestroySemaphore(gpu.device, frame_semaphore, nil)
+    for pool in stats_pools { vk.DestroyQueryPool(gpu.device, pool, nil) }
+    
+    gpu_profile_deinit(gpu)
+    profile_zone_end()
+    
+    profile_zone_begin("allocations")
+    
+    profile_zone_begin("heap")
+    destroy_descriptor_heap(gpu, descriptor_heap)
+    profile_zone_end()
+    profile_zone_begin("render targets")
+    destroy_render_targets(gpu, &render_targets)
+    profile_zone_end()
+    
+    profile_zone_begin("buffers")
     gpu_free(gpu, buffers.vertices)
     gpu_free(gpu, buffers.indices)
     gpu_free(gpu, buffers.meshlets)
@@ -1149,48 +1147,43 @@ main :: proc () {
     gpu_free(gpu, buffers.meshlet_visibility)
     gpu_free(gpu, buffers.bottom_level_acceleration_structures)
     gpu_free(gpu, buffers.top_level_acceleration_structures)
+    profile_zone_end()
     
-    for it in bottom_levels {
-        vk.DestroyAccelerationStructureKHR(gpu.device, it.acceleration_structure, nil)
-    }
-    delete(bottom_levels, context.allocator) // @volatile
-    vk.DestroyAccelerationStructureKHR(gpu.device, top_level.acceleration_structure, nil)
-    
+    profile_zone_begin("bump allocators")
     for &bump in frame_bump_allocators {
         bump_allocator_delete(gpu, &bump)
     }
+    profile_zone_end()
     
-    for stage in Stage {
-        destroy_pipeline(gpu, pipelines.meshlets[stage])
-        destroy_pipeline(gpu, pipelines.culling[stage])
-    }
-    destroy_pipeline(gpu, pipelines.depth_reduce)
-    destroy_pipeline(gpu, pipelines.ui)
-    
+    profile_zone_begin("textures")
+    // @speed We should really make an allocator for images that we can just free all at once. 
+    // This takes ~120ms with ~340/2.1Gb of textures.
+    // This would not just aid shutdown speed, but also changing to another scene.
     for texture in textures {
         gpu_free_image(gpu, texture)
     }
-    
-    destroy_descriptor_heap(gpu, descriptor_heap)
-    
-    destroy_render_targets(gpu, &render_targets)
-    
-    vk.DestroySemaphore(gpu.device, frame_semaphore, nil)
-    for pool in stats_pools { vk.DestroyQueryPool(gpu.device, pool, nil) }
-    
-    gpu_profile_deinit(gpu)
+    profile_zone_end()
     
     gpu_deinit(gpu)
-    
+    profile_zone_end()
     ////////////////////////////////////////////////
     
+    profile_zone_begin("assets")
     delete(watchers)
-    free(the_cpu_profiler, context.allocator) // @volatile see new
-    delete(the_cpu_profile_zones)
     
     deinit_assets()
     
     delete(scene_draws)
+    profile_zone_end()
+    profile_zone_end()
+    
+    events := profiler.swap_active_array_and_get_events(the_cpu_profiler)
+    profiler.collate_events(events, &the_cpu_profile_zones, nil)
+    
+    print_cpu_profile(the_cpu_profile_zones[:])
+    
+    free(the_cpu_profiler, context.allocator) // @volatile see new
+    delete(the_cpu_profile_zones)
 }
 
 ////////////////////////////////////////////////
@@ -1221,6 +1214,84 @@ _procedure_end_profile_zone :: proc (_ := #caller_location) {
     profiler.record_event(the_cpu_profiler, read_cycle_counter(), .EndZone, "")
 }
 
+print_cpu_profile :: proc (zones: [] profiler.Zone) {
+    profile_procedure()
+    
+    xx :: proc (seconds: f64) -> time.Duration { return cast(time.Duration) (seconds * cast(f64) time.Second) }
+    root := zones[0]
+    total_time := profiler.clocks_to_seconds(root.duration_with_children)
+    
+    print("---------------------\nCPU profile:\n")
+    if !false { // tree view
+        link: u32
+        for {
+            zone := zones[link]
+            depth := zone.depth_of_the_event
+            
+            seconds               := profiler.clocks_to_seconds(zone.duration)
+            seconds_with_children := profiler.clocks_to_seconds(zone.duration_with_children)
+            
+            print("  %v", view_percentage(seconds_with_children/total_time))
+            for _ in 0..<depth { print("    ") }
+            print(" %v", xx(seconds))
+            if zone.duration_with_children != zone.duration {
+                print(" (with children %v)", xx(seconds_with_children))
+            }
+            print(" - %v", zone.name)
+            print("\n")
+            
+            link = zone.depth_next_event
+            if link == 0 { break }
+        }
+    } else { // zone view
+        // @todo map only cares about name, durations and should also keep a hitcount, the tree data is not correct afterwards
+        zone_map := make(map[string] profiler.Zone, context.temp_allocator)
+        
+        for zone in zones {
+            if zone.name not_in zone_map {
+                zone_map[zone.name] = zone
+            } else {
+                entry := &zone_map[zone.name]
+                entry.duration               += zone.duration
+                entry.duration_with_children += zone.duration_with_children
+            }
+        }
+        
+        zone_list := make([dynamic] profiler.Zone, context.temp_allocator)
+        
+        for _, zone in zone_map {
+            append(&zone_list, zone)
+        }
+        
+        slice.sort_by(zone_list[:], proc (a, b: profiler.Zone) -> bool {
+            return a.duration > b.duration
+        })
+        
+        
+        // @todo also print total time
+        // @todo make a toggle for omission
+        Omit_Below :: 0 // 0.01
+        for zone in zone_list {
+            // @todo also print hitcount and avg duration per hit (mean?)
+            seconds               := profiler.clocks_to_seconds(zone.duration)
+            seconds_with_children := profiler.clocks_to_seconds(zone.duration_with_children)
+            
+            percent := seconds/total_time
+            if percent < Omit_Below {
+                print(" <%v ...\n", view_percentage(0.01))
+                break
+            }
+            print("  %v", view_percentage(percent))
+            print(" %v", xx(seconds))
+            if zone.duration_with_children != zone.duration {
+                print(" (with children %v)", xx(seconds_with_children))
+            }
+            print(" - %v", zone.name)
+            print("\n")
+        }
+    }
+}
+
 ////////////////////////////////////////////////
 
 get_next_image :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, frame_index: u64) -> bool {
@@ -1242,7 +1313,7 @@ get_next_image :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, frame_index: u64) ->
     return true
 }
 
-cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelines, shaders: Shaders, buffers: Buffers, render_targets: ^Render_Targets, debug: Debug, state: ^State, frame: ^Frame) {
+cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelines, shaders: Shaders, buffers: Buffers, render_targets: ^Render_Targets, state: ^State, frame: ^Frame) {
     //
     // early pass - frustum cull             & fill objects that *were* visible last frame
     //  late pass - frustum & occlusion cull & fill objects that were *not* visible last frame
@@ -1256,23 +1327,10 @@ cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelin
     }
     profile_scope(cpu_label)
     
-    frustum: [4] f32
-    if debug.culling_enabled {
-        frustum_x := get_row_v4(frame.screen_from_view, 3) + get_row_v4(frame.screen_from_view, 0) // x + w < 0
-        frustum_y := get_row_v4(frame.screen_from_view, 3) + get_row_v4(frame.screen_from_view, 1) // y + w > 0
-        frustum_x /= length(frustum_x.xyz)
-        frustum_y /= length(frustum_y.xyz)
-        
-        frustum[0] = frustum_x.x
-        frustum[1] = frustum_x.z
-        frustum[2] = frustum_y.y
-        frustum[3] = frustum_y.z
-    }
-    
     shader_culling_flags: u32 
-    if debug.culling_enabled   { shader_culling_flags |= DebugFlag_FrustumCulling   }
-    if debug.lod_enabled       { shader_culling_flags |= DebugFlag_LevelOfDetail    }
-    if debug.occlusion_enabled { shader_culling_flags |= DebugFlag_OcclusionCulling }
+    if state.debug.culling_enabled   { shader_culling_flags |= DebugFlag_FrustumCulling   }
+    if state.debug.lod_enabled       { shader_culling_flags |= DebugFlag_LevelOfDetail    }
+    if state.debug.occlusion_enabled { shader_culling_flags |= DebugFlag_OcclusionCulling }
     
     draw_group_count := bump_allocate(frame.bump, uv3)
     
@@ -1285,7 +1343,7 @@ cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelin
         s11     = frame.screen_from_view[1,1],
         near_z  = state.near_z,
         far_z   = state.draw_distance,
-        frustum = frustum,
+        frustum = frame.frustum,
         
         draw_count = frame.draw_count,
         flags      = shader_culling_flags,
@@ -1313,7 +1371,7 @@ cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelin
         s11     = frame.screen_from_view[1,1],
         near_z  = state.near_z,
         far_z   = state.draw_distance,
-        frustum = frustum,
+        frustum = frame.frustum,
         
         flags = shader_culling_flags,
         
@@ -1430,7 +1488,6 @@ cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelin
         gpu_set_cull_state(cmd, { .BACK }, .COUNTER_CLOCKWISE)
         gpu_set_rasterization_samples(cmd, ._1)
         
-        // @speed only record if requested by caller(i.e. when it will actually be displayed
         vk.CmdBeginQuery(cmd, frame.stats_pool, frame.query_index, {})
         
         gpu_set_pipeline(cmd, pipelines.meshlets[stage])
@@ -1604,5 +1661,5 @@ destroy_render_targets :: proc (gpu: ^Gpu, render_targets: ^Render_Targets) {
 
 print_sdl_error_and_exit :: proc (loc := #caller_location) -> ! {
     print("%v:%v:%v: SDL call returned %v\n", loc.file_path, loc.line, loc.column, sdl.GetError())
-    os.exit(1)
+    runtime.exit(1)
 }
