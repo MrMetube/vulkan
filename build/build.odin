@@ -1,5 +1,7 @@
 package build
 
+import "base:runtime"
+
 import "core:os"
 import "core:fmt"
 import "../code" // just for the shader compiling
@@ -76,7 +78,7 @@ compile_shaders :: proc () {
     
     if !success {
         fmt.printfln("\nFailed to compile shaders. Stopping build process.")
-        os.exit(1)
+        runtime.exit(1)
     }
     
     fmt.printfln("\nAll shaders compiled.\n")

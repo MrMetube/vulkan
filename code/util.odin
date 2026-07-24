@@ -5,8 +5,8 @@ package main
 import "base:intrinsics"
 import "base:runtime"
 
+import vmem "core:mem/virtual"
 import "core:simd"
-import "core:os"
 
 _ :: simd
 
@@ -389,14 +389,17 @@ integer_log2 :: proc (x: u32) -> u32 {
 
 ////////////////////////////////////////////////
 
-// Assumes that its a regular file with a known size and not a pipe or socket or other "file" that must be read in parts.
-read_entire_file :: proc (path: string, allocator: Allocator) -> (data: [] u8, error: os.Error) {
-    file := os.open(path)                or_return
-    defer   os.close(file)
-    size := os.file_size(file)           or_return
-    data  = make([] u8, size, allocator) or_return
-    read := os.read_full(file, data)     or_return
-    assert(cast(i64) read == size)
-    
-    return data, nil
+Arena :: vmem.Arena
+
+make_arena :: proc () -> Arena {
+    result: Arena
+    error := vmem.arena_init_growing(&result)
+    assert(error == nil)
+    return result
 }
+arena_allocator :: vmem.arena_allocator
+
+arena_temp_begin  :: vmem.arena_temp_begin
+arena_temp_end    :: vmem.arena_temp_end
+arena_temp_ignore :: vmem.arena_temp_ignore
+arena_free_all    :: vmem.arena_free_all

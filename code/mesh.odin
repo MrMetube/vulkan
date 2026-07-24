@@ -14,7 +14,7 @@ import "vendor:cgltf"
 // have their access synchronized, so that no 2 threads use the same memory and that no thread uses
 // memory that was freed, if any buffer needed to be reallocated to grow.
 //
-load_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Draw, camera: ^Camera, texture_paths: ^[dynamic] string, sun_direction: ^v3) -> bool {
+load_gltf_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Draw, camera: ^Camera, texture_paths: ^[dynamic] string, sun_direction: ^v3) -> bool {
     path := fmt.ctprint(filepath)
     
     options: cgltf.options

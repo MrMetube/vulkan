@@ -5,7 +5,6 @@ import "base:runtime"
 
 import "core:fmt"
 import "core:mem"
-import "core:os"
 import "core:strings"
 import "core:slice"
 import "core:time"
@@ -33,8 +32,6 @@ State :: struct {
     // where we then take its distance from the origin as the draw distance.
     draw_distance: f32, 
     
-    sun_direction: v3,
-    camera: Camera,
     debug:  Debug, // @naming
     
     absolute_frame_index: u64,
@@ -344,8 +341,11 @@ main :: proc () {
     }
     
     the_cpu_profiler = new(profiler.Event_Table, context.allocator)
-    the_cpu_profile_zones := make([dynamic] profiler.Zone, context.allocator)
+    defer free(the_cpu_profiler, context.allocator)
     profiler.set_recording(the_cpu_profiler, true)
+    
+    the_cpu_profile_zones := make([dynamic] profiler.Zone, context.allocator)
+    defer delete(the_cpu_profile_zones)
     
     profile_zone_begin("Setup")
     
@@ -362,11 +362,6 @@ main :: proc () {
     ////////////////////////////////////////////////
     
     state: State
-    state.camera = Camera {
-        p           = {0, 0, 0},
-        orientation = 1,
-        fov_y       = 70 * RadiansFromDegrees,
-    }
     state.near_z = 0.01
     state.draw_distance = 1000
     
@@ -387,6 +382,12 @@ main :: proc () {
     profile_zone_end()
     
     gpu := &Gpu {}
+    
+    
+    debug_name_arena := make_arena()
+    gpu_debug_name_init(arena_allocator(&debug_name_arena))
+    defer gpu_debug_name_deinit()
+    
     {
         props     := sdl.GetWindowProperties(window)
         hinstance := sdl.GetPointerProperty(props, sdl.PROP_WINDOW_WIN32_INSTANCE_POINTER, nil)
@@ -407,173 +408,12 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    // @todo collect Buffers, textures and draws and top_level and maybe others into a Scene struct, because their lifetime is as long as the scene is active.
-    // @todo make a separate allocator for all the scene and geometry setup that we free once before the frame loop
-    buffers: Buffers
-    {
-        profile_scope("Allocate geometry buffers")
-        
-        vertex_and_index_usage := vk.BufferUsageFlags { .STORAGE_BUFFER }
-        if raytracing_supported {
-            vertex_and_index_usage += { .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR }
-        }
-        
-        // @todo why are we allocating them wastefully before copying into them? Just before the copy we know exactly how much memory we will need.
-        // Draws is the exception unless we really only have static geometry and nothing dynamic. 
-        // So we basically need a static and a dynamic set(each also needs top and bottom level acceleration structures).
-        
-        buffers.vertices     = gpu_allocate_slice(gpu, [] Vertex,  256 * Megabyte / size_of(Vertex),  memory = .Default, usage = vertex_and_index_usage)
-        buffers.indices      = gpu_allocate_slice(gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = .Default, usage = vertex_and_index_usage + { .INDEX_BUFFER })
-        buffers.meshlets     = gpu_allocate_slice(gpu, [] Meshlet, 256 * Megabyte / size_of(Meshlet), memory = .Default)
-        buffers.meshlet_data = gpu_allocate_slice(gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = .Default)
-        buffers.meshes       = gpu_allocate_slice(gpu, [] Mesh,    256 * Megabyte / size_of(Mesh),    memory = .Default)
-        
-        buffers.draws = gpu_allocate(gpu, [] Draw, 256 * Megabyte / size_of(Draw), 16, Memory_Kind.Default)
-    }
-    
-    textures: [] Image
-    defer delete(textures, context.allocator)
-    
-    scene_draws:   [dynamic] Draw
-    bottom_levels: [] Acceleration_Structure
-    top_level:     Acceleration_Structure
-    {
-        loading_scratch := context.temp_allocator
-        defer free_all(loading_scratch)
-        
-        geometry: Geometry
-        geometry.vertices.allocator     = loading_scratch
-        geometry.indices.allocator      = loading_scratch
-        geometry.meshlets.allocator     = loading_scratch
-        geometry.meshlet_data.allocator = loading_scratch
-        geometry.meshes.allocator       = loading_scratch
-        
-        {
-            path := "niagara_bistro/bistro.gltf"
-            texture_paths := make([dynamic] string, loading_scratch)
-            print("\nLoading scene: %v\n", path)
-            
-            profile_zone_begin("load scene")
-            if !load_scene(&geometry, path, &scene_draws, &state.camera, &texture_paths, &state.sun_direction) {
-                runtime.exit(1)
-            }
-            profile_zone_end()
-            
-            print("  Loaded scene %q: %v meshes, %v draws, %v textures\n", path, len(geometry.meshes), len(scene_draws), len(texture_paths))
-            print("  Loading textures\n")
-            
-            make_by_pointer(&textures, len(texture_paths), context.allocator)
-            
-            //
-            // @speed Moving the copies to a queue will speedup the loading from ssd(~22%). It may or may not help
-            // with the drivers copy(~71%), depending on its ability to be parallelized. 
-            /// 0.957 / 1.34
-            /// 0.3   / 1.34
-            //
-            // Read speed testing estimates a max speed of 6.5 Gb/s with a preallocated and mapped buffer.
-            // Here we currently load ~2.1 Gb.
-            /// 2.1 / 6.5
-            // Just loading the textures should take ~0.3s itself: which it does!
-            // The whole texture upload takes roughly 0.8-1.5s, so ~0.5-1.2s itself, which is mainly
-            // the copy into the texture by the cpu. A straight memcopy would be faster by the driver
-            // may need to swizzle the data based on the formats.
-            /// 2.1 / 0.957
-            /// 2.1 / 0.493
-            // Therefore we only reach speeds of ~2.2 Gb/s (a memcopy of the same data ~4.3Gb/s)
-            // So the driver's copy is roughly half as fast as a memcopy.
-            //
-            // https://developer.nvidia.com/blog/advanced-api-performance-async-copy/
-            // This article recommends using a copy-queue as NVidia has dedicated async copy engines.
-            // It might be the case that the swizzleling already saturates the cpu's memory bandwidth,
-            // but that should be specifically tested.
-            // 
-            // 1. Check out async copy and/or async compute for copy work and synchronize with the 
-            //    graphics via semaphores.
-            // 2. (optional) Test if the drivers cpu copy is truely bottlenecked if multiple threads
-            //    call into it at once.
-            // 3. Even if the ssd load is not the biggest part, we can still multithread it. Either
-            //    use worker threads, or check out OS native IO rings.
-            //
-            total_size: int
-            {
-                profile_scope("upload textures")
-                
-                texture_descs      := make([] Texture_Desc, len(texture_paths), loading_scratch)
-                texture_pixel_size := make([] int,          len(texture_paths), loading_scratch)
-                texture_file       := make([] ^os.File,     len(texture_paths), loading_scratch)
-                
-                max_size : int
-                for texture_path, index in texture_paths {
-                    file, open_error := os.open(texture_path); assert(open_error == nil)
-                    texture_descs[index], texture_pixel_size[index] = parse_dds_texture_header(file)
-                    texture_file[index] = file
-                    
-                    pixel_size := texture_pixel_size[index]
-                    max_size = max(max_size, pixel_size)
-                    total_size += pixel_size
-                }
-                
-                copy_buffer := make([] u8, max_size, loading_scratch)
-                
-                for index in 0..<len(texture_paths) {
-                    pixel_size := texture_pixel_size[index]
-                    file       := texture_file[index]
-                    
-                    buffer := copy_buffer[:pixel_size]
-                    read, read_error := os.read_full(file, buffer); assert(read_error == nil); assert(read == pixel_size)
-                    os.close(file)
-                    
-                    texture := gpu_allocate_texture(gpu, texture_descs[index])
-                    gpu_copy_to_texture_immediately(gpu, texture, buffer)
-                    
-                    textures[index] = texture
-                }
-            }
-            
-            print("  Loaded textures: %vb\n\n", view_magnitude(total_size))
-        }
-        
-        profile_zone_begin("upload geometry")
-        copy(buffers.vertices.cpu,     geometry.vertices[:])
-        copy(buffers.indices.cpu,      geometry.indices[:])
-        copy(buffers.meshlets.cpu,     geometry.meshlets[:])
-        copy(buffers.meshlet_data.cpu, geometry.meshlet_data[:])
-        copy(buffers.meshes.cpu,       geometry.meshes[:])
-        profile_zone_end()
-        
-        if raytracing_supported {
-            // @todo which pool?
-            queue := gpu.general_queue
-            pool  := gpu.command_pools[0]
-            
-            bottom_levels = build_bottom_level_acceleration_structures(gpu, queue, pool, &buffers, geometry, context.allocator,   loading_scratch)
-            top_level     = build_top_level_acceleration_structures(   gpu, queue, pool, &buffers, scene_draws[:], bottom_levels, loading_scratch)
-        }
-    
-        profile_zone_begin("Allocate render buffers")
-        
-        meshlet_visibility_count: u32
-        for &draw in scene_draws {
-            mesh := geometry.meshes[draw.mesh_index]
-            // @speed just ensure that the base lod has the most meshlets
-            meshlet_count: u32
-            for lod in mesh.lods[:mesh.lod_count] {
-                meshlet_count = max(meshlet_count, lod.meshlet_count)
-            }
-            
-            draw.meshlet_visibility_offset = meshlet_visibility_count
-            meshlet_visibility_count      += meshlet_count
-        }
-        
-        buffers.draw_commands      = gpu_allocate_slice(gpu, [] Draw_Command, TaskWidthLimit,                        memory = .GPU) 
-        buffers.draw_visibility    = gpu_allocate_slice(gpu, [] u32,          256 * Megabyte / size_of(u32),         memory = .GPU, usage = { .STORAGE_BUFFER, .TRANSFER_DST })
-        buffers.meshlet_visibility = gpu_allocate_slice(gpu, [] u32,          (meshlet_visibility_count + 31) / 32,  memory = .GPU, usage = { .STORAGE_BUFFER, .TRANSFER_DST })
-    }
-    
-    profile_zone_end()
+    scene: Scene
+    init_scene(gpu, &scene)
     
     ////////////////////////////////////////////////
     
+    // @todo is this part of Debug?
     profile_zone_begin("Init shaders")
     watchers := make([dynamic] Watcher, context.allocator)
     
@@ -581,7 +421,8 @@ main :: proc () {
     
     generate_shader_api("shaders/api.generated.glsl")
     
-    // @speed we duplicate this watcher per shader, so that each shader can keep track of the header being changed and be recompiled independently from other shaders, without effecting their modification test.
+    // @speed deduplicate the common watcher and somehow track that the other shaders all depend on it and should all reload if it is changed
+    pipelines: Pipelines
     shaders := Shaders {
         meshlet_task = init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.task"),
         meshlet_mesh = init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.mesh"),
@@ -610,8 +451,6 @@ main :: proc () {
     next_frame := cast(u64) MaxFramesInFlight+1
     frame_semaphore := gpu_create_timeline_semaphore(gpu, MaxFramesInFlight)
     
-    pipelines: Pipelines
-    
     profile_zone_end()
     
     profile_zone_begin("Allocate GPU Bumps")
@@ -627,19 +466,17 @@ main :: proc () {
     profile_zone_end()
     
     for {
-        free_all(context.temp_allocator)
-        
         {
             events := profiler.swap_active_array_and_get_events(the_cpu_profiler)
             profiler.collate_events(events, &the_cpu_profile_zones, nil)
         }
         
-        profile_zone_begin("Frame")
+        profile_scope("Frame")
+        free_all(context.temp_allocator)
         
         ////////////////////////////////////////////////
         
         // @cleanup move into Frame
-        
         mouse_delta: v2
         mouse_wheel_delta: f32
         vsync_changed: bool
@@ -647,12 +484,10 @@ main :: proc () {
         frame: Frame
         if state.absolute_frame_index == 0 { frame.print_profile = true }
         
-        // @todo this needs to happen whenever the scene is loaded
-        if state.absolute_frame_index == 0 { frame.clear_dvb_and_mvb = true }
-        
         profile_zone_begin("Input Events")
         
         window_event_begin := time.tick_now()
+        pyramid_mip_level_delta: i32
         for event: sdl.Event; sdl.PollEvent(&event); {
             #partial switch event.type {
             case .QUIT:
@@ -662,14 +497,9 @@ main :: proc () {
                 state.mouse_p = { event.motion.x, cast(f32) gpu.swapchain_size.y - event.motion.y }
                 mouse_delta   = { event.motion.xrel, event.motion.yrel }
                 
-            case .MOUSE_BUTTON_DOWN:
-                if event.button.button == sdl.BUTTON_LEFT {
-                    state.left_down = true
-                }
-            case .MOUSE_BUTTON_UP:
-                if event.button.button == sdl.BUTTON_LEFT {
-                    state.left_down = false
-                }
+            case .MOUSE_BUTTON_DOWN: if event.button.button == sdl.BUTTON_LEFT { state.left_down = true  }
+            case .MOUSE_BUTTON_UP:   if event.button.button == sdl.BUTTON_LEFT { state.left_down = false }
+            
             case .KEY_DOWN:
                 debug := &state.debug
                 switch event.key.key {
@@ -682,8 +512,8 @@ main :: proc () {
                 
                 case sdl.K_I:     frame.print_profile = true
                 
-                case sdl.K_PLUS:  debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level+1, 0, cast(i32) len(render_targets.depth_pyramid_mips)-1)
-                case sdl.K_MINUS: debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level-1, 0, cast(i32) len(render_targets.depth_pyramid_mips)-1)
+                case sdl.K_PLUS:  pyramid_mip_level_delta = +1
+                case sdl.K_MINUS: pyramid_mip_level_delta = -1
                 
                 case sdl.K_ESCAPE: state.quit = true
                 }
@@ -706,6 +536,9 @@ main :: proc () {
         
         cpu_delta:  f64
         {
+            debug := &state.debug
+            debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level+pyramid_mip_level_delta, 0, cast(i32) len(render_targets.depth_pyramid_mips)-1)
+            
             current_time  := time.tick_now()
             delta_tick    := time.tick_diff(state.last_time, current_time)
             // Though we do not track the time, *we* take to handle the input, we also exclude all time taken by sdl and windows(which may block)
@@ -716,12 +549,20 @@ main :: proc () {
             state.last_time  = current_time
             
             if mouse_wheel_delta != 0 {
-                state.camera.p.z += mouse_wheel_delta * -10 * frame.delta_time
+                scene.camera.p.z += mouse_wheel_delta * -10 * frame.delta_time
             }
             
             if mouse_delta != 0 && state.left_down {
-                state.camera.p.xy += mouse_delta * {-1, 1} * frame.delta_time * 5
+                scene.camera.p.xy += mouse_delta * {-1, 1} * frame.delta_time * 5
             }
+        }
+        
+        ////////////////////////////////////////////////
+        
+        if !scene.loaded {
+            // @speed move as much of the work into a work queue
+            load_scene(gpu, &scene)
+            frame.clear_dvb_and_mvb = true
         }
         
         ////////////////////////////////////////////////
@@ -731,7 +572,6 @@ main :: proc () {
         profile_zone_end()
         
         // absolute_frame_index should only count renderer frames.
-        frame.screen_size           = gpu.swapchain_size
         frame.index                 = state.absolute_frame_index % MaxFramesInFlight
         state.absolute_frame_index += 1
         
@@ -748,6 +588,8 @@ main :: proc () {
         assert(gpu.swapchain_state != .Dirty)
         
         if gpu.swapchain_state == .Window_Is_Minimized { continue }
+        
+        frame.screen_size = gpu.swapchain_size
         
         ////////////////////////////////////////////////
         
@@ -933,9 +775,9 @@ main :: proc () {
             // amount of precision at the far plane. It is then also simple to move the far plane of the projection matrix towards infinity.
             // In the limit this produces the matrix given by projection_reversed_z_infinite_far_plane.
             // 
-            oriented := cast(m4) la.matrix3_from_quaternion(state.camera.orientation)
-            frame.view_from_world  = la.inverse(translate(oriented, state.camera.p))
-            frame.screen_from_view = projection_reversed_z_infinite_far_plane(state.camera.fov_y, cast(f32) gpu.swapchain_size.x / cast(f32) gpu.swapchain_size.y, state.near_z)
+            oriented := cast(m4) la.matrix3_from_quaternion(scene.camera.orientation)
+            frame.view_from_world  = la.inverse(translate(oriented, scene.camera.p))
+            frame.screen_from_view = projection_reversed_z_infinite_far_plane(scene.camera.fov_y, cast(f32) gpu.swapchain_size.x / cast(f32) gpu.swapchain_size.y, state.near_z)
             
             if state.debug.culling_enabled {
                 frustum_x := get_row_v4(frame.screen_from_view, 3) + get_row_v4(frame.screen_from_view, 0) // x + w < 0
@@ -967,9 +809,10 @@ main :: proc () {
         vk.CmdResetQueryPool(cmd, frame.stats_pool, 0, stats_count)
         
         ////////////////////////////////////////////////
-        // @waste texture management and draw "generation" only really need to happen once per "level load" as there is no streaming in of data.
         
         {
+            // @waste texture management and draw "generation" only really need to happen once per "level load" as there is no streaming in of data.
+            
             profile_scope("Setup Descriptor Heap")
             
             write_texture :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index_offset: ^u32, image: Image, sampled: bool, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) -> u32 {
@@ -995,7 +838,7 @@ main :: proc () {
             
             // @volatile draws assume that their texture indices start at index 0. Add some kind of base offset that the shader add to a draws
             // texture index(if its not 0?) to get its texture, or do this offsetting on draw generation on the cpu.
-            for &texture in textures {
+            for &texture in scene.textures {
                 texture.sampled_index = write_texture(gpu, &descriptor_heap, &descriptor_offset, texture, true)
             }
             
@@ -1008,7 +851,7 @@ main :: proc () {
                 mip.storage_index = write_texture(gpu, &descriptor_heap, &descriptor_offset, render_targets.depth_pyramid, false, cast(u32) mip_level, 1)
             }
             
-            write_acceleration_structure_to_heap(gpu, &descriptor_heap, descriptor_offset, top_level)
+            write_acceleration_structure_to_heap(gpu, &descriptor_heap, descriptor_offset, scene.top_level)
             frame.top_level_acceleration_structure_index = descriptor_offset
             descriptor_offset += 1
             
@@ -1023,8 +866,8 @@ main :: proc () {
             // processing the previous draw commands. We need atleast MaxFramesInFlight different draw_buffers to prevent this 
             // race condition, if the draws themselves change every frame, which is likely if the objects themselves are dynamic.
             //
-            copy(buffers.draws.cpu, scene_draws[:])
-            frame.draw_count = cast(u32) len(scene_draws)
+            copy(scene.buffers.draws.cpu, scene.draws[:])
+            frame.draw_count = cast(u32) len(scene.draws)
         }
         
         ////////////////////////////////////////////////
@@ -1040,13 +883,13 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        cull_and_render(cmd, .early, pipelines, shaders, buffers, &render_targets, &state, &frame)
+        cull_and_render(cmd, .early, pipelines, shaders, &render_targets, state, scene, &frame)
         
         generate_depth_pyramid(cmd, pipelines, shaders, render_targets, frame)
         
-        cull_and_render(cmd, .late, pipelines, shaders, buffers, &render_targets, &state, &frame)
+        cull_and_render(cmd, .late, pipelines, shaders, &render_targets, state, scene, &frame)
         
-        cull_and_render(cmd, .post, pipelines, shaders, buffers, &render_targets, &state, &frame)
+        cull_and_render(cmd, .post, pipelines, shaders, &render_targets, state, scene, &frame)
         
         if false {
             render_ui(cmd, pipelines, render_targets, state, frame)
@@ -1103,10 +946,6 @@ main :: proc () {
         
         next_frame += 1
         profile_zone_end()
-        
-        ////////////////////////////////////////////////
-        
-        profile_zone_end()
     }
     
     
@@ -1119,12 +958,6 @@ main :: proc () {
     
     profile_zone_begin("wait and handles")
 	check(vk.DeviceWaitIdle(gpu.device))
-    
-    for it in bottom_levels {
-        vk.DestroyAccelerationStructureKHR(gpu.device, it.acceleration_structure, nil)
-    }
-    delete(bottom_levels, context.allocator) // @volatile
-    vk.DestroyAccelerationStructureKHR(gpu.device, top_level.acceleration_structure, nil)
     
     for stage in Stage {
         destroy_pipeline(gpu, pipelines.meshlets[stage])
@@ -1148,34 +981,16 @@ main :: proc () {
     destroy_render_targets(gpu, &render_targets)
     profile_zone_end()
     
-    profile_zone_begin("buffers")
-    gpu_free(gpu, buffers.vertices)
-    gpu_free(gpu, buffers.indices)
-    gpu_free(gpu, buffers.meshlets)
-    gpu_free(gpu, buffers.meshlet_data)
-    gpu_free(gpu, buffers.meshes)
-    gpu_free(gpu, buffers.draws)
-    gpu_free(gpu, buffers.draw_commands)
-    gpu_free(gpu, buffers.draw_visibility)
-    gpu_free(gpu, buffers.meshlet_visibility)
-    gpu_free(gpu, buffers.bottom_level_acceleration_structures)
-    gpu_free(gpu, buffers.top_level_acceleration_structures)
-    profile_zone_end()
-    
     profile_zone_begin("bump allocators")
     for &bump in frame_bump_allocators {
         bump_allocator_delete(gpu, &bump)
     }
     profile_zone_end()
     
-    profile_zone_begin("textures")
     // @speed We should really make an allocator for images that we can just free all at once. 
     // This takes ~120ms with ~340/2.1Gb of textures.
     // This would not just aid shutdown speed, but also changing to another scene.
-    for texture in textures {
-        gpu_free_image(gpu, texture)
-    }
-    profile_zone_end()
+    deinit_scene(gpu, &scene)
     
     gpu_deinit(gpu)
     profile_zone_end()
@@ -1186,7 +1001,6 @@ main :: proc () {
     
     deinit_assets()
     
-    delete(scene_draws)
     profile_zone_end()
     profile_zone_end()
     
@@ -1194,9 +1008,6 @@ main :: proc () {
     profiler.collate_events(events, &the_cpu_profile_zones, nil)
     
     print_cpu_profile(the_cpu_profile_zones[:])
-    
-    free(the_cpu_profiler, context.allocator) // @volatile see new
-    delete(the_cpu_profile_zones)
 }
 
 ////////////////////////////////////////////////
@@ -1308,7 +1119,6 @@ print_cpu_profile :: proc (zones: [] profiler.Zone) {
 ////////////////////////////////////////////////
 
 get_next_image :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, frame_index: u64) -> bool {
-    // @todo use swapchain maintenance to not need the assert outside this call
     info := vk.AcquireNextImageInfoKHR {
         sType = .ACQUIRE_NEXT_IMAGE_INFO_KHR,
         
@@ -1327,7 +1137,8 @@ get_next_image :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, frame_index: u64) ->
     return true
 }
 
-cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelines, shaders: Shaders, buffers: Buffers, render_targets: ^Render_Targets, state: ^State, frame: ^Frame) {
+// @todo frame should not be a pointer but for the stats query index
+cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelines, shaders: Shaders, render_targets: ^Render_Targets, state: State, scene: Scene, frame: ^Frame) {
     //
     // early pass - frustum cull             & fill objects that *were* visible last frame
     //  late pass - frustum & occlusion cull & fill objects that were *not* visible last frame
@@ -1366,10 +1177,10 @@ cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelin
         lod_step = 1.5,
         
         depth_pyramid_index = render_targets.depth_pyramid.sampled_index,
-        draw_buffer            = buffers.draws.gpu.p,
-        mesh_buffer            = buffers.meshes.gpu.p,
-        draw_visibility_buffer = buffers.draw_visibility.gpu.p,
-        draw_command_buffer    = buffers.draw_commands.gpu.p,
+        draw_buffer            = scene.buffers.draws.gpu.p,
+        mesh_buffer            = scene.buffers.meshes.gpu.p,
+        draw_visibility_buffer = scene.buffers.draw_visibility.gpu.p,
+        draw_command_buffer    = scene.buffers.draw_commands.gpu.p,
         draw_group_count       = draw_group_count.gpu.p
     }
     
@@ -1386,18 +1197,18 @@ cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelin
         
         screen_size     = cast(v2) frame.screen_size,
         view_from_world = frame.view_from_world,
-        sun_direction   = state.sun_direction,
+        sun_direction   = scene.sun_direction,
         
         frame_heap_offset                      = frame.frame_heap_offset,
         depth_pyramid_index                    = render_targets.depth_pyramid.sampled_index,
         top_level_acceleration_structure_index = frame.top_level_acceleration_structure_index,
         
-        draw_command_buffer       = buffers.draw_commands.gpu.p,
-        draw_buffer               = buffers.draws.gpu.p,
-        meshlet_buffer            = buffers.meshlets.gpu.p,
-        meshlet_data_buffer       = buffers.meshlet_data.gpu.p,
-        vertex_buffer             = buffers.vertices.gpu.p,
-        meshlet_visibility_buffer = buffers.meshlet_visibility.gpu.p,
+        draw_command_buffer       = scene.buffers.draw_commands.gpu.p,
+        draw_buffer               = scene.buffers.draws.gpu.p,
+        meshlet_buffer            = scene.buffers.meshlets.gpu.p,
+        meshlet_data_buffer       = scene.buffers.meshlet_data.gpu.p,
+        vertex_buffer             = scene.buffers.vertices.gpu.p,
+        meshlet_visibility_buffer = scene.buffers.meshlet_visibility.gpu.p,
     }
     
     cull_label: cstring
@@ -1419,8 +1230,8 @@ cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelin
         if stage == .early {
             // @todo this is stupidly redundant
             if frame.clear_dvb_and_mvb {
-                gpu_fill_memory(cmd, buffers.draw_visibility,    frame.draw_count, 0)
-                gpu_fill_memory(cmd, buffers.meshlet_visibility, len(buffers.meshlet_visibility.cpu), 0)
+                gpu_fill_memory(cmd, scene.buffers.draw_visibility,    frame.draw_count, 0)
+                gpu_fill_memory(cmd, scene.buffers.meshlet_visibility, len(scene.buffers.meshlet_visibility.cpu), 0)
             }
         }
         

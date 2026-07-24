@@ -235,14 +235,24 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
         {
             profile_scope("Vulkan Instance")
             
-            instance_extension_names: [dynamic; 16] cstring
+            instance_extension: [dynamic; 16] cstring
             if ODIN_OS == .Windows {
-                append(&instance_extension_names, vk.KHR_SURFACE_EXTENSION_NAME)
-                append(&instance_extension_names, "VK_KHR_win32_surface")
+                append(&instance_extension, vk.KHR_SURFACE_EXTENSION_NAME)
+                append(&instance_extension, "VK_KHR_win32_surface")
             } else { unimplemented() }
             
             when Validation {
-                append(&instance_extension_names, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
+                append(&instance_extension, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
+            }
+            
+            {
+                extension_count: u32
+                check(vk.EnumerateInstanceExtensionProperties(nil, &extension_count, nil))
+                extensions: [128] vk.ExtensionProperties
+                assert(extension_count <= cast(u32) len(extensions))
+                check(vk.EnumerateInstanceExtensionProperties(nil, &extension_count, raw_data(&extensions)))
+                
+                check_extensions(extensions[:extension_count], instance_extension[:], false)
             }
             
             instance_create_info := vk.InstanceCreateInfo {
@@ -250,13 +260,15 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
                 pApplicationInfo = &vk.ApplicationInfo {
                     sType = .APPLICATION_INFO,
                     pApplicationName = "Vulkan Renderer",
-                    apiVersion = vk.API_VERSION_1_4,
+                    apiVersion       = vk.API_VERSION_1_4,
                 },
-                enabledExtensionCount   = cast(u32) len(instance_extension_names),
-                ppEnabledExtensionNames = &instance_extension_names[0],
+                enabledExtensionCount   = cast(u32) len(instance_extension),
+                ppEnabledExtensionNames = raw_data(&instance_extension),
             }
             
-            _ :: runtime
+            debug_utils_messenger: vk.DebugUtilsMessengerCreateInfoEXT
+            validation_features:   vk.ValidationFeaturesEXT
+            
             if Validation {
                 validation_layers := [] cstring { "VK_LAYER_KHRONOS_validation" }
                 instance_create_info.enabledLayerCount   = cast(u32) len(validation_layers)
@@ -270,22 +282,26 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
                     return false
                 }
                 
-                // DEBUG_PRINTF // @todo enable this, if needed
-                enabled: [dynamic; 2] vk.ValidationFeatureEnableEXT
-                if Sync_Validation { append(&enabled, vk.ValidationFeatureEnableEXT.SYNCHRONIZATION_VALIDATION ) }
-                
-                instance_create_info.pNext = &vk.DebugUtilsMessengerCreateInfoEXT {
+                debug_utils_messenger = {
                     sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
                     messageSeverity = { .VERBOSE, .WARNING, .ERROR },
                     messageType     = { .VALIDATION },
                     pfnUserCallback = vulkan_debug_utils_callback,
-                    
-                    pNext = &vk.ValidationFeaturesEXT {
-                        sType = .VALIDATION_FEATURES_EXT,
-                        enabledValidationFeatureCount = cast(u32) len(enabled),
-                        pEnabledValidationFeatures    = raw_data(&enabled),
-                    },
                 }
+                
+                // DEBUG_PRINTF // @todo enable this, if needed
+                enabled_validation_features: [dynamic; 2] vk.ValidationFeatureEnableEXT
+                if Sync_Validation { append(&enabled_validation_features, vk.ValidationFeatureEnableEXT.SYNCHRONIZATION_VALIDATION ) }
+                
+                validation_features = {
+                    sType = .VALIDATION_FEATURES_EXT,
+                    enabledValidationFeatureCount = cast(u32) len(enabled_validation_features),
+                    pEnabledValidationFeatures    = raw_data(&enabled_validation_features),
+                }
+                
+                ppNext := &instance_create_info.pNext
+                chain(&ppNext, &debug_utils_messenger)
+                chain(&ppNext, &validation_features)
             }
             
             profile_zone_begin("Create Instance Call")
@@ -381,6 +397,35 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
         fmt.printfln("Selected device: %v", cast(cstring) &gpu.device_properties.properties.deviceName[0])
         assert(gpu.device_properties.properties.limits.timestampComputeAndGraphics)
     }
+        
+    check_extensions :: proc (present_extenions: [] vk.ExtensionProperties, desired_extensions: [] cstring, check_for_ray_tracing: bool) -> bool {
+        all_found := true
+        
+        for desired in desired_extensions {
+            found: bool
+            for &present in present_extenions {
+                present_name := cast(cstring) &present.extensionName[0]
+                
+                if present_name == desired {
+                    found = true
+                }
+                
+                // @cleanup
+                if check_for_ray_tracing {
+                    if !raytracing_supported && present_name == vk.KHR_RAY_QUERY_EXTENSION_NAME {
+                        raytracing_supported = true
+                    }
+                }
+            }
+            
+            if !found {
+                all_found = false
+                fmt.printfln("Extension not supported: %v", desired)
+            }
+        }
+        
+        return all_found
+    }
     
     ////////////////////////////////////////////////
     // Extensions
@@ -398,43 +443,21 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
             vk.EXT_MESH_SHADER_EXTENSION_NAME,
             vk.EXT_DESCRIPTOR_HEAP_EXTENSION_NAME,
             vk.KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME,
-            vk.KHR_SHADER_UNTYPED_POINTERS_EXTENSION_NAME,
             
+            vk.KHR_SHADER_UNTYPED_POINTERS_EXTENSION_NAME,
             vk.EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME,
         }
         
         {
             count: u32
             vk.EnumerateDeviceExtensionProperties(gpu.physical_device, nil, &count, nil)
-            extensions := make([] vk.ExtensionProperties, count, context.temp_allocator)
-            vk.EnumerateDeviceExtensionProperties(gpu.physical_device, nil, &count, raw_data(extensions))
+            // this is only static to not be too large for the stack.
+            @(static) extensions: [dynamic; 1024] vk.ExtensionProperties
+            assert(count < cap(extensions))
+            resize(&extensions, count)
+            vk.EnumerateDeviceExtensionProperties(gpu.physical_device, nil, &count, raw_data(&extensions))
             
-            desired_found := make([] b8, len(device_extensions), context.temp_allocator)
-            
-            for &it in extensions {
-                name := cast(cstring) &it.extensionName[0]
-                for desired, desired_index in device_extensions {
-                    if desired_found[desired_index] { continue }
-                    
-                    if desired == name {
-                        desired_found[desired_index] = true
-                        break
-                    }
-                }
-                
-                if !raytracing_supported && name == vk.KHR_RAY_QUERY_EXTENSION_NAME {
-                    raytracing_supported = true
-                }
-            }
-            
-            all_supported: bool = true
-            for found, index in desired_found {
-                if !found {
-                    fmt.printfln("Extension not supported: %v", device_extensions[index])
-                    all_supported = false
-                }
-            }
-            assert(all_supported)
+            check_extensions(extensions[:], device_extensions[:], true)
         }
         
         f11 := vk.PhysicalDeviceVulkan11Features {
@@ -512,9 +535,9 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
         f_mesh := vk.PhysicalDeviceMeshShaderFeaturesEXT {
             sType = .PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
             
-            meshShader = true, // 57.18% (vulkan.gpuinfo.org for "1.4 and up" on 18.06.2026)
+            meshShader = true, // 73.43% (vulkan.gpuinfo.org for "Windows, 1.4 and up" on 24.07.2026)
             taskShader = true,
-            meshShaderQueries = true,
+            meshShaderQueries = true, // for stats pool queries
         }
         
         f_pointer := vk.PhysicalDeviceShaderUntypedPointersFeaturesKHR {
@@ -596,22 +619,10 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
         
         {
             for &pool in gpu.command_pools {
-                command_pool_create_info := vk.CommandPoolCreateInfo {
-                    sType = .COMMAND_POOL_CREATE_INFO,
-                    flags            = { .RESET_COMMAND_BUFFER },
-                    queueFamilyIndex = queue_family_index,
-                }
-                
-                check(vk.CreateCommandPool(gpu.device, &command_pool_create_info, nil, &pool))
+                pool = gpu_create_command_pool(&gpu, queue_family_index)
             }
             
-            command_pool_create_info := vk.CommandPoolCreateInfo {
-                sType = .COMMAND_POOL_CREATE_INFO,
-                flags            = { .RESET_COMMAND_BUFFER },
-                queueFamilyIndex = queue_family_index,
-            }
-            
-            check(vk.CreateCommandPool(gpu.device, &command_pool_create_info, nil, &gpu.transfer_command_pool))
+            gpu.transfer_command_pool = gpu_create_command_pool(&gpu, queue_family_index)
         }
         
         ////////////////////////////////////////////////
@@ -686,7 +697,7 @@ check :: proc (result: vk.Result, loc := #caller_location) {
     }
 }
 
-gpu_recreate_swapchain_if_needed :: proc (gpu: ^Gpu, vsync: bool, force_recreation := false) -> (can_render: bool) {
+gpu_recreate_swapchain_if_needed :: proc (gpu: ^Gpu, vsync: bool, force_recreation := false, loc := #caller_location) -> (can_render: bool) {
     if !force_recreation && gpu.swapchain_state != .Dirty && gpu.swapchain_state != .Window_Is_Minimized {
         return true
     }
@@ -698,6 +709,7 @@ gpu_recreate_swapchain_if_needed :: proc (gpu: ^Gpu, vsync: bool, force_recreati
     
     present_mode := vk.PresentModeKHR.FIFO
     if !vsync {
+        // @waste this is done every time but we only need to check once.
         present_mode_count: u32
         check(vk.GetPhysicalDeviceSurfacePresentModesKHR(gpu.physical_device, gpu.surface, &present_mode_count, nil))
         present_modes: [dynamic; 32] vk.PresentModeKHR; assert(present_mode_count <= cap(present_modes))
@@ -748,6 +760,10 @@ gpu_recreate_swapchain_if_needed :: proc (gpu: ^Gpu, vsync: bool, force_recreati
     
     profile_zone_begin("Create Swapchain Call")
     check(vk.CreateSwapchainKHR(gpu.device, &swapchain_create_info, nil, &gpu.swapchain))
+    if Validation {
+        gpu_debug_name_handle(gpu, .SWAPCHAIN_KHR, gpu.swapchain, loc)
+    }
+    
     profile_zone_end()
     
     image_count: u32
@@ -817,7 +833,7 @@ gpu_reflect_set_allocation :: proc (address: vk.DeviceAddress, alloc: GpuAllocat
 }
 
 gpu_allocate :: proc { gpu_allocate_size, gpu_allocate_slice, gpu_allocate_type }
-gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> (cpu_result: pmm, gpu_result: vk.DeviceAddress) {
+gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }, loc := #caller_location) -> (cpu_result: pmm, gpu_result: vk.DeviceAddress) {
     usage := usage
     usage += { .SHADER_DEVICE_ADDRESS }
     
@@ -851,12 +867,17 @@ gpu_allocate_size :: proc (gpu: ^Gpu, size: umm, alignment: umm = 16, memory: Me
     
     gpu_reflect_set_allocation(gpu_result, alloc)
     
+    if Validation {
+        gpu_debug_name_handle(gpu, .BUFFER,        alloc.buffer, loc)
+        gpu_debug_name_handle(gpu, .DEVICE_MEMORY, alloc.memory, loc)
+    }
+    
     return cpu_result, gpu_result
 }
 
-gpu_allocate_slice :: proc (gpu: ^Gpu, $T: typeid/ [] $E, #any_int count: umm, alignment: umm = align_of(E), memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> Gpu_Slice(E) {
+gpu_allocate_slice :: proc (gpu: ^Gpu, $T: typeid/ [] $E, #any_int count: umm, alignment: umm = align_of(E), memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }, loc := #caller_location) -> Gpu_Slice(E) {
     size := size_of(E) * count
-    cpu, gpu := gpu_allocate_size(gpu, size, alignment, memory, usage)
+    cpu, gpu := gpu_allocate_size(gpu, size, alignment, memory, usage, loc = loc)
     
     result: Gpu_Slice(E)
     result.cpu = slice_from_parts(E, cpu, count)
@@ -865,8 +886,8 @@ gpu_allocate_slice :: proc (gpu: ^Gpu, $T: typeid/ [] $E, #any_int count: umm, a
     return result
 }
 
-gpu_allocate_type :: proc (gpu: ^Gpu, $T: typeid, alignment: umm = align_of(T), memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }) -> Gpu_Address(T) {
-    cpu, gpu := gpu_allocate_size(gpu, size_of(T), alignment, memory, usage)
+gpu_allocate_type :: proc (gpu: ^Gpu, $T: typeid, alignment: umm = align_of(T), memory: Memory_Kind = .Default, usage := vk.BufferUsageFlags { .STORAGE_BUFFER }, loc := #caller_location) -> Gpu_Address(T) {
+    cpu, gpu := gpu_allocate_size(gpu, size_of(T), alignment, memory, usage, loc = loc)
     
     result: Gpu_Address(T)
     result.cpu = cast(^T) cpu
@@ -896,7 +917,7 @@ gpu_free_slice :: proc (gpu: ^Gpu, slice: Gpu_Slice($T)) {
 // Textures
 
 // @copypasta this can be compressed with allocate_size
-gpu_allocate_texture :: proc (gpu: ^Gpu, desc: Texture_Desc) -> Image {
+gpu_allocate_texture :: proc (gpu: ^Gpu, desc: Texture_Desc, loc := #caller_location) -> Image {
     samples: vk.SampleCountFlag
     switch desc.sample_count {
     case  1: samples = ._1
@@ -933,6 +954,11 @@ gpu_allocate_texture :: proc (gpu: ^Gpu, desc: Texture_Desc) -> Image {
     result.memory = select_memory_type_and_allocate(gpu, requirements, .GPU)
     
     check(vk.BindImageMemory(gpu.device, result.image, result.memory, 0))
+    
+    if Validation {
+        gpu_debug_name_handle(gpu, .IMAGE,         result.image,  loc)
+        gpu_debug_name_handle(gpu, .DEVICE_MEMORY, result.memory, loc)
+    }
     
     return result
 }
@@ -1061,7 +1087,7 @@ get_image_aspect_mask :: proc (format: vk.Format) -> vk.ImageAspectFlags {
     return result
 }
 
-gpu_create_image_view :: proc (gpu: ^Gpu, image: Image, mip_base: u32, mip_count: u32) -> vk.ImageView {
+gpu_create_image_view :: proc (gpu: ^Gpu, image: Image, mip_base: u32, mip_count: u32, loc := #caller_location) -> vk.ImageView {
     aspect_mask := get_image_aspect_mask(image.format)
     
     view_create_info := vk.ImageViewCreateInfo {
@@ -1074,6 +1100,10 @@ gpu_create_image_view :: proc (gpu: ^Gpu, image: Image, mip_base: u32, mip_count
     
     result: vk.ImageView
     check(vk.CreateImageView(gpu.device, &view_create_info, nil, &result))
+    
+    if Validation {
+        gpu_debug_name_handle(gpu, .IMAGE_VIEW, result, loc)
+    }
     
     return result
 }
@@ -1191,7 +1221,7 @@ make_pipeline_info :: proc (info: ^Pipeline_Info, gpu: ^Gpu, heap: Descriptor_He
     }
 }
 
-gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: ^Shader, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil) -> Pipeline {
+gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: ^Shader, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil, loc := #caller_location) -> Pipeline {
     assert(compute.stage == .COMPUTE)
     
     pipeline_info: Pipeline_Info
@@ -1208,42 +1238,46 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: ^Shader, heap: Descript
     
     check(vk.CreateComputePipelines(gpu.device, gpu.pipeline_cache, 1, &create_info, nil, &result.pipeline))
     
+    if Validation {
+        gpu_debug_name_handle(gpu, .PIPELINE, result.pipeline, loc)
+    }
+    
     return result
 }
 
-gpu_create_graphics_pipeline :: proc (gpu: ^Gpu, vertex, fragment: ^Shader, info: Raster_Desc, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil) -> Pipeline {
+gpu_create_graphics_pipeline :: proc (gpu: ^Gpu, vertex, fragment: ^Shader, info: Raster_Desc, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil, loc := #caller_location) -> Pipeline {
     assert(vertex.stage   == .VERTEX)
     assert(fragment.stage == .FRAGMENT)
     
     result: Pipeline
-    gpu_create_graphics_pipeline_common(gpu, &result, info, heap, { vertex, fragment }, constants)
+    gpu_create_graphics_pipeline_common(gpu, &result, info, heap, { vertex, fragment }, constants, loc)
     
     return result
 }
 
 gpu_create_graphics_meshlet_pipeline :: proc { gpu_create_graphics_meshlet_pipeline_mesh, gpu_create_graphics_meshlet_pipeline_task }
-gpu_create_graphics_meshlet_pipeline_task :: proc (gpu: ^Gpu, task, mesh, frag: ^Shader, info: Raster_Desc, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil) -> Pipeline {
+gpu_create_graphics_meshlet_pipeline_task :: proc (gpu: ^Gpu, task, mesh, frag: ^Shader, info: Raster_Desc, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil, loc := #caller_location) -> Pipeline {
     assert(task.stage == .TASK_EXT)
     assert(mesh.stage == .MESH_EXT)
     assert(frag.stage == .FRAGMENT)
     
     result: Pipeline
-    gpu_create_graphics_pipeline_common(gpu, &result, info, heap, { task, mesh, frag }, constants)
+    gpu_create_graphics_pipeline_common(gpu, &result, info, heap, { task, mesh, frag }, constants, loc)
     
     return result
 }
 
-gpu_create_graphics_meshlet_pipeline_mesh :: proc (gpu: ^Gpu, mesh, frag: ^Shader, info: Raster_Desc, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil) -> Pipeline {
+gpu_create_graphics_meshlet_pipeline_mesh :: proc (gpu: ^Gpu, mesh, frag: ^Shader, info: Raster_Desc, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil, loc := #caller_location) -> Pipeline {
     assert(mesh.stage == .MESH_EXT)
     assert(frag.stage == .FRAGMENT)
     
     result: Pipeline
-    gpu_create_graphics_pipeline_common(gpu, &result, info, heap, { mesh, frag }, constants)
+    gpu_create_graphics_pipeline_common(gpu, &result, info, heap, { mesh, frag }, constants, loc)
     
     return result
 }
 
-gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info: Raster_Desc, heap: Descriptor_Heap, shaders: [] ^Shader, constants: [] Specialization_Constant) {
+gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info: Raster_Desc, heap: Descriptor_Heap, shaders: [] ^Shader, constants: [] Specialization_Constant, loc := #caller_location) {
     pipeline_info: Pipeline_Info
     make_pipeline_info(&pipeline_info, gpu, heap, shaders, constants)
     
@@ -1373,6 +1407,9 @@ gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info:
     }
     
     check(vk.CreateGraphicsPipelines(gpu.device, gpu.pipeline_cache, 1, &info, nil, &result.pipeline))
+    if Validation {
+        gpu_debug_name_handle(gpu, .PIPELINE, result.pipeline, loc)
+    }
 }
 
 pipeline_is_valid :: proc (pipeline: Pipeline) -> bool {
@@ -1403,6 +1440,23 @@ destroy_pipeline :: proc (gpu: ^Gpu, pipeline: Pipeline) {
 // Queue
 
 // GpuQueue gpuCreateQueue(/* DEVICE & QUEUE CREATION DETAILS OMITTED */);
+
+gpu_create_command_pool :: proc (gpu: ^Gpu, queue_family_index: u32, loc := #caller_location) -> vk.CommandPool {
+    command_pool_create_info := vk.CommandPoolCreateInfo {
+        sType = .COMMAND_POOL_CREATE_INFO,
+        flags            = { .RESET_COMMAND_BUFFER },
+        queueFamilyIndex = queue_family_index,
+    }
+    
+    result: vk.CommandPool
+    check(vk.CreateCommandPool(gpu.device, &command_pool_create_info, nil, &result))
+    
+    if Validation {
+        gpu_debug_name_handle(gpu, .COMMAND_POOL, result, loc)
+    }
+    
+    return result
+}
 
 // @api begin recording takes the command pool of some queue, whilst the submit(which also ends the command buffer)
 // instead takes the queue. This requires that the pool is created on the queue used in the submit. This asymmetry
@@ -1501,14 +1555,18 @@ gpu_present :: proc (gpu: ^Gpu, queue: vk.Queue, wait_semaphore: vk.Semaphore) {
 
 MaxTimeout :: max(u64)
 
-gpu_create_semaphore :: proc (gpu: ^Gpu) -> vk.Semaphore {
+gpu_create_semaphore :: proc (gpu: ^Gpu, loc := #caller_location) -> vk.Semaphore {
     result: vk.Semaphore
     check(vk.CreateSemaphore(gpu.device, &{ sType = .SEMAPHORE_CREATE_INFO }, nil, &result))
+    
+    if Validation {
+        gpu_debug_name_handle(gpu, .SEMAPHORE, result, loc)
+    }
     
     return result
 }
 
-gpu_create_timeline_semaphore :: proc (gpu: ^Gpu, initial_value: u64) -> vk.Semaphore {
+gpu_create_timeline_semaphore :: proc (gpu: ^Gpu, initial_value: u64, loc := #caller_location) -> vk.Semaphore {
     info := vk.SemaphoreCreateInfo { 
         sType = .SEMAPHORE_CREATE_INFO,
         pNext = &vk.SemaphoreTypeCreateInfo {
@@ -1520,6 +1578,10 @@ gpu_create_timeline_semaphore :: proc (gpu: ^Gpu, initial_value: u64) -> vk.Sema
     
     result: vk.Semaphore
     check(vk.CreateSemaphore(gpu.device, &info, nil, &result))
+    
+    if Validation {
+        gpu_debug_name_handle(gpu, .SEMAPHORE, result, loc)
+    }
     
     return result
 }
@@ -2029,7 +2091,7 @@ write_sampler_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: u32, fi
 
 ////////////////////////////////////////////////
 
-create_query_pool :: proc (gpu: ^Gpu, query_count: u32, type: vk.QueryType, stats_bits := vk.QueryPipelineStatisticFlags {}) -> vk.QueryPool {
+create_query_pool :: proc (gpu: ^Gpu, query_count: u32, type: vk.QueryType, stats_bits := vk.QueryPipelineStatisticFlags {}, loc := #caller_location) -> vk.QueryPool {
     create_info := vk.QueryPoolCreateInfo {
         sType = .QUERY_POOL_CREATE_INFO,
         queryType  = type,
@@ -2043,5 +2105,35 @@ create_query_pool :: proc (gpu: ^Gpu, query_count: u32, type: vk.QueryType, stat
     result: vk.QueryPool
     check(vk.CreateQueryPool(gpu.device, &create_info, nil, &result))
     
+    if Validation {
+        gpu_debug_name_handle(gpu, .QUERY_POOL, result, loc)
+    }
+    
     return result
+}
+
+////////////////////////////////////////////////
+
+Gpu_Debug_Name_Allocator: Allocator
+
+gpu_debug_name_init :: proc (allocator: Allocator) {
+    Gpu_Debug_Name_Allocator = allocator
+}
+
+gpu_debug_name_handle :: proc (gpu: ^Gpu, type: vk.ObjectType, handle: $T/u64, loc: runtime.Source_Code_Location) {
+    // @leak
+    if Gpu_Debug_Name_Allocator != {} {
+        name := cprint("%v", loc, allocator = Gpu_Debug_Name_Allocator)
+        name_info := vk.DebugUtilsObjectNameInfoEXT {
+            sType = .DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+            objectHandle = cast(u64) handle,
+            objectType   = type,
+            pObjectName  = name,
+        }
+        vk.SetDebugUtilsObjectNameEXT(gpu.device, &name_info)
+    }
+}
+
+gpu_debug_name_deinit :: proc () {
+    free_all(Gpu_Debug_Name_Allocator)
 }

@@ -1,8 +1,253 @@
 #+vet explicit-allocators
 package main
 
+import "core:os"
+
+import "base:runtime"
+
 import la "core:math/linalg"
 import vk "../lib/vulkan"
+
+Scene :: struct {
+    arena:         Arena,
+    loading_arena: Arena,
+    
+    loaded: bool,
+    camera:        Camera,
+    sun_direction: v3,
+    
+    draws: [dynamic] Draw,
+    
+    buffers:       Buffers,
+    textures:      [dynamic] Image,
+    top_level:     Acceleration_Structure,
+    bottom_levels: [dynamic] Acceleration_Structure,
+}
+
+init_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
+    profile_procedure()
+    
+    scene.arena         = make_arena()
+    scene.loading_arena = make_arena()
+    
+    scene_allocator := arena_allocator(&scene.arena)
+    
+    scene.draws         = make([dynamic] Draw,                   scene_allocator)
+    scene.textures      = make([dynamic] Image,                  scene_allocator)
+    scene.bottom_levels = make([dynamic] Acceleration_Structure, scene_allocator)
+    
+    scene.camera = { // May be overridden by the scene itself
+        p           = {0, 0, 0},
+        orientation = 1,
+        fov_y       = 70 * RadiansFromDegrees,
+    }
+    
+    {
+        profile_scope("Allocate geometry buffers")
+        
+        vertex_and_index_usage := vk.BufferUsageFlags { .STORAGE_BUFFER }
+        if raytracing_supported {
+            vertex_and_index_usage += { .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR }
+        }
+        
+        // @todo why are we allocating them wastefully before copying into them? Just before the copy we know exactly how much memory we will need.
+        // if we allocate them based on the scene, then we must deallocate them in unload_scene.
+        // Draws is the exception unless we really only have static geometry and nothing dynamic. 
+        // So we basically need a static and a dynamic set(each also needs top and bottom level acceleration structures).
+        
+        scene.buffers.vertices     = gpu_allocate_slice(gpu, [] Vertex,  256 * Megabyte / size_of(Vertex),  memory = .Default, usage = vertex_and_index_usage)
+        scene.buffers.indices      = gpu_allocate_slice(gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = .Default, usage = vertex_and_index_usage + { .INDEX_BUFFER })
+        scene.buffers.meshlets     = gpu_allocate_slice(gpu, [] Meshlet, 256 * Megabyte / size_of(Meshlet), memory = .Default)
+        scene.buffers.meshlet_data = gpu_allocate_slice(gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = .Default)
+        scene.buffers.meshes       = gpu_allocate_slice(gpu, [] Mesh,    256 * Megabyte / size_of(Mesh),    memory = .Default)
+        
+        scene.buffers.draws = gpu_allocate(gpu, [] Draw, 256 * Megabyte / size_of(Draw), 16, Memory_Kind.Default)
+    }
+}
+
+deinit_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
+    profile_procedure()
+    
+    unload_scene(gpu, scene)
+    
+    arena_free_all(&scene.arena)
+    
+    gpu_free(gpu, scene.buffers.vertices)
+    gpu_free(gpu, scene.buffers.indices)
+    gpu_free(gpu, scene.buffers.meshlets)
+    gpu_free(gpu, scene.buffers.meshlet_data)
+    gpu_free(gpu, scene.buffers.meshes)
+    gpu_free(gpu, scene.buffers.draws)
+    gpu_free(gpu, scene.buffers.draw_commands)
+    gpu_free(gpu, scene.buffers.draw_visibility)
+    gpu_free(gpu, scene.buffers.meshlet_visibility)
+}
+
+unload_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
+    profile_procedure()
+    scene.loaded = false
+    
+    for it in scene.bottom_levels {
+        vk.DestroyAccelerationStructureKHR(gpu.device, it.acceleration_structure, nil)
+    }
+    vk.DestroyAccelerationStructureKHR(gpu.device, scene.top_level.acceleration_structure, nil)
+    
+    gpu_free(gpu, scene.buffers.bottom_level_acceleration_structures)
+    gpu_free(gpu, scene.buffers.top_level_acceleration_structures)
+    
+    for texture in scene.textures {
+        gpu_free_image(gpu, texture)
+    }
+}
+
+load_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
+    defer scene.loaded = true
+    
+    scene_allocator         := arena_allocator(&scene.arena)
+    scene_loading_allocator := arena_allocator(&scene.loading_arena)
+    defer arena_free_all(&scene.loading_arena)
+    
+    clear(&scene.draws)
+    clear(&scene.textures)
+    clear(&scene.bottom_levels)
+    
+    {
+        geometry: Geometry
+        geometry.vertices.allocator     = scene_loading_allocator
+        geometry.indices.allocator      = scene_loading_allocator
+        geometry.meshlets.allocator     = scene_loading_allocator
+        geometry.meshlet_data.allocator = scene_loading_allocator
+        geometry.meshes.allocator       = scene_loading_allocator
+        
+        {
+            path := "niagara_bistro/bistro.gltf"
+            texture_paths := make([dynamic] string, scene_loading_allocator)
+            print("\nLoading scene: %v\n", path)
+            
+            profile_zone_begin("load scene")
+            if !load_gltf_scene(&geometry, path, &scene.draws, &scene.camera, &texture_paths, &scene.sun_direction) {
+                runtime.exit(1)
+            }
+            profile_zone_end()
+            
+            print("  Loaded scene %q: %v meshes, %v draws, %v textures\n", path, len(geometry.meshes), len(scene.draws), len(texture_paths))
+            print("  Loading textures\n")
+            
+            reserve(&scene.textures, len(texture_paths))
+            
+            //
+            // @speed Moving the copies to a queue will speedup the loading from ssd(~22%). It may or may not help
+            // with the drivers copy(~71%), depending on its ability to be parallelized. 
+            /// 0.957 / 1.34
+            /// 0.3   / 1.34
+            //
+            // Read speed testing estimates a max speed of 6.5 Gb/s with a preallocated and mapped buffer.
+            // Here we currently load ~2.1 Gb.
+            /// 2.1 / 6.5
+            // Just loading the textures should take ~0.3s itself: which it does!
+            // The whole texture upload takes roughly 0.8-1.5s, so ~0.5-1.2s itself, which is mainly
+            // the copy into the texture by the cpu. A straight memcopy would be faster by the driver
+            // may need to swizzle the data based on the formats.
+            /// 2.1 / 0.957
+            /// 2.1 / 0.493
+            // Therefore we only reach speeds of ~2.2 Gb/s (a memcopy of the same data ~4.3Gb/s)
+            // So the driver's copy is roughly half as fast as a memcopy.
+            //
+            // https://developer.nvidia.com/blog/advanced-api-performance-async-copy/
+            // This article recommends using a copy-queue as NVidia has dedicated async copy engines.
+            // It might be the case that the swizzleling already saturates the cpu's memory bandwidth,
+            // but that should be specifically tested.
+            // 
+            // 1. Check out async copy and/or async compute for copy work and synchronize with the 
+            //    graphics via semaphores.
+            // 2. (optional) Test if the drivers cpu copy is truely bottlenecked if multiple threads
+            //    call into it at once.
+            // 3. Even if the ssd load is not the biggest part, we can still multithread it. Either
+            //    use worker threads, or check out OS native IO rings.
+            //
+            total_size: int
+            {
+                profile_scope("upload textures")
+                
+                texture_descs      := make([] Texture_Desc, len(texture_paths), scene_loading_allocator)
+                texture_pixel_size := make([] int,          len(texture_paths), scene_loading_allocator)
+                texture_file       := make([] ^os.File,     len(texture_paths), scene_loading_allocator)
+                
+                max_size : int
+                for texture_path, index in texture_paths {
+                    file, open_error := os.open(texture_path); assert(open_error == nil)
+                    texture_descs[index], texture_pixel_size[index] = parse_dds_texture_header(file)
+                    texture_file[index] = file
+                    
+                    pixel_size := texture_pixel_size[index]
+                    max_size = max(max_size, pixel_size)
+                    total_size += pixel_size
+                }
+                
+                copy_buffer := make([] u8, max_size, scene_loading_allocator)
+                
+                for index in 0..<len(texture_paths) {
+                    pixel_size := texture_pixel_size[index]
+                    file       := texture_file[index]
+                    
+                    buffer := copy_buffer[:pixel_size]
+                    read, read_error := os.read_full(file, buffer); assert(read_error == nil); assert(read == pixel_size)
+                    os.close(file)
+                    
+                    texture := gpu_allocate_texture(gpu, texture_descs[index])
+                    gpu_copy_to_texture_immediately(gpu, texture, buffer)
+                    
+                    append(&scene.textures, texture)
+                }
+            }
+            
+            print("  Loaded textures: %vb\n\n", view_magnitude(total_size))
+        }
+        
+        profile_zone_begin("upload geometry")
+        copy(scene.buffers.vertices.cpu,     geometry.vertices[:])
+        copy(scene.buffers.indices.cpu,      geometry.indices[:])
+        copy(scene.buffers.meshlets.cpu,     geometry.meshlets[:])
+        copy(scene.buffers.meshlet_data.cpu, geometry.meshlet_data[:])
+        copy(scene.buffers.meshes.cpu,       geometry.meshes[:])
+        profile_zone_end()
+        
+        if raytracing_supported {
+            // @todo which pool?
+            queue := gpu.general_queue
+            pool  := gpu.command_pools[0]
+            
+            build_bottom_level_acceleration_structures(gpu, queue, pool, &scene.buffers, geometry, &scene.bottom_levels, scene_loading_allocator)
+            scene.top_level = build_top_level_acceleration_structures(gpu, queue, pool, &scene.buffers, scene.draws[:], scene.bottom_levels[:], scene_loading_allocator)
+        }
+        
+        profile_zone_begin("Allocate render buffers")
+        
+        meshlet_visibility_count: u32
+        for &draw in scene.draws {
+            mesh := geometry.meshes[draw.mesh_index]
+            // @speed just ensure that the base lod has the most meshlets
+            meshlet_count: u32
+            for lod in mesh.lods[:mesh.lod_count] {
+                meshlet_count = max(meshlet_count, lod.meshlet_count)
+            }
+            
+            draw.meshlet_visibility_offset = meshlet_visibility_count
+            meshlet_visibility_count      += meshlet_count
+        }
+        
+        // @todo shouldnt draw_visibility have the same cap as draw commands? or as scene.draws?
+        // @placement if these buffers are allocated based on the scene they need to be freed in scene_unload, 
+        // otherwise move the allocation/deallocation into init/deinit
+        scene.buffers.draw_commands      = gpu_allocate_slice(gpu, [] Draw_Command, TaskWidthLimit,                        memory = .GPU) 
+        scene.buffers.draw_visibility    = gpu_allocate_slice(gpu, [] u32,          256 * Megabyte / size_of(u32),         memory = .GPU, usage = { .STORAGE_BUFFER, .TRANSFER_DST })
+        scene.buffers.meshlet_visibility = gpu_allocate_slice(gpu, [] u32,          (meshlet_visibility_count + 31) / 32,  memory = .GPU, usage = { .STORAGE_BUFFER, .TRANSFER_DST })
+    }
+    
+    profile_zone_end()
+}
+
+////////////////////////////////////////////////
 
 // Required by the spec for acceleration structures. The scratch could have a smaller alignment
 // requirement, but it's only a small waste.
@@ -16,7 +261,7 @@ Acceleration_Structure :: struct {
 
 // @placement what of this is part of gpu.odin and what is from my app
 
-build_bottom_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, command_pool: vk.CommandPool, buffers: ^Buffers, geometry: Geometry, permanent, scratch: Allocator) -> [] Acceleration_Structure {
+build_bottom_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, command_pool: vk.CommandPool, buffers: ^Buffers, geometry: Geometry, results: ^[dynamic] Acceleration_Structure, scratch: Allocator) {
     LOD_Index :: 0
     
     triangle_counts := make([] u32, len(geometry.meshes), scratch)
@@ -86,7 +331,7 @@ build_bottom_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, 
     
     ////////////////////////////////////////////////
     
-    results := make([] Acceleration_Structure, len(geometry.meshes), permanent)
+    resize(results, len(geometry.meshes))
     
     ranges         := make([] vk.AccelerationStructureBuildRangeInfoKHR,     len(geometry.meshes), scratch)
     range_pointers := make([] [^] vk.AccelerationStructureBuildRangeInfoKHR, len(geometry.meshes), scratch)
@@ -106,8 +351,6 @@ build_bottom_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, 
     ////////////////////////////////////////////////
     
     __build_acceleration_structures_immediately(gpu, queue, command_pool, build_infos, range_pointers)
-    
-    return results
 }
 
 build_top_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, command_pool: vk.CommandPool, buffers: ^Buffers, draws: [] Draw, bottom_level_acceleration_structures: [] Acceleration_Structure, scratch: Allocator) -> Acceleration_Structure {
