@@ -313,7 +313,7 @@ build_bottom_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, 
         }
         
         scratch_size: umm
-        blas_sizes[index], scratch_size = __get_acceleration_structure_sizes(gpu, build_info, &triangle_counts[index])
+        blas_sizes[index], scratch_size = gpu_get_acceleration_structure_sizes(gpu, build_info, &triangle_counts[index])
         
         blas_offsets[index]    = total_build_size
         scratch_offsets[index] = total_scratch_size
@@ -339,7 +339,7 @@ build_bottom_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, 
     for &result, index in results {
         build_info := &build_infos[index]
         
-        result = __create_acceleration_structure(gpu, .BOTTOM_LEVEL, buffers.bottom_level_acceleration_structures, blas_sizes[index], blas_offsets[index])
+        result = gpu_create_acceleration_structure(gpu, .BOTTOM_LEVEL, buffers.bottom_level_acceleration_structures, blas_sizes[index], blas_offsets[index])
         build_info.dstAccelerationStructure  = result.acceleration_structure
         build_info.scratchData.deviceAddress = scratch_buffer + cast(vk.DeviceAddress) scratch_offsets[index]
         
@@ -350,7 +350,7 @@ build_bottom_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, 
     
     ////////////////////////////////////////////////
     
-    __build_acceleration_structures_immediately(gpu, queue, command_pool, build_infos, range_pointers)
+    build_acceleration_structures_immediately(gpu, queue, command_pool, build_infos, range_pointers)
 }
 
 build_top_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, command_pool: vk.CommandPool, buffers: ^Buffers, draws: [] Draw, bottom_level_acceleration_structures: [] Acceleration_Structure, scratch: Allocator) -> Acceleration_Structure {
@@ -406,7 +406,7 @@ build_top_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, com
         },
     }
     
-    tlas_size, scratch_size := __get_acceleration_structure_sizes(gpu, &build_info, &instance_count)
+    tlas_size, scratch_size := gpu_get_acceleration_structure_sizes(gpu, &build_info, &instance_count)
     
     ////////////////////////////////////////////////
     
@@ -420,57 +420,20 @@ build_top_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, com
     range         := vk.AccelerationStructureBuildRangeInfoKHR { primitiveCount = instance_count }
     range_pointer := cast([^] vk.AccelerationStructureBuildRangeInfoKHR) &range
     
-    result := __create_acceleration_structure(gpu, .TOP_LEVEL, buffers.top_level_acceleration_structures, tlas_size)
+    result := gpu_create_acceleration_structure(gpu, .TOP_LEVEL, buffers.top_level_acceleration_structures, tlas_size)
     build_info.dstAccelerationStructure  = result.acceleration_structure
     build_info.scratchData.deviceAddress = scratch_buffer
     
     ////////////////////////////////////////////////
     
-    __build_acceleration_structures_immediately(gpu, queue, command_pool, { build_info }, { range_pointer })
+    build_acceleration_structures_immediately(gpu, queue, command_pool, { build_info }, { range_pointer })
     
     return result
 }
 
 ////////////////////////////////////////////////
 
-__get_acceleration_structure_sizes :: proc (gpu: ^Gpu, build_info: ^vk.AccelerationStructureBuildGeometryInfoKHR, primitive_count: ^u32) -> (structure_size, scratch_size: umm) {
-    
-    size_info := vk.AccelerationStructureBuildSizesInfoKHR {
-        sType = .ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR,
-    }
-    vk.GetAccelerationStructureBuildSizesKHR(gpu.device, .DEVICE, build_info, primitive_count, &size_info)
-    
-    return cast(umm) size_info.accelerationStructureSize, cast(umm) size_info.buildScratchSize
-}
-
-__create_acceleration_structure :: proc (gpu: ^Gpu, type: vk.AccelerationStructureTypeKHR, buffer: vk.DeviceAddress, size: umm, offset: umm = 0) -> Acceleration_Structure {
-    // @bleh
-    structure_buffer, structure_buffer_offset := gpu_reflect_get_buffer(buffer)
-    
-    result: Acceleration_Structure
-    
-    info := vk.AccelerationStructureCreateInfoKHR {
-        sType = .ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-        
-        buffer = structure_buffer,
-        offset = structure_buffer_offset + cast(vk.DeviceSize) offset,
-        size   = cast(vk.DeviceSize) size,
-        
-        type = type,
-        
-    }
-    check(vk.CreateAccelerationStructureKHR(gpu.device, &info, nil, &result.acceleration_structure))
-    
-    address_info := vk.AccelerationStructureDeviceAddressInfoKHR {
-        sType = .ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
-        accelerationStructure = result.acceleration_structure,
-    }
-    result.address = vk.GetAccelerationStructureDeviceAddressKHR(gpu.device, &address_info)
-    
-    return result
-}
-
-__build_acceleration_structures_immediately :: proc (gpu: ^Gpu, queue: vk.Queue, command_pool: vk.CommandPool, build_infos: [] vk.AccelerationStructureBuildGeometryInfoKHR, range_pointers: [] [^] vk.AccelerationStructureBuildRangeInfoKHR) {
+build_acceleration_structures_immediately :: proc (gpu: ^Gpu, queue: vk.Queue, command_pool: vk.CommandPool, build_infos: [] vk.AccelerationStructureBuildGeometryInfoKHR, range_pointers: [] [^] vk.AccelerationStructureBuildRangeInfoKHR) {
     cmd := gpu_begin_command_recording(gpu, command_pool)
     semaphore := gpu_create_timeline_semaphore(gpu, 0)
     
