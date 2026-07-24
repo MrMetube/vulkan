@@ -234,6 +234,7 @@ compile_shader :: proc (id: Shader_Id, input_path: string, output_directory := "
     
     procs, comp, comp_allocator := make_shader_compilation()
     comp^ = {
+        false,
         id,
         strings.clone(input_path,    comp_allocator),
         strings.clone(shader_output, comp_allocator),

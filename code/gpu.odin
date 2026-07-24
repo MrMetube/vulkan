@@ -77,6 +77,23 @@ Pipeline :: struct {
     bind_point: vk.PipelineBindPoint,
 }
 
+Image :: struct {
+    image:  vk.Image,
+    memory: vk.DeviceMemory,
+    
+    format:    vk.Format,
+    size:      uv3,
+    mip_count: u32,
+    
+    sampled_index: u32,
+    storage_index: u32,
+}
+
+Acceleration_Structure :: struct {
+    acceleration_structure: vk.AccelerationStructureKHR,
+    address:                vk.DeviceAddress,
+}
+
 ////////////////////////////////////////////////
 
 Gpu_Slice :: struct ($E: typeid) {
@@ -93,7 +110,8 @@ Gpu_Pointer :: struct ($T: typeid) {
     p: vk.DeviceAddress,
 }
 
-// If we had access to the address_range extension, most if not all vulkan calls that take a buffer object could be deleted.
+// If we had access to the device_address_commands extension, most if not all vulkan calls that take a buffer object could be deleted.
+// But its not supported on my RTX 3070 ._.
 _the_gpu_allocations: map[vk.DeviceAddress] GpuAllocation
 GpuAllocation :: struct {
     buffer: vk.Buffer,
@@ -106,9 +124,8 @@ Hazards :: bit_set[enum {
     descriptors, 
 }]
 
-Blend    :: vk.BlendOp
-Factor   :: vk.BlendFactor
-
+Blend  :: vk.BlendOp
+Factor :: vk.BlendFactor
 Format :: vk.Format
 
 Raster_Desc :: struct {
@@ -340,7 +357,7 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
             }
             
             preferred: vk.PhysicalDevice
-            fallback: vk.PhysicalDevice
+            fallback:  vk.PhysicalDevice
             
             for device in physical_devices {
                 family_index_with_graphics := vk.QUEUE_FAMILY_IGNORED
@@ -1963,8 +1980,6 @@ gpu_draw_indexed_instanced_indirect :: proc (cmd: vk.CommandBuffer, draws: Gpu_P
     vk.CmdDrawIndexedIndirect(cmd, draws, draws_base_offset + cast(vk.DeviceSize) draw_offset, max_count, size_of(D))
 }
 
-// @speed The extension device_address_commands would remove the need to ever have a vk.Buffer for any command.
-// But its not supported on my RTX 3070 ._.
 gpu_draw_mesh_tasks_indirect :: proc (cmd: vk.CommandBuffer, grid_dimensions: Gpu_Pointer(uv3), count: u32, task_data, mesh_data, frag_data: vk.DeviceAddress) {
     gpu_push_constants(cmd, task_data, mesh_data, frag_data)
     

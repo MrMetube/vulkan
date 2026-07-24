@@ -60,6 +60,7 @@ get_assets :: proc (loc := #caller_location) -> ^Assets {
 // Shaders
 
 Shader_Compilation :: struct {
+    completed: bool,
     id: Shader_Id,
     input_path:    string,
     shader_output: string,
@@ -79,7 +80,7 @@ make_shader :: proc () -> (Shader_Id, ^Shader_Info) {
     return id, info
 }
 
-get_shader :: proc (id: Shader_Id, immediately: bool = true) -> ^Shader {
+get_shader :: proc (id: Shader_Id, immediately: bool = true, loc := #caller_location) -> ^Shader {
     assets := get_assets()
     
     id := id
@@ -90,6 +91,10 @@ get_shader :: proc (id: Shader_Id, immediately: bool = true) -> ^Shader {
     }
     
     result := &assets.shaders[id]
+    if immediately {
+        assert(result.bytes != nil, "Failed to immediately get shader.", loc = loc)
+    }
+    
     return result
 }
 
@@ -127,63 +132,56 @@ test_and_reset_shaders_was_modified :: proc (ids: ..Shader_Id) -> bool {
     return result
 }
 
+load_all_compiled_shaders :: proc (immediately := false) {
+    load_compiled_shader(0, immediately)
+}
+
+// If id == 0 then all shaders will be loaded.
 load_compiled_shader :: proc (id: Shader_Id, immediately := false) {
     assets := get_assets()
     if len(assets.shader_compilation_procs) == 0 { return }
     
+    completed_count: int
     for &p, index in assets.shader_compilation_procs {
-        info := assets.shader_compilation_infos[index]
-        if info.id != id { continue }
+        info := &assets.shader_compilation_infos[index]
+        if id != 0 && info.id != id { continue }
         
         state, wait_err := os.process_wait(p, timeout = immediately ? os.TIMEOUT_INFINITE : 0)
+        done := true
         if !immediately {
-            if wait_err == .Timeout || !state.exited { continue }
-        }
-        assert(wait_err == nil)
-        
-        defer {
-            unordered_remove(&assets.shader_compilation_procs, index)
-            unordered_remove(&assets.shader_compilation_infos, index)
+            if wait_err == .Timeout || !state.exited {
+                done = false
+            }
+        } else {
+            assert(wait_err == nil)
         }
         
-        if state.exit_code != 0 {
-            fmt.printfln("Shader compilation failed for %q", info.input_path)
-            break
+        if done {
+            completed_count += 1
+            info.completed = true
+            
+            if state.exit_code != 0 {
+                fmt.printfln("Shader compilation failed for %q", info.input_path)
+            } else {
+                load_and_parse_shader(info^)
+            }
         }
         
-        load_and_parse_shader(info)
-        
-        break
-    }
-}
-
-load_all_compiled_shaders :: proc (immediately := false) {
-    assets := get_assets()
-    if len(assets.shader_compilation_procs) == 0 { return }
-    
-    #reverse for &p, index in assets.shader_compilation_procs {
-        state, wait_err := os.process_wait(p, timeout = immediately ? os.TIMEOUT_INFINITE : 0)
-        if !immediately {
-            if wait_err == .Timeout || !state.exited { continue }
-        }
-        assert(wait_err == nil)
-        defer if !immediately {
-            unordered_remove(&assets.shader_compilation_procs, index)
-            unordered_remove(&assets.shader_compilation_infos, index)
-        }
-        
-        info := assets.shader_compilation_infos[index]
-        if state.exit_code != 0 {
-            fmt.printfln("Shader compilation failed for %q", info.input_path)
-            continue
-        }
-        
-        load_and_parse_shader(info)
+        if id != 0 { break }
     }
     
-    if immediately {
-        clear(&assets.shader_compilation_procs)
-        clear(&assets.shader_compilation_infos)    
+    if completed_count != 0 {
+        if completed_count == len(assets.shader_compilation_procs) {
+            clear(&assets.shader_compilation_procs)
+            clear(&assets.shader_compilation_infos)
+        } else {
+            #reverse for info, index in assets.shader_compilation_infos {
+                if info.completed {
+                    unordered_remove(&assets.shader_compilation_procs, index)
+                    unordered_remove(&assets.shader_compilation_infos, index)
+                }
+            }
+        }
     }
 }
 

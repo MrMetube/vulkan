@@ -254,13 +254,6 @@ load_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
 @(private="file")
 AccelerationStructureAlignment :: 256 
 
-Acceleration_Structure :: struct {
-    acceleration_structure: vk.AccelerationStructureKHR,
-    address:                vk.DeviceAddress,
-}
-
-// @placement what of this is part of gpu.odin and what is from my app
-
 build_bottom_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, command_pool: vk.CommandPool, buffers: ^Buffers, geometry: Geometry, results: ^[dynamic] Acceleration_Structure, scratch: Allocator) {
     LOD_Index :: 0
     

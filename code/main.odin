@@ -91,18 +91,6 @@ Geometry :: struct {
     meshes: [dynamic] Mesh,
 }
 
-Image :: struct {
-    image:  vk.Image,
-    memory: vk.DeviceMemory,
-    
-    format:    vk.Format,
-    size:      uv3,
-    mip_count: u32,
-    
-    sampled_index: u32,
-    storage_index: u32,
-}
-
 Depth_Mip :: struct {
     size: uv2,
     sampled_index: u32,
