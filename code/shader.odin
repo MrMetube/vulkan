@@ -54,7 +54,6 @@ generate_shader_api :: proc (output_file: string) {
     simple_types    := make(map[typeid] struct {}, context.temp_allocator)
     
     // anything with a vk.DeviceAddress member
-    collect_types(&simple_types, &reference_types, Cull_Data)
     collect_types(&simple_types, &reference_types, Draw_Data)
     collect_types(&simple_types, &reference_types, Depth_Data)
     collect_types(&simple_types, &reference_types, UI_Data)
@@ -67,7 +66,6 @@ generate_shader_api :: proc (output_file: string) {
     }
     
     // push constants
-    append_buffer_reference_struct(&builder, Cull_Data)
     append_buffer_reference_struct(&builder, Draw_Data)
     append_buffer_reference_struct(&builder, Depth_Data)
     append_buffer_reference_struct(&builder, UI_Data)

@@ -162,61 +162,48 @@ Camera :: struct {
 // Maximum number of total task shader workgroups
 TaskWidthLimit :: 1 << 22 // :Shader:
 
-Cull_Data :: struct #all_or_none { // :Shader:
-    // data
-    view_from_world: m4,
-    
-    s00, s11, near_z, far_z: f32,
-    frustum: [4] f32,
-    
-    pyramid_size: v2,
-    draw_count:   u32,
-    flags:        u32,
-    
-    lod_base: f32,
-    lod_step: f32,
-    
-    _: u32,
-    
-    // bindings
-    depth_pyramid_index: u32,
-    
-    draw_visibility_buffer: vk.DeviceAddress "bool",
-    draw_buffer:            vk.DeviceAddress "Draw",
-    mesh_buffer:            vk.DeviceAddress "Mesh",
-    draw_group_count:       vk.DeviceAddress "uvec3",
-    draw_command_buffer:    vk.DeviceAddress "Draw_Command",
-}
-
 // @volatile Cull_Data.flags
 DebugFlag_FrustumCulling   :: (1 << 0)
 DebugFlag_LevelOfDetail    :: (1 << 1)
 DebugFlag_OcclusionCulling :: (1 << 2)
 
-// @todo It would be way simpler if a bit wasteful to just always pass the shader all buffer addresses (buffers: Buffers).
 Draw_Data :: struct #all_or_none { // :Shader:
-    view_from_world: m4, // @todo alignment requirements
-    
-    screen_size: v2,
-    flags: u32,
+    view_from_world: m4,
     
     s00, s11:      f32,
     near_z, far_z: f32,
-    pyramid_size:  v2,
     frustum:       [4] f32,
-    sun_direction: v3,
     
-    // bindings
+    flags: u32,
+    
+    depth_pyramid_index: u32,
+    
+    draw_command_buffer: vk.DeviceAddress "Draw_Command",
+    draw_buffer:         vk.DeviceAddress "Draw",
+    
+    // draw only
+    screen_size: v2,
+    
     frame_heap_offset:                      u32,
-    depth_pyramid_index:                    u32,
     top_level_acceleration_structure_index: u32,
     
-    draw_command_buffer:       vk.DeviceAddress "Draw_Command", // task
-    meshlet_visibility_buffer: vk.DeviceAddress "uint",         // task
-    draw_buffer:               vk.DeviceAddress "Draw",         // task, mesh, frag
-    meshlet_buffer:            vk.DeviceAddress "Meshlet",      // task, mesh
-    meshlet_data_buffer:       vk.DeviceAddress "uint",         // mesh
-    vertex_buffer:             vk.DeviceAddress "Vertex",       // mesh
+    meshlet_visibility_buffer: vk.DeviceAddress "uint",
+    meshlet_buffer:            vk.DeviceAddress "Meshlet",
+    meshlet_data_buffer:       vk.DeviceAddress "uint",
+    vertex_buffer:             vk.DeviceAddress "Vertex",
+    
+    sun_direction: v3,
+    
+    // cull only
+    pyramid_size: v2,
+    
+    lod_base:   f32,
+    lod_step:   f32,
+    draw_count: u32,
+    
+    draw_visibility_buffer: vk.DeviceAddress "bool",
+    mesh_buffer:            vk.DeviceAddress "Mesh",
+    draw_group_count:       vk.DeviceAddress "uvec3",
 }
 
 Depth_Data :: struct { // :Shader:
@@ -1147,34 +1134,10 @@ cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelin
     
     draw_group_count := bump_allocate(frame.bump, uv3)
     
-    cull_data := bump_allocate(frame.bump, Cull_Data)
-    cull_data.cpu^ = {
-        view_from_world = frame.view_from_world,
-        
-        pyramid_size = cast(v2) render_targets.depth_pyramid.size.xy,
-        s00     = frame.screen_from_view[0,0],
-        s11     = frame.screen_from_view[1,1],
-        near_z  = state.near_z,
-        far_z   = state.draw_distance,
-        frustum = frame.frustum,
-        
-        draw_count = frame.draw_count,
-        flags      = shader_culling_flags,
-        
-        lod_base = 10,
-        lod_step = 1.5,
-        
-        depth_pyramid_index = render_targets.depth_pyramid.sampled_index,
-        draw_buffer            = scene.buffers.draws.gpu.p,
-        mesh_buffer            = scene.buffers.meshes.gpu.p,
-        draw_visibility_buffer = scene.buffers.draw_visibility.gpu.p,
-        draw_command_buffer    = scene.buffers.draw_commands.gpu.p,
-        draw_group_count       = draw_group_count.gpu.p
-    }
-    
     draw_data := bump_allocate(frame.bump, Draw_Data)
     draw_data.cpu^ = {
-        pyramid_size = cast(v2) render_targets.depth_pyramid.size.xy,
+        view_from_world = frame.view_from_world,
+        
         s00     = frame.screen_from_view[0,0],
         s11     = frame.screen_from_view[1,1],
         near_z  = state.near_z,
@@ -1183,20 +1146,37 @@ cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelin
         
         flags = shader_culling_flags,
         
-        screen_size     = cast(v2) frame.screen_size,
-        view_from_world = frame.view_from_world,
-        sun_direction   = scene.sun_direction,
+        depth_pyramid_index = render_targets.depth_pyramid.sampled_index,
+        
+        draw_buffer         = scene.buffers.draws.gpu.p,
+        draw_command_buffer = scene.buffers.draw_commands.gpu.p,
+        
+        //
+        
+        screen_size = cast(v2) frame.screen_size,
         
         frame_heap_offset                      = frame.frame_heap_offset,
-        depth_pyramid_index                    = render_targets.depth_pyramid.sampled_index,
         top_level_acceleration_structure_index = frame.top_level_acceleration_structure_index,
         
-        draw_command_buffer       = scene.buffers.draw_commands.gpu.p,
-        draw_buffer               = scene.buffers.draws.gpu.p,
+        meshlet_visibility_buffer = scene.buffers.meshlet_visibility.gpu.p,
         meshlet_buffer            = scene.buffers.meshlets.gpu.p,
         meshlet_data_buffer       = scene.buffers.meshlet_data.gpu.p,
         vertex_buffer             = scene.buffers.vertices.gpu.p,
-        meshlet_visibility_buffer = scene.buffers.meshlet_visibility.gpu.p,
+        
+        sun_direction = scene.sun_direction,
+        
+        //
+        
+        pyramid_size = cast(v2) render_targets.depth_pyramid.size.xy,
+        
+        lod_base = 10,
+        lod_step = 1.5,
+        
+        draw_count = frame.draw_count,
+        
+        draw_visibility_buffer = scene.buffers.draw_visibility.gpu.p,
+        mesh_buffer            = scene.buffers.meshes.gpu.p,
+        draw_group_count       = draw_group_count.gpu.p,
     }
     
     cull_label: cstring
@@ -1237,7 +1217,7 @@ cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelin
         gpu_barrier(cmd, before_dispatch, { .COMPUTE_SHADER })
         
         gpu_set_pipeline(cmd, pipelines.culling[stage])
-        gpu_dispatch(cmd, cull_data.gpu.p, grid_dimension_from_total_count(shaders.culling, x = frame.draw_count))
+        gpu_dispatch(cmd, draw_data.gpu.p, grid_dimension_from_total_count(shaders.culling, x = frame.draw_count))
         
     gpu_profile_zone_end()
     gpu_labeled_region_end(cmd)
