@@ -835,14 +835,16 @@ main :: proc () {
         
             // @todo is this barrier correct in the commandbuffer if the writes to the heap are done by the cpu? probably a @race
             gpu_barrier(cmd, { .BOTTOM_OF_PIPE }, { .COMPUTE_SHADER, .PRE_RASTERIZATION_SHADERS, .FRAGMENT_SHADER, .DRAW_INDIRECT }, { .descriptors })
-            
-            //
-            // @hack @race_condition the draw commands should obviously not be written to by the cpu, whilst the gpu is still 
-            // processing the previous draw commands. We need atleast MaxFramesInFlight different draw_buffers to prevent this 
-            // race condition, if the draws themselves change every frame, which is likely if the objects themselves are dynamic.
-            //
-            copy(scene.buffers.draws.cpu, scene.draws[:])
+        }
+        
+        ////////////////////////////////////////////////
+        
+        draw_buffer: Gpu_Slice(Draw)
+        {
+            profile_scope("Copy draws")
             frame.draw_count = cast(u32) len(scene.draws)
+            draw_buffer = bump_allocate_slice(frame.bump, [] Draw, frame.draw_count)
+            copy(draw_buffer.cpu, scene.draws[:])
         }
         
         ////////////////////////////////////////////////
@@ -858,13 +860,13 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        cull_and_render(cmd, .early, pipelines, shaders, &render_targets, state, scene, &frame)
+        cull_and_render(cmd, .early, pipelines, shaders, &render_targets, state, scene, &frame, draw_buffer)
         
         generate_depth_pyramid(cmd, pipelines, shaders, render_targets, frame)
         
-        cull_and_render(cmd, .late, pipelines, shaders, &render_targets, state, scene, &frame)
+        cull_and_render(cmd, .late, pipelines, shaders, &render_targets, state, scene, &frame, draw_buffer)
         
-        cull_and_render(cmd, .post, pipelines, shaders, &render_targets, state, scene, &frame)
+        cull_and_render(cmd, .post, pipelines, shaders, &render_targets, state, scene, &frame, draw_buffer)
         
         if false {
             render_ui(cmd, pipelines, render_targets, state, frame)
@@ -1113,7 +1115,7 @@ get_next_image :: proc (gpu: ^Gpu, semaphore: vk.Semaphore, frame_index: u64) ->
 }
 
 // @todo frame should not be a pointer but for the stats query index
-cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelines, shaders: Shaders, render_targets: ^Render_Targets, state: State, scene: Scene, frame: ^Frame) {
+cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelines, shaders: Shaders, render_targets: ^Render_Targets, state: State, scene: Scene, frame: ^Frame, draw_buffer: Gpu_Slice(Draw)) {
     //
     // early pass - frustum cull             & fill objects that *were* visible last frame
     //  late pass - frustum & occlusion cull & fill objects that were *not* visible last frame
@@ -1148,7 +1150,7 @@ cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelin
         
         depth_pyramid_index = render_targets.depth_pyramid.sampled_index,
         
-        draw_buffer         = scene.buffers.draws.gpu.p,
+        draw_buffer         = draw_buffer.gpu.p,
         draw_command_buffer = scene.buffers.draw_commands.gpu.p,
         
         //
