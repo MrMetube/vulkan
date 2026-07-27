@@ -10,8 +10,6 @@ import "core:strings"
 import vk "../lib/vulkan"
 
 Shader_Info :: struct {
-    input: string,
-    
     source: Watcher_Id,
     common: Watcher_Id,
 }
@@ -185,30 +183,33 @@ generate_shader_api :: proc (output_file: string) {
     }
 }
 
-init_shader_and_watchers :: proc (watchers: ^[dynamic] Watcher, common_watcher: Watcher_Id, input: string, output_extension := ".spv") -> Shader_Id {
+init_shader_and_watchers :: proc (watchers: ^Watchers, common_watcher: Watcher_Id, input: string, output_extension := ".spv") -> Shader_Id {
     id, info := make_shader()
     
-    info.input = input
-    
-    compile_shader(id, input)
-    
-    info.source = watchers_make(watchers, info.input)
+    info.source = watchers_make(watchers, input)
     info.common = common_watcher
-    watcher_set_up_to_date(watchers^, info.source, info.common)
+    
+    watcher_depend_on(watchers, info.common)
+    watcher_depend_on(watchers, info.source)
     
     return id
 }
 
-recompile_shaders_if_needed :: proc (watchers: [dynamic] Watcher, shaders_ids: ..Shader_Id) {
+recompile_shaders_if_needed :: proc (watchers: ^Watchers, shaders_ids: ..Shader_Id) {
     for id in shaders_ids {
         info := get_shader_info(id)^
         
-        if watcher_modified(watchers, info.source, info.common) {
+        needs_recompile: bool
+        // @study does this prevent "early return" optimizations that would cause the second check to 
+        // be skipped, if the first one is already true? If not then we will recompile once for the 
+        // source and once for the header if both are modified at once, because we optimistically skip
+        // the second check.
+        needs_recompile ||= watcher_check_and_reset(watchers, info.source)
+        needs_recompile ||= watcher_check_and_reset(watchers, info.common)
+        
+        if needs_recompile {
             shader := get_shader(id, immediately = false)
-            
-            watcher_set_up_to_date(watchers, info.source, info.common)
-            
-            compile_shader(id, info.input, old_bytes = shader.bytes)
+            compile_shader(id, watchers[info.source].path, old_bytes = shader.bytes)
         }
     }
 }

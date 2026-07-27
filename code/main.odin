@@ -341,7 +341,6 @@ main :: proc () {
     
     gpu := &Gpu {}
     
-    
     debug_name_arena := make_arena()
     gpu_debug_name_init(arena_allocator(&debug_name_arena))
     defer gpu_debug_name_deinit()
@@ -373,23 +372,24 @@ main :: proc () {
     
     // @todo is this part of Debug?
     profile_zone_begin("Init shaders")
-    watchers := make([dynamic] Watcher, context.allocator)
+    watchers := make(Watchers, context.allocator)
     
     init_assets(context.allocator)
     
     generate_shader_api("shaders/api.generated.glsl")
     
     // @speed deduplicate the common watcher and somehow track that the other shaders all depend on it and should all reload if it is changed
+    common_watcher := watchers_make(&watchers, "shaders/common.glsl")
     pipelines: Pipelines
     shaders := Shaders {
-        meshlet_task = init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.task"),
-        meshlet_mesh = init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.mesh"),
-        meshlet_frag = init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/meshlet.frag"),
-        culling      = init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/cull.comp"),
-        depth_reduce = init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/depth_reduce.comp"),
+        meshlet_task = init_shader_and_watchers(&watchers, common_watcher, "shaders/meshlet.task"),
+        meshlet_mesh = init_shader_and_watchers(&watchers, common_watcher, "shaders/meshlet.mesh"),
+        meshlet_frag = init_shader_and_watchers(&watchers, common_watcher, "shaders/meshlet.frag"),
+        culling      = init_shader_and_watchers(&watchers, common_watcher, "shaders/cull.comp"),
+        depth_reduce = init_shader_and_watchers(&watchers, common_watcher, "shaders/depth_reduce.comp"),
         
-        ui_vert = init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/ui.vert"),
-        ui_frag = init_shader_and_watchers(&watchers, watchers_make(&watchers, "shaders/common.glsl"), "shaders/ui.frag"),
+        ui_vert = init_shader_and_watchers(&watchers, common_watcher, "shaders/ui.vert"),
+        ui_frag = init_shader_and_watchers(&watchers, common_watcher, "shaders/ui.frag"),
     }
     
     profile_zone_end()
@@ -492,7 +492,7 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        cpu_delta:  f64
+        cpu_delta: f64
         {
             debug := &state.debug
             debug.display_pyramid_mip_level = clamp(debug.display_pyramid_mip_level+pyramid_mip_level_delta, 0, cast(i32) len(render_targets.depth_pyramid_mips)-1)
@@ -646,15 +646,30 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        { // Shader hot-reloading
-            watchers_check_for_modification(watchers)
-            recompile_shaders_if_needed(watchers, shaders.culling)
-            recompile_shaders_if_needed(watchers, shaders.meshlet_task, shaders.meshlet_mesh, shaders.meshlet_frag)
-            recompile_shaders_if_needed(watchers, shaders.depth_reduce)
-            recompile_shaders_if_needed(watchers, shaders.ui_vert, shaders.ui_frag)
-            
-            // @todo the work of loading the bytes and parsing them could be moved to a thread. The modified flag then needs to be expanded into a state { Invalid, Loading, Valid }
-            load_all_compiled_shaders(immediately = false)
+        {
+            {
+                // 
+                // @todo the work of loading the bytes and parsing them could be moved to a thread. The modified flag 
+                // then needs to be expanded into a state { Invalid, Loading, Valid }.
+                // The checking itself can also be done on a different thread, and does not need to be done in sync with
+                // the renderer frames.
+                // 
+                // The main thread would then just check if the shader.bytes themselves have been updated by checking a
+                // flag and then use the already loaded bytes to recreate the pipeline. The remaining question then is 
+                // how often the watchers-thread should check the files, but maybe there already is an asynchronous OS
+                // api which then can just be used and we suspend the thread and let the OS wake it when a file was 
+                // modified?
+                //
+                
+                watchers_check_files_for_modification(&watchers)
+                
+                recompile_shaders_if_needed(&watchers, shaders.culling)
+                recompile_shaders_if_needed(&watchers, shaders.meshlet_task, shaders.meshlet_mesh, shaders.meshlet_frag)
+                recompile_shaders_if_needed(&watchers, shaders.depth_reduce)
+                recompile_shaders_if_needed(&watchers, shaders.ui_vert, shaders.ui_frag)
+                
+                load_all_compiled_shaders(immediately = false)
+            }
             
             reloaded_cull_shader := test_and_reset_shaders_was_modified(shaders.culling)
             for &cull_pipeline, stage in pipelines.culling {

@@ -5,79 +5,65 @@ import "core:fmt"
 import "core:os"
 import "core:time"
 
+Watchers :: distinct [dynamic] Watcher
+
 Watcher :: struct {
-    path: string,
+    path:             string,
+    last_update_time: time.Time,
     
-    last_update_time:           time.Time,
-    modified_since_last_update: bool,
+    subscribed: u32,
+    notified:   u32,
 }
 
 Watcher_Id :: distinct int
 
 ////////////////////////////////////////////////
 
-watcher_make :: proc (path: string) -> Watcher {
-    result: Watcher
-    result.path = path
-    return result
-}
-
-watchers_make :: proc (watchers: ^[dynamic] Watcher, path: string) -> Watcher_Id {
-    watcher := watcher_make(path)
+watchers_make :: proc (watchers: ^Watchers, path: string) -> Watcher_Id {
+    append(watchers, Watcher {
+        path       = path,
+    })
     
-    append(watchers, watcher)
     result := cast(Watcher_Id) len(watchers)-1
-    
     return result
 }
 
 ////////////////////////////////////////////////
 
-watchers_check_for_modification :: proc (watchers: [dynamic] Watcher) {
+watchers_check_files_for_modification :: proc (watchers: ^Watchers) {
     for &watcher in watchers {
-        watcher_check_for_modification(&watcher)
+        info, err := os.stat(watcher.path, context.temp_allocator)
+        if err != nil {
+            fmt.eprintfln("Error: failed get information on the file `%v`: %v", watcher.path, err)
+            return
+        }
+        
+        if watcher.last_update_time._nsec < info.modification_time._nsec {
+            watcher.notified = 0
+        }
     }
 }
 
-watcher_check_for_modification :: proc (watcher: ^Watcher) {
-    info, err := os.stat(watcher.path, context.temp_allocator)
-    if err != nil {
-        fmt.eprintfln("Error: failed get information on the file `%v`: %v", watcher.path, err)
-        return
+watcher_check_and_reset :: proc (watchers: ^Watchers, id: Watcher_Id) -> bool {
+    watcher := watchers[id]
+    
+    assert(watcher.subscribed != 0)
+    result := watcher.notified != watcher.subscribed
+    
+    if result {
+        watcher_set_up_to_date(watchers, id)
     }
     
-    if watcher.last_update_time._nsec < info.modification_time._nsec {
-        watcher.modified_since_last_update = true
-    }
-}
-
-watcher_modified :: proc { watcher_modified_ids, watcher_modified_pointers }
-watcher_modified_ids :: proc (watchers: [dynamic] Watcher, ids: ..Watcher_Id) -> bool {
-    result := false
-    for id in ids {
-        result ||= watchers[id].modified_since_last_update
-    }
-    return result
-}
-watcher_modified_pointers :: proc (watchers: ..^Watcher) -> bool {
-    result := false
-    for it in watchers {
-        result ||= it.modified_since_last_update
-    }
     return result
 }
 
-watcher_set_up_to_date :: proc { watcher_set_up_to_date_pointers, watcher_set_up_to_date_ids }
-watcher_set_up_to_date_pointers :: proc (watchers: ..^Watcher) {
-    for watcher in watchers {
-        watcher.modified_since_last_update = false
-        watcher.last_update_time = time.now()
-    }
+watcher_set_up_to_date :: proc (watchers: ^Watchers, id: Watcher_Id) {
+    watcher := &watchers[id]
+    assert(watcher.notified+1 <= watcher.subscribed)
+    watcher.notified += 1
+    watcher.last_update_time = time.now()
 }
-watcher_set_up_to_date_ids :: proc (watchers: [dynamic] Watcher, ids: ..Watcher_Id) {
-    for id in ids {
-        watcher := &watchers[id]
-        watcher.modified_since_last_update = false
-        watcher.last_update_time = time.now()
-    }
+
+watcher_depend_on :: proc (watchers: ^Watchers, dependency: Watcher_Id) {
+    watchers[dependency].subscribed += 1
 }

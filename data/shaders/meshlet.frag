@@ -87,5 +87,6 @@ void main() {
     
     
     pixel_result = color;
+    
     // pixel_result.xyz = (normal + 1) / 2;
 }
