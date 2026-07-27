@@ -24,6 +24,22 @@ Scene :: struct {
     bottom_levels: [dynamic] Acceleration_Structure,
 }
 
+Buffers :: struct {
+    vertices:     Gpu_Slice(Vertex),
+    indices:      Gpu_Slice(u32),
+    meshlets:     Gpu_Slice(Meshlet),
+    meshlet_data: Gpu_Slice(u32),
+    meshes:       Gpu_Slice(Mesh),
+    
+    draw_commands:      Gpu_Slice(Draw_Command),
+    // @todo both need to be cleared to 1 on init. is allocated memory guarenteed to be zeroed? if so then we could make 0 the default by making them xx_occluded
+    draw_visibility:    Gpu_Slice(u32),
+    meshlet_visibility: Gpu_Slice(u32),
+    
+    bottom_level_acceleration_structures: vk.DeviceAddress,
+    top_level_acceleration_structures:    vk.DeviceAddress,
+}
+
 init_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
     profile_procedure()
     
@@ -41,28 +57,6 @@ init_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
         orientation = 1,
         fov_y       = 70 * RadiansFromDegrees,
     }
-    
-    {
-        profile_scope("Allocate geometry buffers")
-        
-        vertex_and_index_usage := vk.BufferUsageFlags { .STORAGE_BUFFER }
-        if raytracing_supported {
-            vertex_and_index_usage += { .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR }
-        }
-        
-        // @todo why are we allocating them wastefully before copying into them? Just before the copy we know exactly how much memory we will need.
-        // if we allocate them based on the scene, then we must deallocate them in unload_scene.
-        // Draws is the exception unless we really only have static geometry and nothing dynamic. 
-        // So we basically need a static and a dynamic set(each also needs top and bottom level acceleration structures).
-        
-        scene.buffers.vertices     = gpu_allocate_slice(gpu, [] Vertex,  256 * Megabyte / size_of(Vertex),  memory = .Default, usage = vertex_and_index_usage)
-        scene.buffers.indices      = gpu_allocate_slice(gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = .Default, usage = vertex_and_index_usage + { .INDEX_BUFFER })
-        scene.buffers.meshlets     = gpu_allocate_slice(gpu, [] Meshlet, 256 * Megabyte / size_of(Meshlet), memory = .Default)
-        scene.buffers.meshlet_data = gpu_allocate_slice(gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = .Default)
-        scene.buffers.meshes       = gpu_allocate_slice(gpu, [] Mesh,    256 * Megabyte / size_of(Mesh),    memory = .Default)
-        
-        scene.buffers.draws = gpu_allocate(gpu, [] Draw, 256 * Megabyte / size_of(Draw), 16, Memory_Kind.Default)
-    }
 }
 
 deinit_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
@@ -72,12 +66,6 @@ deinit_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
     
     arena_free_all(&scene.arena)
     
-    gpu_free(gpu, scene.buffers.vertices)
-    gpu_free(gpu, scene.buffers.indices)
-    gpu_free(gpu, scene.buffers.meshlets)
-    gpu_free(gpu, scene.buffers.meshlet_data)
-    gpu_free(gpu, scene.buffers.meshes)
-    gpu_free(gpu, scene.buffers.draws)
     gpu_free(gpu, scene.buffers.draw_commands)
     gpu_free(gpu, scene.buffers.draw_visibility)
     gpu_free(gpu, scene.buffers.meshlet_visibility)
@@ -85,7 +73,14 @@ deinit_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
 
 unload_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
     profile_procedure()
+    
     scene.loaded = false
+    
+    gpu_free(gpu, scene.buffers.vertices)
+    gpu_free(gpu, scene.buffers.indices)
+    gpu_free(gpu, scene.buffers.meshlets)
+    gpu_free(gpu, scene.buffers.meshlet_data)
+    gpu_free(gpu, scene.buffers.meshes)
     
     for it in scene.bottom_levels {
         vk.DestroyAccelerationStructureKHR(gpu.device, it.acceleration_structure, nil)
@@ -204,14 +199,49 @@ load_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
             print("  Loaded textures: %vb\n\n", view_magnitude(total_size))
         }
         
-        profile_zone_begin("upload geometry")
-        copy(scene.buffers.vertices.cpu,     geometry.vertices[:])
-        copy(scene.buffers.indices.cpu,      geometry.indices[:])
-        copy(scene.buffers.meshlets.cpu,     geometry.meshlets[:])
-        copy(scene.buffers.meshlet_data.cpu, geometry.meshlet_data[:])
-        copy(scene.buffers.meshes.cpu,       geometry.meshes[:])
-        profile_zone_end()
-        
+        {
+            profile_scope("Allocate geometry buffers")
+            
+            vertex_and_index_usage := vk.BufferUsageFlags { .STORAGE_BUFFER }
+            if raytracing_supported {
+                vertex_and_index_usage += { .ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR }
+            }
+            
+            
+            // 
+            // @todo If we limit these buffers to exactly as much as the scene requires, we cannot draw anything dynamically 
+            // that is not part of the scene definition with the meshlet pipeline. This may or may not be an issue depending
+            // on what exactly a "scene" is. If its just the static geometry and we then want to also render dynamic geometry
+            // with the same pipeline and draw command we need to append its data into the "geometry" arrays on scene load.
+            // 
+            // At some point we might want to again move the geometry into which we load back out to let multiple sources add
+            // meshes, which we then upload all at once outside.
+            // 
+            scene.buffers.vertices     = gpu_allocate_slice(gpu, [] Vertex,  256 * Megabyte / size_of(Vertex),  memory = .Default, usage = vertex_and_index_usage)
+            scene.buffers.indices      = gpu_allocate_slice(gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = .Default, usage = vertex_and_index_usage + { .INDEX_BUFFER })
+            scene.buffers.meshlets     = gpu_allocate_slice(gpu, [] Meshlet, 256 * Megabyte / size_of(Meshlet), memory = .Default)
+            scene.buffers.meshlet_data = gpu_allocate_slice(gpu, [] u32,     256 * Megabyte / size_of(u32),     memory = .Default)
+            scene.buffers.meshes       = gpu_allocate_slice(gpu, [] Mesh,    256 * Megabyte / size_of(Mesh),    memory = .Default)
+            
+            // @todo allocating just as much space as needed somehow breaks the acceleration structure building. When waiting for the 
+            // build the gpu dies and crashes the program. It probably has to do with some kind of alignment/layout issue, or some
+            // out-of-bounds indexing that we don't see when padding the data with megabytes of zeroes as we did before.
+            
+            // scene.buffers.vertices     = gpu_allocate_slice(gpu, [] Vertex,  len(geometry.vertices), memory = .Default, usage = vertex_and_index_usage)
+            // scene.buffers.indices      = gpu_allocate_slice(gpu, [] u32,     len(geometry.indices),  memory = .Default, usage = vertex_and_index_usage + { .INDEX_BUFFER })
+            // scene.buffers.meshlets     = gpu_allocate_slice(gpu, [] Meshlet, len(geometry.meshlets),     memory = .Default)
+            // scene.buffers.meshlet_data = gpu_allocate_slice(gpu, [] u32,     len(geometry.meshlet_data), memory = .Default)
+            // scene.buffers.meshes       = gpu_allocate_slice(gpu, [] Mesh,    len(geometry.meshes),       memory = .Default)
+            
+            profile_zone_begin("upload geometry")
+            copy(scene.buffers.vertices.cpu,     geometry.vertices[:])
+            copy(scene.buffers.indices.cpu,      geometry.indices[:])
+            copy(scene.buffers.meshlets.cpu,     geometry.meshlets[:])
+            copy(scene.buffers.meshlet_data.cpu, geometry.meshlet_data[:])
+            copy(scene.buffers.meshes.cpu,       geometry.meshes[:])
+            profile_zone_end()
+        }
+            
         if raytracing_supported {
             // @todo which pool?
             queue := gpu.general_queue
@@ -252,7 +282,7 @@ load_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
 // Required by the spec for acceleration structures. The scratch could have a smaller alignment
 // requirement, but it's only a small waste.
 @(private="file")
-AccelerationStructureAlignment :: 256 
+AccelerationStructureAlignment :: 256 *4*8
 
 build_bottom_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, command_pool: vk.CommandPool, buffers: ^Buffers, geometry: Geometry, results: ^[dynamic] Acceleration_Structure, scratch: Allocator) {
     LOD_Index :: 0

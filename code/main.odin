@@ -115,23 +115,6 @@ Shaders :: struct {
     ui_frag: Shader_Id,
 }
 
-Buffers :: struct {
-    vertices:     Gpu_Slice(Vertex),
-    indices:      Gpu_Slice(u32),
-    meshlets:     Gpu_Slice(Meshlet),
-    meshlet_data: Gpu_Slice(u32),
-    meshes:       Gpu_Slice(Mesh),
-    draws:        Gpu_Slice(Draw),
-    
-    draw_commands:      Gpu_Slice(Draw_Command),
-    // @todo both need to be cleared to 1 on init. is allocated memory guarenteed to be zeroed? if so then we could make 0 the default by making them xx_occluded
-    draw_visibility:    Gpu_Slice(u32),
-    meshlet_visibility: Gpu_Slice(u32),
-    
-    bottom_level_acceleration_structures: vk.DeviceAddress,
-    top_level_acceleration_structures:    vk.DeviceAddress,
-}
-
 Debug :: struct {
     vsync: bool,
     
