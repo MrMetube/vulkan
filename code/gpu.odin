@@ -50,6 +50,8 @@ Gpu :: struct {
     swapchain_format: vk.Format,
     image_index: u32, 
     
+    descriptor_heap: Descriptor_Heap,
+    
     ////////////////////////////////////////////////
     
     swapchain_size: uv2,
@@ -95,6 +97,25 @@ Acceleration_Structure :: struct {
 }
 
 ////////////////////////////////////////////////
+
+/* 
+
+// @todo
+
+Usage :: { VERTEX, UNIFORM, ... }
+// named parameters and default values
+create_buffer(debugname bytesize usage: Usage = ...) -> Handle(Buffer)
+create_texture(debugname, dimensions, format, initial_data = xxx) -> Handle(Texture)
+create_shader(
+    debugName
+    vs = { bytecode, entryFunctionName },
+    ps = { bytecode, entryFunctionName },
+    graphicsstate = {
+        depthTest = COMPARE,
+        // binding layouts <- we dont do that here
+    }
+) -> Handle(Shader)
+*/
 
 Gpu_Slice :: struct ($E: typeid) {
     cpu: [] E,
@@ -680,11 +701,17 @@ gpu_init :: proc (windows_hinstance: pmm, vsync: bool) -> Gpu {
     assert(ok)
     profile_zone_end()
     
+    ////////////////////////////////////////////////
+    
+    create_descriptor_heap(&gpu) // @todo inline?
+    
     return gpu
 }
 
 gpu_deinit :: proc (gpu: ^Gpu) {
     defer gpu^ = {}
+    
+    destroy_descriptor_heap(gpu, gpu.descriptor_heap)
     
     for &pool in gpu.command_pools {
         vk.DestroyCommandPool(gpu.device, pool, nil)
@@ -1161,7 +1188,7 @@ Pipeline_Info :: struct {
     is_mesh_pipeline: bool,
 }
 
-make_pipeline_info :: proc (info: ^Pipeline_Info, gpu: ^Gpu, heap: Descriptor_Heap, shaders: [] ^Shader, constants: [] Specialization_Constant) {
+make_pipeline_info :: proc (info: ^Pipeline_Info, gpu: ^Gpu, shaders: [] ^Shader, constants: [] Specialization_Constant) {
     // universal Descriptor Heap mapping
     info.mappings[0] = { // resource descriptors
         sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
@@ -1171,7 +1198,7 @@ make_pipeline_info :: proc (info: ^Pipeline_Info, gpu: ^Gpu, heap: Descriptor_He
         resourceMask =  vk.SpirvResourceTypeFlagsEXT_ALL,
         source = .HEAP_WITH_CONSTANT_OFFSET,
         
-        sourceData = { constantOffset = { heapArrayStride = heap.resource_size } },
+        sourceData = { constantOffset = { heapArrayStride = gpu.descriptor_heap.resource_size } },
     }
     
     info.mappings[1] = { // sampler descriptors
@@ -1182,7 +1209,7 @@ make_pipeline_info :: proc (info: ^Pipeline_Info, gpu: ^Gpu, heap: Descriptor_He
         resourceMask = vk.SpirvResourceTypeFlagsEXT_ALL,
         source = .HEAP_WITH_CONSTANT_OFFSET,
         
-        sourceData = { constantOffset = { heapArrayStride = heap.resource_size } },
+        sourceData = { constantOffset = { heapArrayStride = gpu.descriptor_heap.resource_size } },
     }
     
     info.heap_mapping = vk.ShaderDescriptorSetAndBindingMappingInfoEXT { 
@@ -1238,11 +1265,11 @@ make_pipeline_info :: proc (info: ^Pipeline_Info, gpu: ^Gpu, heap: Descriptor_He
     }
 }
 
-gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: ^Shader, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil, loc := #caller_location) -> Pipeline {
+gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: ^Shader, constants: [] Specialization_Constant = nil, loc := #caller_location) -> Pipeline {
     assert(compute.stage == .COMPUTE)
     
     pipeline_info: Pipeline_Info
-    make_pipeline_info(&pipeline_info, gpu, heap, { compute }, constants)
+    make_pipeline_info(&pipeline_info, gpu, { compute }, constants)
     
     result: Pipeline
     result.bind_point = .COMPUTE
@@ -1262,41 +1289,41 @@ gpu_create_compute_pipeline :: proc (gpu: ^Gpu, compute: ^Shader, heap: Descript
     return result
 }
 
-gpu_create_graphics_pipeline :: proc (gpu: ^Gpu, vertex, fragment: ^Shader, info: Raster_Desc, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil, loc := #caller_location) -> Pipeline {
+gpu_create_graphics_pipeline :: proc (gpu: ^Gpu, vertex, fragment: ^Shader, info: Raster_Desc, constants: [] Specialization_Constant = nil, loc := #caller_location) -> Pipeline {
     assert(vertex.stage   == .VERTEX)
     assert(fragment.stage == .FRAGMENT)
     
     result: Pipeline
-    gpu_create_graphics_pipeline_common(gpu, &result, info, heap, { vertex, fragment }, constants, loc)
+    gpu_create_graphics_pipeline_common(gpu, &result, info, { vertex, fragment }, constants, loc)
     
     return result
 }
 
 gpu_create_graphics_meshlet_pipeline :: proc { gpu_create_graphics_meshlet_pipeline_mesh, gpu_create_graphics_meshlet_pipeline_task }
-gpu_create_graphics_meshlet_pipeline_task :: proc (gpu: ^Gpu, task, mesh, frag: ^Shader, info: Raster_Desc, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil, loc := #caller_location) -> Pipeline {
+gpu_create_graphics_meshlet_pipeline_task :: proc (gpu: ^Gpu, task, mesh, frag: ^Shader, info: Raster_Desc, constants: [] Specialization_Constant = nil, loc := #caller_location) -> Pipeline {
     assert(task.stage == .TASK_EXT)
     assert(mesh.stage == .MESH_EXT)
     assert(frag.stage == .FRAGMENT)
     
     result: Pipeline
-    gpu_create_graphics_pipeline_common(gpu, &result, info, heap, { task, mesh, frag }, constants, loc)
+    gpu_create_graphics_pipeline_common(gpu, &result, info, { task, mesh, frag }, constants, loc)
     
     return result
 }
 
-gpu_create_graphics_meshlet_pipeline_mesh :: proc (gpu: ^Gpu, mesh, frag: ^Shader, info: Raster_Desc, heap: Descriptor_Heap, constants: [] Specialization_Constant = nil, loc := #caller_location) -> Pipeline {
+gpu_create_graphics_meshlet_pipeline_mesh :: proc (gpu: ^Gpu, mesh, frag: ^Shader, info: Raster_Desc, constants: [] Specialization_Constant = nil, loc := #caller_location) -> Pipeline {
     assert(mesh.stage == .MESH_EXT)
     assert(frag.stage == .FRAGMENT)
     
     result: Pipeline
-    gpu_create_graphics_pipeline_common(gpu, &result, info, heap, { mesh, frag }, constants, loc)
+    gpu_create_graphics_pipeline_common(gpu, &result, info, { mesh, frag }, constants, loc)
     
     return result
 }
 
-gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info: Raster_Desc, heap: Descriptor_Heap, shaders: [] ^Shader, constants: [] Specialization_Constant, loc := #caller_location) {
+gpu_create_graphics_pipeline_common :: proc (gpu: ^Gpu, result: ^Pipeline, info: Raster_Desc, shaders: [] ^Shader, constants: [] Specialization_Constant, loc := #caller_location) {
     pipeline_info: Pipeline_Info
-    make_pipeline_info(&pipeline_info, gpu, heap, shaders, constants)
+    make_pipeline_info(&pipeline_info, gpu, shaders, constants)
     
     result.bind_point = .GRAPHICS
     
@@ -2000,7 +2027,7 @@ gpu_draw_mesh_tasks_indirect_count :: proc (cmd: vk.CommandBuffer, commands: Gpu
 ////////////////////////////////////////////////
 // Descriptor Heap
 
-create_descriptor_heap :: proc (gpu: ^Gpu) -> Descriptor_Heap {
+create_descriptor_heap :: proc (gpu: ^Gpu) {
     resource_count      := cast(vk.DeviceSize) DescriptorStaticLimit + MaxFramesInFlight * DescriptorPerFrameLimit
     resource_size       := max(gpu.heap_properties.bufferDescriptorSize, gpu.heap_properties.imageDescriptorSize)
     resource_alignment  := max(gpu.heap_properties.bufferDescriptorAlignment, gpu.heap_properties.imageDescriptorAlignment)
@@ -2014,25 +2041,23 @@ create_descriptor_heap :: proc (gpu: ^Gpu) -> Descriptor_Heap {
     sampler_reserved   := gpu.heap_properties.minSamplerHeapReservedRange
     sampler_total_size := sampler_size * sampler_count + sampler_reserved
     
-    result: Descriptor_Heap
-    result.resources = gpu_allocate_slice(gpu, [] u8, resource_total_size, alignment = cast(umm) resource_alignment, usage = { .DESCRIPTOR_HEAP_EXT } )
-    result.samplers  = gpu_allocate_slice(gpu, [] u8, sampler_total_size,  alignment = cast(umm) sampler_alignment,  usage = { .DESCRIPTOR_HEAP_EXT } )
+    heap := &gpu.descriptor_heap
+    heap.resources = gpu_allocate_slice(gpu, [] u8, resource_total_size, alignment = cast(umm) resource_alignment, usage = { .DESCRIPTOR_HEAP_EXT } )
+    heap.samplers  = gpu_allocate_slice(gpu, [] u8, sampler_total_size,  alignment = cast(umm) sampler_alignment,  usage = { .DESCRIPTOR_HEAP_EXT } )
     
     // @correctness we should respect the alignment, which may increase the total size
-    result.resource_reserved_offset = resource_count * resource_size
-    result.sampler_reserved_offset  = sampler_count  * sampler_size
-    result.resource_reserved_size   = resource_reserved
-    result.sampler_reserved_size    = sampler_reserved
+    heap.resource_reserved_offset = resource_count * resource_size
+    heap.sampler_reserved_offset  = sampler_count  * sampler_size
+    heap.resource_reserved_size   = resource_reserved
+    heap.sampler_reserved_size    = sampler_reserved
     
-    result.resource_size = cast(u32) resource_size
-    result.sampler_size  = cast(u32) sampler_size
+    heap.resource_size = cast(u32) resource_size
+    heap.sampler_size  = cast(u32) sampler_size
     
     // :SamplerHack:
-    /* Texture */ write_sampler_to_heap(gpu, &result, 0, .LINEAR, .LINEAR,  .REPEAT,        .WEIGHTED_AVERAGE, anisotropy = true)
-    /* Filter  */ write_sampler_to_heap(gpu, &result, 1, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .WEIGHTED_AVERAGE)
-    /* Depth   */ write_sampler_to_heap(gpu, &result, 2, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .MIN)
-    
-    return result
+    /* Texture */ write_sampler_to_heap(gpu, 0, .LINEAR, .LINEAR,  .REPEAT,        .WEIGHTED_AVERAGE, anisotropy = true)
+    /* Filter  */ write_sampler_to_heap(gpu, 1, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .WEIGHTED_AVERAGE)
+    /* Depth   */ write_sampler_to_heap(gpu, 2, .LINEAR, .NEAREST, .CLAMP_TO_EDGE, .MIN)
 }
 
 destroy_descriptor_heap :: proc (gpu: ^Gpu, heap: Descriptor_Heap) {
@@ -2040,7 +2065,7 @@ destroy_descriptor_heap :: proc (gpu: ^Gpu, heap: Descriptor_Heap) {
     gpu_free(gpu, heap.resources)
 }
 
-gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: ^Descriptor_Heap) {
+gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: Descriptor_Heap) {
     #assert(type_of(heap.samplers)  == Gpu_Slice(u8))
     #assert(type_of(heap.resources) == Gpu_Slice(u8))
     
@@ -2068,7 +2093,7 @@ gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: ^Descriptor_Heap) {
     vk.CmdBindResourceHeapEXT(cmd, &resource_info)
 }
 
-write_texture_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: u32, image: Image, image_type: vk.DescriptorType, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) {
+write_texture_to_heap :: proc (gpu: ^Gpu, index: u32, image: Image, image_type: vk.DescriptorType, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) {
     aspect_mask := get_image_aspect_mask(image.format)
     
     image_info := vk.ImageDescriptorInfoEXT {
@@ -2089,15 +2114,15 @@ write_texture_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: u32, im
         data = { pImage = &image_info },
     }
     
-    offset := index * heap.resource_size
+    offset := index * gpu.descriptor_heap.resource_size
     range := vk.HostAddressRangeEXT {
-        address = &heap.resources.cpu[offset],
-        size    = cast(int) heap.resource_size,
+        address = &gpu.descriptor_heap.resources.cpu[offset],
+        size    = cast(int) gpu.descriptor_heap.resource_size,
     }
     check(vk.WriteResourceDescriptorsEXT(gpu.device, 1, &info, &range))
 }
 
-write_acceleration_structure_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: u32, structure: Acceleration_Structure) {
+write_acceleration_structure_to_heap :: proc (gpu: ^Gpu, index: u32, structure: Acceleration_Structure) {
     address_info := vk.DeviceAddressRangeKHR { address = structure.address }
     
     info := vk.ResourceDescriptorInfoEXT {
@@ -2106,15 +2131,15 @@ write_acceleration_structure_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap,
         data = { pAddressRange = &address_info },
     }
     
-    offset := index * heap.resource_size
+    offset := index * gpu.descriptor_heap.resource_size
     range := vk.HostAddressRangeEXT {
-        address = &heap.resources.cpu[offset],
-        size    = cast(int) heap.resource_size,
+        address = &gpu.descriptor_heap.resources.cpu[offset],
+        size    = cast(int) gpu.descriptor_heap.resource_size,
     }
     check(vk.WriteResourceDescriptorsEXT(gpu.device, 1, &info, &range))
 }
 
-write_sampler_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: u32, filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, address_mode: vk.SamplerAddressMode, reduction_mode: vk.SamplerReductionMode, anisotropy: b32 = false) {
+write_sampler_to_heap :: proc (gpu: ^Gpu, index: u32, filter: vk.Filter, mipmap_mode: vk.SamplerMipmapMode, address_mode: vk.SamplerAddressMode, reduction_mode: vk.SamplerReductionMode, anisotropy: b32 = false) {
     info := vk.SamplerCreateInfo {
         sType = .SAMPLER_CREATE_INFO,
         
@@ -2142,10 +2167,10 @@ write_sampler_to_heap :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index: u32, fi
         info.pNext = &reduction_info
     }
     
-    sampler_offset := index * heap.sampler_size
+    sampler_offset := index * gpu.descriptor_heap.sampler_size
     range := vk.HostAddressRangeEXT {
-        address = &heap.samplers.cpu[sampler_offset], 
-        size    = cast(int) heap.sampler_size,
+        address = &gpu.descriptor_heap.samplers.cpu[sampler_offset], 
+        size    = cast(int) gpu.descriptor_heap.sampler_size,
     }
     check(vk.WriteSamplerDescriptorsEXT(gpu.device, 1, &info, &range))
 }

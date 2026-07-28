@@ -19,7 +19,7 @@ Scene :: struct {
     draws: [dynamic] Draw,
     
     buffers:       Buffers,
-    textures:      [dynamic] Image,
+    textures:      [dynamic] Image, // @todo seperate hot and cold data into soa(texture itself vs. the info, memory of texture)
     top_level:     Acceleration_Structure,
     bottom_levels: [dynamic] Acceleration_Structure,
 }

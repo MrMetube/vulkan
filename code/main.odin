@@ -361,10 +361,6 @@ main :: proc () {
     
     ////////////////////////////////////////////////
     
-    descriptor_heap := create_descriptor_heap(gpu)
-    
-    ////////////////////////////////////////////////
-    
     scene: Scene
     init_scene(gpu, &scene)
     
@@ -680,7 +676,7 @@ main :: proc () {
                     compute := get_shader(shaders.culling, immediately)
                     constants := [] Specialization_Constant { /* late = */ { b = stage != .early }, /* post = */ { b = stage == .post } }
                     
-                    cull_pipeline = gpu_create_compute_pipeline(gpu, compute, descriptor_heap, constants)
+                    cull_pipeline = gpu_create_compute_pipeline(gpu, compute, constants)
                     
                     print("Recreated %v cull_pipeline.\n", stage)
                 }
@@ -691,7 +687,7 @@ main :: proc () {
                 immediately := !pipeline_is_valid(pipelines.depth_reduce)
                 
                 compute := get_shader(shaders.depth_reduce, immediately)
-                pipelines.depth_reduce = gpu_create_compute_pipeline(gpu, compute, descriptor_heap)
+                pipelines.depth_reduce = gpu_create_compute_pipeline(gpu, compute)
                 
                 print("Recreated depth_pipeline.\n")
             }
@@ -711,7 +707,7 @@ main :: proc () {
                     task, mesh, frag := get_shader(shaders.meshlet_task, immediately), get_shader(shaders.meshlet_mesh, immediately), get_shader(shaders.meshlet_frag, immediately)
                     constants := [] Specialization_Constant { /* late = */ { b = stage != .early }, /* post = */ { b = stage == .post } }
                     
-                    meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(gpu, task, mesh, frag, raster_description, descriptor_heap, constants)
+                    meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(gpu, task, mesh, frag, raster_description, constants)
                     
                     print("Recreated %v meshlet_pipeline.\n", stage)
                 }
@@ -730,7 +726,7 @@ main :: proc () {
                 raster_description.blendstate.dst_alpha_factor = .ONE_MINUS_SRC_ALPHA
                 
                 vert, frag := get_shader(shaders.ui_vert, immediately), get_shader(shaders.ui_frag, immediately)
-                pipelines.ui = gpu_create_graphics_pipeline(gpu, vert, frag, raster_description, descriptor_heap)
+                pipelines.ui = gpu_create_graphics_pipeline(gpu, vert, frag, raster_description)
                 
                 print("Recreated ui_pipeline.\n")
             }
@@ -788,11 +784,11 @@ main :: proc () {
             
             profile_scope("Setup Descriptor Heap")
             
-            write_texture :: proc (gpu: ^Gpu, heap: ^Descriptor_Heap, index_offset: ^u32, image: Image, sampled: bool, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) -> u32 {
+            write_texture :: proc (gpu: ^Gpu, index_offset: ^u32, image: Image, sampled: bool, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) -> u32 {
                 result := index_offset^
                 index_offset^ += 1
                 // @speed this can write multiple descriptors in a single call, so we could expose a version that passes a base index and then a slice of images
-                write_texture_to_heap(gpu, heap, result, image, sampled ? .SAMPLED_IMAGE : .STORAGE_IMAGE, mip_base, mip_count)
+                write_texture_to_heap(gpu, result, image, sampled ? .SAMPLED_IMAGE : .STORAGE_IMAGE, mip_base, mip_count)
                 return result
             }
             
@@ -812,24 +808,24 @@ main :: proc () {
             // @volatile draws assume that their texture indices start at index 0. Add some kind of base offset that the shader add to a draws
             // texture index(if its not 0?) to get its texture, or do this offsetting on draw generation on the cpu.
             for &texture in scene.textures {
-                texture.sampled_index = write_texture(gpu, &descriptor_heap, &descriptor_offset, texture, true)
+                texture.sampled_index = write_texture(gpu, &descriptor_offset, texture, true)
             }
             
-            render_targets.depth_buffer.sampled_index  = write_texture(gpu, &descriptor_heap, &descriptor_offset, render_targets.depth_buffer,  true)
-            render_targets.depth_pyramid.sampled_index = write_texture(gpu, &descriptor_heap, &descriptor_offset, render_targets.depth_pyramid, true)
-            render_targets.depth_pyramid.storage_index = write_texture(gpu, &descriptor_heap, &descriptor_offset, render_targets.depth_pyramid, false)
+            render_targets.depth_buffer.sampled_index  = write_texture(gpu, &descriptor_offset, render_targets.depth_buffer,  true)
+            render_targets.depth_pyramid.sampled_index = write_texture(gpu, &descriptor_offset, render_targets.depth_pyramid, true)
+            render_targets.depth_pyramid.storage_index = write_texture(gpu, &descriptor_offset, render_targets.depth_pyramid, false)
             
             for &mip, mip_level in render_targets.depth_pyramid_mips {
-                mip.sampled_index = write_texture(gpu, &descriptor_heap, &descriptor_offset, render_targets.depth_pyramid, true,  cast(u32) mip_level, 1)
-                mip.storage_index = write_texture(gpu, &descriptor_heap, &descriptor_offset, render_targets.depth_pyramid, false, cast(u32) mip_level, 1)
+                mip.sampled_index = write_texture(gpu, &descriptor_offset, render_targets.depth_pyramid, true,  cast(u32) mip_level, 1)
+                mip.storage_index = write_texture(gpu, &descriptor_offset, render_targets.depth_pyramid, false, cast(u32) mip_level, 1)
             }
             
-            write_acceleration_structure_to_heap(gpu, &descriptor_heap, descriptor_offset, scene.top_level)
+            write_acceleration_structure_to_heap(gpu, descriptor_offset, scene.top_level)
             frame.top_level_acceleration_structure_index = descriptor_offset
             descriptor_offset += 1
             
             // @todo can we just offset the heap's address when we bind it? this removes the need for the frame.frame_heap_offset, if we then also store the correct offset and not the absolute index for the top_level_acceleration_structure
-            gpu_set_active_heap(cmd, &descriptor_heap)
+            gpu_set_active_heap(cmd, gpu.descriptor_heap)
         
             // @todo is this barrier correct in the commandbuffer if the writes to the heap are done by the cpu? probably a @race
             gpu_barrier(cmd, { .BOTTOM_OF_PIPE }, { .COMPUTE_SHADER, .PRE_RASTERIZATION_SHADERS, .FRAGMENT_SHADER, .DRAW_INDIRECT }, { .descriptors })
@@ -949,9 +945,6 @@ main :: proc () {
     
     profile_zone_begin("allocations")
     
-    profile_zone_begin("heap")
-    destroy_descriptor_heap(gpu, descriptor_heap)
-    profile_zone_end()
     profile_zone_begin("render targets")
     destroy_render_targets(gpu, &render_targets)
     profile_zone_end()
