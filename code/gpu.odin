@@ -174,25 +174,24 @@ Texture_Desc :: struct {
 default_texture_desc :: proc (
     kind:         vk.ImageType = .D2,
     size:         uv3 = 1,
-    format:       Format = .UNDEFINED,
+    format:       Format,
     mip_count:    u32 = 1,
     sample_count: u32 = 1,
-    usage:        vk.ImageUsageFlags = {},
+    usage:        vk.ImageUsageFlags,
 ) -> Texture_Desc {
     result := Texture_Desc {
-        kind = kind,
-        size = size,
-        format = format,
-        mip_count = mip_count,
+        kind         = kind,
+        size         = size,
+        format       = format,
+        mip_count    = mip_count,
         sample_count = sample_count,
-        usage = usage,
+        usage        = usage,
     }
     return result
 }
 
 Render_Target :: struct {
-    texture: Image,
-    view:    vk.ImageView,
+    view: vk.ImageView,
     
     load_op:  vk.AttachmentLoadOp,
     store_op: vk.AttachmentStoreOp,
@@ -944,7 +943,6 @@ gpu_free_slice :: proc (gpu: ^Gpu, slice: Gpu_Slice($T)) {
 ////////////////////////////////////////////////
 // Textures
 
-// @copypasta this can be compressed with allocate_size
 gpu_allocate_texture :: proc (gpu: ^Gpu, desc: Texture_Desc, loc := #caller_location) -> Image {
     samples: vk.SampleCountFlag
     switch desc.sample_count {
@@ -1913,7 +1911,7 @@ gpu_begin_rendering :: proc (cmd: vk.CommandBuffer, desc: Render_Pass_Desc) {
         pColorAttachments    = raw_data(&color_attachments),
     }
     
-    if desc.depth_target.texture.image != 0 {
+    if desc.depth_target.view != 0 {
         rendering_info.pDepthAttachment = &vk.RenderingAttachmentInfo {
             sType = .RENDERING_ATTACHMENT_INFO,
             imageLayout = .GENERAL,
@@ -1924,7 +1922,7 @@ gpu_begin_rendering :: proc (cmd: vk.CommandBuffer, desc: Render_Pass_Desc) {
         }
     }
     
-    if desc.stencil_target.texture.image != 0 {
+    if desc.stencil_target.view != 0 {
         rendering_info.pStencilAttachment = &vk.RenderingAttachmentInfo {
             sType = .RENDERING_ATTACHMENT_INFO,
             imageLayout = .GENERAL,
