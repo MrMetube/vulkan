@@ -5,6 +5,7 @@ import "base:runtime"
 
 import "core:fmt"
 import "core:mem"
+import "core:os"
 import "core:strings"
 import "core:slice"
 import "core:time"
@@ -144,6 +145,52 @@ Camera :: struct {
     orientation: q32,
     fov_y: f32,
 }
+
+////////////////////////////////////////////////
+
+Shader_Info :: struct {
+    source: Watcher_Id,
+    common: Watcher_Id,
+}
+
+Shader :: struct {
+    was_modified: bool,
+    bytes:      [] u8,
+    stage:      vk.ShaderStageFlag,
+    local_size: uv3,
+}
+
+////////////////////////////////////////////////
+
+the_shader_manager: Shader_Manager
+
+Shader_Manager :: struct {
+    initialized: bool,
+    
+    // These can never be freed
+    infos:   [dynamic] Shader_Info,
+    shaders: [dynamic] Shader,
+    
+    ////////////////////////////////////////////////
+    
+    // This needs to store the transient information in each Shader_Compilation and must be able to free individual compilation related allocations.
+    compilation_allocator: Allocator,
+    // This needs to store the byte data from the recompile and loading up until the next successful recompilation. It also needs to be able to free single allocations.
+    bytes_allocator:          Allocator,
+    shader_compilation_procs: Procs,
+    shader_compilation_infos: [dynamic] Shader_Compilation,
+}
+
+Shader_Compilation :: struct {
+    completed: bool,
+    id: Shader_Id,
+    input_path:    string,
+    shader_output: string,
+    old_bytes: [] u8,
+}
+
+Shader_Id  :: distinct u32
+Nil_Shader :: cast(Shader_Id) 0
 
 ////////////////////////////////////////////////
 
@@ -365,7 +412,7 @@ main :: proc () {
     profile_zone_begin("Init shaders")
     watchers := make(Watchers, context.allocator)
     
-    init_assets(context.allocator)
+    init_shader_manager(context.allocator)
     
     generate_shader_api("shaders/api.generated.glsl")
     
@@ -544,378 +591,379 @@ main :: proc () {
         
         assert(gpu.swapchain_state != .Dirty)
         
-        if gpu.swapchain_state == .Window_Is_Minimized { continue }
-        
-        frame.screen_size = gpu.swapchain_size
-        
-        ////////////////////////////////////////////////
-        
-        if state.absolute_frame_index >= MaxFramesInFlight+1 {
-            profile_scope("GPU profiling")
+        if gpu.swapchain_state != .Window_Is_Minimized {
             
-            triangle_count: u64
-            if state.absolute_frame_index >= MaxFramesInFlight {
-                profile_scope("count triangles")
+            frame.screen_size = gpu.swapchain_size
+            
+            ////////////////////////////////////////////////
+            
+            if state.absolute_frame_index >= MaxFramesInFlight+1 {
+                profile_scope("GPU profiling")
                 
-                last_finished_stats_pool := stats_pools[frame.index]
+                triangle_count: u64
+                if state.absolute_frame_index >= MaxFramesInFlight {
+                    profile_scope("count triangles")
+                    
+                    last_finished_stats_pool := stats_pools[frame.index]
+                    
+                    stats_result: [128] u64
+                    size := cast(int) size_of_slice(stats_result[:])
+                    
+                    check(vk.GetQueryPoolResults(gpu.device, last_finished_stats_pool, 0, 1, size, &stats_result[0], size_of(stats_result[0]), { ._64 }))
+                    
+                    for i in 0..<stats_count {
+                        triangle_count += stats_result[i]
+                    }
+                }
                 
-                stats_result: [128] u64
-                size := cast(int) size_of_slice(stats_result[:])
+                gpu_profile_collate_events(gpu, frame.index)
                 
-                check(vk.GetQueryPoolResults(gpu.device, last_finished_stats_pool, 0, 1, size, &stats_result[0], size_of(stats_result[0]), { ._64 }))
+                gpu_delta             := gpu_profile_get_zone_duration(gpu, frame.index, "Frame")
+                cull_delta_early      := gpu_profile_get_zone_duration(gpu, frame.index, "early culling")
+                cull_delta_late       := gpu_profile_get_zone_duration(gpu, frame.index, "late culling")
+                cull_delta_post       := gpu_profile_get_zone_duration(gpu, frame.index, "post culling")
+                rendering_delta_early := gpu_profile_get_zone_duration(gpu, frame.index, "early rendering pass")
+                rendering_delta_late  := gpu_profile_get_zone_duration(gpu, frame.index, "late rendering pass")
+                rendering_delta_post  := gpu_profile_get_zone_duration(gpu, frame.index, "post rendering pass")
                 
-                for i in 0..<stats_count {
-                    triangle_count += stats_result[i]
+                blend_factor_k := time_smoothed_blend_factor(7, cpu_delta)
+                
+                debug := &state.debug
+                debug.cpu_time             = linear_blend(cpu_delta,             debug.cpu_time,             blend_factor_k)
+                debug.cull_time_early      = linear_blend(cull_delta_early,      debug.cull_time_early,      blend_factor_k)
+                debug.cull_time_late       = linear_blend(cull_delta_late,       debug.cull_time_late,       blend_factor_k)
+                debug.cull_time_post       = linear_blend(cull_delta_post,       debug.cull_time_post,       blend_factor_k)
+                debug.rendering_time_early = linear_blend(rendering_delta_early, debug.rendering_time_early, blend_factor_k)
+                debug.rendering_time_late  = linear_blend(rendering_delta_late,  debug.rendering_time_late,  blend_factor_k)
+                debug.rendering_time_post  = linear_blend(rendering_delta_post,  debug.rendering_time_post,  blend_factor_k)
+                // this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
+                if gpu_delta >= 0 {
+                    debug.gpu_time = linear_blend(gpu_delta, debug.gpu_time, blend_factor_k)
+                }
+                
+                view :: proc (seconds: f64) -> time.Duration {
+                    return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
+                }
+                
+                profile_zone_begin("Update window title")
+                sb := strings.builder_make(context.temp_allocator)
+                fmt.sbprintf(&sb, "%v tri, cpu: %.3v, gpu: %.3v (early cull %.3v, early render %.3v, late cull %.3v, late render %.3v, post cull %.3v, post render %.3v)", 
+                    view_magnitude(triangle_count, kind = .Count),
+                    view(debug.cpu_time), view(debug.gpu_time), 
+                    view(debug.cull_time_early), view(debug.rendering_time_early), 
+                    view(debug.cull_time_late), view(debug.rendering_time_late),
+                    view(debug.cull_time_post), view(debug.rendering_time_post),
+                )
+                fmt.sbprintf(&sb, ", [ ")
+                if debug.vsync {
+                    fmt.sbprintf(&sb, "VSync ")
+                }
+                if debug.culling_enabled {
+                    fmt.sbprintf(&sb, "Culling ")
+                }
+                if debug.lod_enabled {
+                    fmt.sbprintf(&sb, "LOD ")
+                }
+                if debug.occlusion_enabled {
+                    fmt.sbprintf(&sb, "Occlusion ")
+                }
+                extra: string
+                if debug.display_pyramid {
+                    extra = fmt.sbprintf(&sb, ", displaying depth mip level %v ", debug.display_pyramid_mip_level)
+                }
+                fmt.sbprintf(&sb, "]")
+                
+                title := strings.to_cstring(&sb)
+                sdl.SetWindowTitle(window, title)
+            
+                profile_zone_end()
+                
+                if frame.print_profile {
+                    gpu_print_profile(gpu, frame.index)
                 }
             }
             
-            gpu_profile_collate_events(gpu, frame.index)
+            ////////////////////////////////////////////////
             
-            gpu_delta             := gpu_profile_get_zone_duration(gpu, frame.index, "Frame")
-            cull_delta_early      := gpu_profile_get_zone_duration(gpu, frame.index, "early culling")
-            cull_delta_late       := gpu_profile_get_zone_duration(gpu, frame.index, "late culling")
-            cull_delta_post       := gpu_profile_get_zone_duration(gpu, frame.index, "post culling")
-            rendering_delta_early := gpu_profile_get_zone_duration(gpu, frame.index, "early rendering pass")
-            rendering_delta_late  := gpu_profile_get_zone_duration(gpu, frame.index, "late rendering pass")
-            rendering_delta_post  := gpu_profile_get_zone_duration(gpu, frame.index, "post rendering pass")
+            frame.bump = &frame_bump_allocators[frame.index]
+            bump_free_all(frame.bump)
+            frame.stats_pool = stats_pools[frame.index]
             
-            blend_factor_k := time_smoothed_blend_factor(7, cpu_delta)
+            ////////////////////////////////////////////////
             
-            debug := &state.debug
-            debug.cpu_time             = linear_blend(cpu_delta,             debug.cpu_time,             blend_factor_k)
-            debug.cull_time_early      = linear_blend(cull_delta_early,      debug.cull_time_early,      blend_factor_k)
-            debug.cull_time_late       = linear_blend(cull_delta_late,       debug.cull_time_late,       blend_factor_k)
-            debug.cull_time_post       = linear_blend(cull_delta_post,       debug.cull_time_post,       blend_factor_k)
-            debug.rendering_time_early = linear_blend(rendering_delta_early, debug.rendering_time_early, blend_factor_k)
-            debug.rendering_time_late  = linear_blend(rendering_delta_late,  debug.rendering_time_late,  blend_factor_k)
-            debug.rendering_time_post  = linear_blend(rendering_delta_post,  debug.rendering_time_post,  blend_factor_k)
-            // this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
-            if gpu_delta >= 0 {
-                debug.gpu_time = linear_blend(gpu_delta, debug.gpu_time, blend_factor_k)
-            }
-            
-            view :: proc (seconds: f64) -> time.Duration {
-                return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
-            }
-            
-            profile_zone_begin("Update window title")
-            sb := strings.builder_make(context.temp_allocator)
-            fmt.sbprintf(&sb, "%v tri, cpu: %.3v, gpu: %.3v (early cull %.3v, early render %.3v, late cull %.3v, late render %.3v, post cull %.3v, post render %.3v)", 
-                view_magnitude(triangle_count, kind = .Count),
-                view(debug.cpu_time), view(debug.gpu_time), 
-                view(debug.cull_time_early), view(debug.rendering_time_early), 
-                view(debug.cull_time_late), view(debug.rendering_time_late),
-                view(debug.cull_time_post), view(debug.rendering_time_post),
-            )
-            fmt.sbprintf(&sb, ", [ ")
-            if debug.vsync {
-                fmt.sbprintf(&sb, "VSync ")
-            }
-            if debug.culling_enabled {
-                fmt.sbprintf(&sb, "Culling ")
-            }
-            if debug.lod_enabled {
-                fmt.sbprintf(&sb, "LOD ")
-            }
-            if debug.occlusion_enabled {
-                fmt.sbprintf(&sb, "Occlusion ")
-            }
-            extra: string
-            if debug.display_pyramid {
-                extra = fmt.sbprintf(&sb, ", displaying depth mip level %v ", debug.display_pyramid_mip_level)
-            }
-            fmt.sbprintf(&sb, "]")
-            
-            title := strings.to_cstring(&sb)
-            sdl.SetWindowTitle(window, title)
-           
-            profile_zone_end()
-            
-            if frame.print_profile {
-                gpu_print_profile(gpu, frame.index)
-            }
-        }
-        
-        ////////////////////////////////////////////////
-        
-        frame.bump = &frame_bump_allocators[frame.index]
-        bump_free_all(frame.bump)
-        frame.stats_pool = stats_pools[frame.index]
-        
-        ////////////////////////////////////////////////
-        
-        {
             {
-                // 
-                // @todo the work of loading the bytes and parsing them could be moved to a thread. The modified flag 
-                // then needs to be expanded into a state { Invalid, Loading, Valid }.
-                // The checking itself can also be done on a different thread, and does not need to be done in sync with
-                // the renderer frames.
-                // 
-                // The main thread would then just check if the shader.bytes themselves have been updated by checking a
-                // flag and then use the already loaded bytes to recreate the pipeline. The remaining question then is 
-                // how often the watchers-thread should check the files, but maybe there already is an asynchronous OS
-                // api which then can just be used and we suspend the thread and let the OS wake it when a file was 
-                // modified?
-                //
-                
-                watchers_check_files_for_modification(&watchers)
-                
-                recompile_shaders_if_needed(&watchers, shaders.culling)
-                recompile_shaders_if_needed(&watchers, shaders.meshlet_task, shaders.meshlet_mesh, shaders.meshlet_frag)
-                recompile_shaders_if_needed(&watchers, shaders.depth_reduce)
-                recompile_shaders_if_needed(&watchers, shaders.ui_vert, shaders.ui_frag)
-                
-                load_all_compiled_shaders(immediately = false)
-            }
-            
-            reloaded_cull_shader := check_and_reset_shaders_was_modified(shaders.culling)
-            for &cull_pipeline, stage in pipelines.culling {
-                if !pipeline_is_valid(cull_pipeline) || reloaded_cull_shader {
-                    immediately := !pipeline_is_valid(cull_pipeline)
-                    destroy_pipeline(gpu, cull_pipeline)
+                {
+                    // 
+                    // @todo the work of loading the bytes and parsing them could be moved to a thread. The modified flag 
+                    // then needs to be expanded into a state { Invalid, Loading, Valid }.
+                    // The checking itself can also be done on a different thread, and does not need to be done in sync with
+                    // the renderer frames.
+                    // 
+                    // The main thread would then just check if the shader.bytes themselves have been updated by checking a
+                    // flag and then use the already loaded bytes to recreate the pipeline. The remaining question then is 
+                    // how often the watchers-thread should check the files, but maybe there already is an asynchronous OS
+                    // api which then can just be used and we suspend the thread and let the OS wake it when a file was 
+                    // modified?
+                    //
                     
-                    compute := get_shader(shaders.culling, immediately)
-                    constants := [] Specialization_Constant { /* late = */ { b = stage != .early }, /* post = */ { b = stage == .post } }
+                    watchers_check_files_for_modification(&watchers)
                     
-                    cull_pipeline = gpu_create_compute_pipeline(gpu, compute, constants)
+                    recompile_shaders_if_needed(&watchers, shaders.culling)
+                    recompile_shaders_if_needed(&watchers, shaders.meshlet_task, shaders.meshlet_mesh, shaders.meshlet_frag)
+                    recompile_shaders_if_needed(&watchers, shaders.depth_reduce)
+                    recompile_shaders_if_needed(&watchers, shaders.ui_vert, shaders.ui_frag)
                     
-                    print("Recreated %v cull_pipeline.\n", stage)
+                    load_all_compiled_shaders(immediately = false)
                 }
-            }
-            
-            if !pipeline_is_valid(pipelines.depth_reduce) || check_and_reset_shaders_was_modified(shaders.depth_reduce) {
-                immediately := !pipeline_is_valid(pipelines.depth_reduce)
-                destroy_pipeline(gpu, pipelines.depth_reduce)
                 
-                compute := get_shader(shaders.depth_reduce, immediately)
-                pipelines.depth_reduce = gpu_create_compute_pipeline(gpu, compute)
+                reloaded_cull_shader := check_and_reset_shaders_was_modified(shaders.culling)
+                for &cull_pipeline, stage in pipelines.culling {
+                    if !pipeline_is_valid(cull_pipeline) || reloaded_cull_shader {
+                        immediately := !pipeline_is_valid(cull_pipeline)
+                        destroy_pipeline(gpu, cull_pipeline)
+                        
+                        compute := get_shader(shaders.culling, immediately)
+                        constants := [] Specialization_Constant { /* late = */ { b = stage != .early }, /* post = */ { b = stage == .post } }
+                        
+                        cull_pipeline = gpu_create_compute_pipeline(gpu, compute, constants)
+                        
+                        print("Recreated %v cull_pipeline.\n", stage)
+                    }
+                }
                 
-                print("Recreated depth_pipeline.\n")
-            }
-            
-            reloaded_meshlet_shaders := check_and_reset_shaders_was_modified(shaders.meshlet_task, shaders.meshlet_mesh, shaders.meshlet_frag)
-            for &meshlet_pipeline, stage in pipelines.meshlets {
-                if !pipeline_is_valid(meshlet_pipeline) || reloaded_meshlet_shaders {
-                    immediately := !pipeline_is_valid(meshlet_pipeline)
-                    destroy_pipeline(gpu, meshlet_pipeline)
+                if !pipeline_is_valid(pipelines.depth_reduce) || check_and_reset_shaders_was_modified(shaders.depth_reduce) {
+                    immediately := !pipeline_is_valid(pipelines.depth_reduce)
+                    destroy_pipeline(gpu, pipelines.depth_reduce)
+                    
+                    compute := get_shader(shaders.depth_reduce, immediately)
+                    pipelines.depth_reduce = gpu_create_compute_pipeline(gpu, compute)
+                    
+                    print("Recreated depth_pipeline.\n")
+                }
+                
+                reloaded_meshlet_shaders := check_and_reset_shaders_was_modified(shaders.meshlet_task, shaders.meshlet_mesh, shaders.meshlet_frag)
+                for &meshlet_pipeline, stage in pipelines.meshlets {
+                    if !pipeline_is_valid(meshlet_pipeline) || reloaded_meshlet_shaders {
+                        immediately := !pipeline_is_valid(meshlet_pipeline)
+                        destroy_pipeline(gpu, meshlet_pipeline)
+                        
+                        raster_description: Raster_Desc
+                        raster_description.depth_format = render_targets.depth_format
+                        raster_description.color_target_formats = { render_targets.color_format }
+                        raster_description.blendstate = &Blend_Desc{ **DefaultBlendDesc }
+                        // :Stencil: 
+                        
+                        task, mesh, frag := get_shader(shaders.meshlet_task, immediately), get_shader(shaders.meshlet_mesh, immediately), get_shader(shaders.meshlet_frag, immediately)
+                        constants := [] Specialization_Constant { /* late = */ { b = stage != .early }, /* post = */ { b = stage == .post } }
+                        
+                        meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(gpu, task, mesh, frag, raster_description, constants)
+                        
+                        print("Recreated %v meshlet_pipeline.\n", stage)
+                    }
+                }    
+                
+                if !pipeline_is_valid(pipelines.ui) || check_and_reset_shaders_was_modified(shaders.ui_vert, shaders.ui_frag) {
+                    immediately := !pipeline_is_valid(pipelines.ui)
+                    destroy_pipeline(gpu, pipelines.ui)
                     
                     raster_description: Raster_Desc
-                    raster_description.depth_format = render_targets.depth_format
-                    raster_description.color_target_formats = { render_targets.color_format }
-                    raster_description.blendstate = &Blend_Desc{ **DefaultBlendDesc }
-                    // :Stencil: 
+                    raster_description.color_target_formats = { render_targets.color_format } // hotreload shader: format
+                    raster_description.blendstate = &Blend_Desc { **DefaultBlendDesc }
+                    raster_description.blendstate.src_color_factor = .SRC_ALPHA
+                    raster_description.blendstate.dst_color_factor = .ONE_MINUS_SRC_ALPHA
+                    raster_description.blendstate.src_alpha_factor = .ONE
+                    raster_description.blendstate.dst_alpha_factor = .ONE_MINUS_SRC_ALPHA
                     
-                    task, mesh, frag := get_shader(shaders.meshlet_task, immediately), get_shader(shaders.meshlet_mesh, immediately), get_shader(shaders.meshlet_frag, immediately)
-                    constants := [] Specialization_Constant { /* late = */ { b = stage != .early }, /* post = */ { b = stage == .post } }
+                    vert, frag := get_shader(shaders.ui_vert, immediately), get_shader(shaders.ui_frag, immediately)
+                    pipelines.ui = gpu_create_graphics_pipeline(gpu, vert, frag, raster_description)
                     
-                    meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(gpu, task, mesh, frag, raster_description, constants)
-                    
-                    print("Recreated %v meshlet_pipeline.\n", stage)
+                    print("Recreated ui_pipeline.\n")
                 }
-            }    
+            }
             
-            if !pipeline_is_valid(pipelines.ui) || check_and_reset_shaders_was_modified(shaders.ui_vert, shaders.ui_frag) {
-                immediately := !pipeline_is_valid(pipelines.ui)
-                destroy_pipeline(gpu, pipelines.ui)
+            ////////////////////////////////////////////////
+            
+            {
+                //
+                // :ViewSpace:
+                // The default vulkan view space is right-handed with x+ being right, y+ down and the camera looking down z-. The depth buffer maps 
+                // the near z clipping plane to 0 and the far plane to 1. This loses floating point precision for far away object and can increase
+                // z-fighting.
+                // We instead want the coordinate frame to be y+ as up and also want to reverse the depth mapping (reversed-z) to place the most 
+                // amount of precision at the far plane. It is then also simple to move the far plane of the projection matrix towards infinity.
+                // In the limit this produces the matrix given by projection_reversed_z_infinite_far_plane.
+                // 
+                oriented := cast(m4) la.matrix3_from_quaternion(scene.camera.orientation)
+                frame.view_from_world  = la.inverse(translate(oriented, scene.camera.p))
+                frame.screen_from_view = projection_reversed_z_infinite_far_plane(scene.camera.fov_y, cast(f32) gpu.swapchain_size.x / cast(f32) gpu.swapchain_size.y, state.near_z)
                 
-                raster_description: Raster_Desc
-                raster_description.color_target_formats = { render_targets.color_format } // hotreload shader: format
-                raster_description.blendstate = &Blend_Desc { **DefaultBlendDesc }
-                raster_description.blendstate.src_color_factor = .SRC_ALPHA
-                raster_description.blendstate.dst_color_factor = .ONE_MINUS_SRC_ALPHA
-                raster_description.blendstate.src_alpha_factor = .ONE
-                raster_description.blendstate.dst_alpha_factor = .ONE_MINUS_SRC_ALPHA
+                if state.debug.culling_enabled {
+                    frustum_x := get_row_v4(frame.screen_from_view, 3) + get_row_v4(frame.screen_from_view, 0) // x + w < 0
+                    frustum_y := get_row_v4(frame.screen_from_view, 3) + get_row_v4(frame.screen_from_view, 1) // y + w > 0
+                    frustum_x /= length(frustum_x.xyz)
+                    frustum_y /= length(frustum_y.xyz)
+                    
+                    frame.frustum[0] = frustum_x.x
+                    frame.frustum[1] = frustum_x.z
+                    frame.frustum[2] = frustum_y.y
+                    frame.frustum[3] = frustum_y.z
+                }
+            }
+            
+            ////////////////////////////////////////////////
+            
+            profile_zone_begin("Record command buffer")
+            
+            profile_zone_begin("reset command pool")
+            check(vk.ResetCommandPool(gpu.device, gpu.command_pools[frame.index], {}))
+            profile_zone_end()
+            
+            cmd := gpu_begin_command_recording(gpu, gpu.command_pools[frame.index])
+            
+            gpu_profile_frame_begin(gpu, cmd, frame.index)
+            
+            gpu_profile_zone_begin("frame init")
+            
+            vk.CmdResetQueryPool(cmd, frame.stats_pool, 0, stats_count)
+            
+            ////////////////////////////////////////////////
+            
+            {
+                // @waste texture management and draw "generation" only really need to happen once per "level load" as there is no streaming in of data.
                 
-                vert, frag := get_shader(shaders.ui_vert, immediately), get_shader(shaders.ui_frag, immediately)
-                pipelines.ui = gpu_create_graphics_pipeline(gpu, vert, frag, raster_description)
+                profile_scope("Setup Descriptor Heap")
                 
-                print("Recreated ui_pipeline.\n")
-            }
-        }
-        
-        ////////////////////////////////////////////////
-        
-        {
-            //
-            // :ViewSpace:
-            // The default vulkan view space is right-handed with x+ being right, y+ down and the camera looking down z-. The depth buffer maps 
-            // the near z clipping plane to 0 and the far plane to 1. This loses floating point precision for far away object and can increase
-            // z-fighting.
-            // We instead want the coordinate frame to be y+ as up and also want to reverse the depth mapping (reversed-z) to place the most 
-            // amount of precision at the far plane. It is then also simple to move the far plane of the projection matrix towards infinity.
-            // In the limit this produces the matrix given by projection_reversed_z_infinite_far_plane.
-            // 
-            oriented := cast(m4) la.matrix3_from_quaternion(scene.camera.orientation)
-            frame.view_from_world  = la.inverse(translate(oriented, scene.camera.p))
-            frame.screen_from_view = projection_reversed_z_infinite_far_plane(scene.camera.fov_y, cast(f32) gpu.swapchain_size.x / cast(f32) gpu.swapchain_size.y, state.near_z)
-            
-            if state.debug.culling_enabled {
-                frustum_x := get_row_v4(frame.screen_from_view, 3) + get_row_v4(frame.screen_from_view, 0) // x + w < 0
-                frustum_y := get_row_v4(frame.screen_from_view, 3) + get_row_v4(frame.screen_from_view, 1) // y + w > 0
-                frustum_x /= length(frustum_x.xyz)
-                frustum_y /= length(frustum_y.xyz)
+                write_texture :: proc (gpu: ^Gpu, index_offset: ^u32, image: vk.Image, format: vk.Format, sampled: bool, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) -> u32 {
+                    result := index_offset^
+                    index_offset^ += 1
+                    // @speed this can write multiple descriptors in a single call, so we could expose a version that passes a base index and then a slice of images
+                    write_texture_to_heap(gpu, result, image, format, sampled ? .SAMPLED_IMAGE : .STORAGE_IMAGE, mip_base, mip_count)
+                    return result
+                }
                 
-                frame.frustum[0] = frustum_x.x
-                frame.frustum[1] = frustum_x.z
-                frame.frustum[2] = frustum_y.y
-                frame.frustum[3] = frustum_y.z
-            }
-        }
-        
-        ////////////////////////////////////////////////
-        
-        profile_zone_begin("Record command buffer")
-        
-        profile_zone_begin("reset command pool")
-        check(vk.ResetCommandPool(gpu.device, gpu.command_pools[frame.index], {}))
-        profile_zone_end()
-        
-        cmd := gpu_begin_command_recording(gpu, gpu.command_pools[frame.index])
-        
-        gpu_profile_frame_begin(gpu, cmd, frame.index)
-        
-        gpu_profile_zone_begin("frame init")
-        
-        vk.CmdResetQueryPool(cmd, frame.stats_pool, 0, stats_count)
-        
-        ////////////////////////////////////////////////
-        
-        {
-            // @waste texture management and draw "generation" only really need to happen once per "level load" as there is no streaming in of data.
+                descriptor_offset := cast(u32) (frame.index * DescriptorPerFrameLimit)
+                
+                // @todo add a null texture, which is a bright debug color so that uninitialized indices(0) are easy to find
+                // nil_index := append_texture(gpu, &descriptor_heap, &descriptor_offset, nil_texture, true)
+                descriptor_offset += 1
+                descriptor_offset += last_used_heap_index // @todo we must not override the textures, but this is not the correct count
+                
+                // @todo this doesnt need to happen every frame
+                depth_pyramid := get_texture(render_targets.depth_pyramid)^
+                for &mip, mip_level in render_targets.depth_pyramid_mips {
+                    mip.sampled_index = write_texture(gpu, &descriptor_offset, depth_pyramid.image, render_targets.pyramid_format, true,  cast(u32) mip_level, 1)
+                    mip.storage_index = write_texture(gpu, &descriptor_offset, depth_pyramid.image, render_targets.pyramid_format, false, cast(u32) mip_level, 1)
+                }
+                
+                write_acceleration_structure_to_heap(gpu, descriptor_offset, scene.top_level)
+                frame.top_level_acceleration_structure_index = descriptor_offset
+                descriptor_offset += 1
+                
+                // @todo can we just offset the heap's address when we bind it? this removes the need for the frame.frame_heap_offset, if we then also store the correct offset and not the absolute index for the top_level_acceleration_structure
+                gpu_set_active_heap(cmd, gpu.descriptor_heap)
             
-            profile_scope("Setup Descriptor Heap")
-            
-            write_texture :: proc (gpu: ^Gpu, index_offset: ^u32, image: vk.Image, format: vk.Format, sampled: bool, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) -> u32 {
-                result := index_offset^
-                index_offset^ += 1
-                // @speed this can write multiple descriptors in a single call, so we could expose a version that passes a base index and then a slice of images
-                write_texture_to_heap(gpu, result, image, format, sampled ? .SAMPLED_IMAGE : .STORAGE_IMAGE, mip_base, mip_count)
-                return result
+                // @todo is this barrier correct in the commandbuffer if the writes to the heap are done by the cpu? probably a @race
+                gpu_barrier(cmd, { .BOTTOM_OF_PIPE }, { .COMPUTE_SHADER, .PRE_RASTERIZATION_SHADERS, .FRAGMENT_SHADER, .DRAW_INDIRECT }, { .descriptors })
             }
             
-            descriptor_offset := cast(u32) (frame.index * DescriptorPerFrameLimit)
+            ////////////////////////////////////////////////
             
-            // @todo add a null texture, which is a bright debug color so that uninitialized indices(0) are easy to find
-            // nil_index := append_texture(gpu, &descriptor_heap, &descriptor_offset, nil_texture, true)
-            descriptor_offset += 1
-            descriptor_offset += last_used_heap_index // @todo we must not override the textures, but this is not the correct count
-            
-            // @todo this doesnt need to happen every frame
-            depth_pyramid := get_texture(render_targets.depth_pyramid)^
-            for &mip, mip_level in render_targets.depth_pyramid_mips {
-                mip.sampled_index = write_texture(gpu, &descriptor_offset, depth_pyramid.image, render_targets.pyramid_format, true,  cast(u32) mip_level, 1)
-                mip.storage_index = write_texture(gpu, &descriptor_offset, depth_pyramid.image, render_targets.pyramid_format, false, cast(u32) mip_level, 1)
+            draw_buffer: Gpu_Slice(Draw)
+            {
+                profile_scope("Copy draws")
+                frame.draw_count = cast(u32) len(scene.draws)
+                draw_buffer = bump_allocate_slice(frame.bump, [] Draw, frame.draw_count)
+                copy(draw_buffer.cpu, scene.draws[:])
             }
             
-            write_acceleration_structure_to_heap(gpu, descriptor_offset, scene.top_level)
-            frame.top_level_acceleration_structure_index = descriptor_offset
-            descriptor_offset += 1
+            ////////////////////////////////////////////////
             
-            // @todo can we just offset the heap's address when we bind it? this removes the need for the frame.frame_heap_offset, if we then also store the correct offset and not the absolute index for the top_level_acceleration_structure
-            gpu_set_active_heap(cmd, gpu.descriptor_heap)
-        
-            // @todo is this barrier correct in the commandbuffer if the writes to the heap are done by the cpu? probably a @race
-            gpu_barrier(cmd, { .BOTTOM_OF_PIPE }, { .COMPUTE_SHADER, .PRE_RASTERIZATION_SHADERS, .FRAGMENT_SHADER, .DRAW_INDIRECT }, { .descriptors })
-        }
-        
-        ////////////////////////////////////////////////
-        
-        draw_buffer: Gpu_Slice(Draw)
-        {
-            profile_scope("Copy draws")
-            frame.draw_count = cast(u32) len(scene.draws)
-            draw_buffer = bump_allocate_slice(frame.bump, [] Draw, frame.draw_count)
-            copy(draw_buffer.cpu, scene.draws[:])
-        }
-        
-        ////////////////////////////////////////////////
-        
-        {
-            color           := get_texture(render_targets.color_buffer) // frame: image
-            depth           := get_texture(render_targets.depth_buffer) // frame: image
-            depth_pyramid   := get_texture(render_targets.depth_pyramid) // frame: image
-            swapchain_image := gpu.swapchain_images[gpu.image_index]
-            
-            color_format   := render_targets.color_format
-            depth_format   := render_targets.depth_format
-            pyramid_format := render_targets.pyramid_format
-            
-            gpu_image_barriers(cmd, { .BY_REGION },
-                create_image_barrier_from_undefined(color.image,         color_format,         { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE                       }),
-                create_image_barrier_from_undefined(depth.image,         depth_format,         { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE, .MEMORY_READ }), 
-                create_image_barrier_from_undefined(depth_pyramid.image, pyramid_format,       { .COMPUTE_SHADER                                 }, { .MEMORY_READ, .MEMORY_WRITE                   }),
-                create_image_barrier_from_undefined(swapchain_image,     gpu.swapchain_format, { .ALL_TRANSFER                                   }, { .TRANSFER_WRITE                               }),
-            )
-        }
-        
-        gpu_profile_zone_end()
-        
-        ////////////////////////////////////////////////
-        
-        cull_and_render(cmd, .early, pipelines, shaders, &render_targets, state, scene, &frame, draw_buffer)
-        
-        generate_depth_pyramid(cmd, pipelines, shaders, render_targets, frame)
-        
-        cull_and_render(cmd, .late, pipelines, shaders, &render_targets, state, scene, &frame, draw_buffer)
-        
-        cull_and_render(cmd, .post, pipelines, shaders, &render_targets, state, scene, &frame, draw_buffer)
-        
-        if false {
-            render_ui(cmd, pipelines, render_targets, state, frame)
-        }
-        
-        ////////////////////////////////////////////////
-        
-        {
-            gpu_profile_zone_begin("copy to swapchain")
-            source_image    := get_texture(render_targets.color_buffer) // frame: image
-            swapchain_image := gpu.swapchain_images[gpu.image_index]
-            
-            if state.debug.display_pyramid {
-                source_image = get_texture(render_targets.depth_pyramid)
+            {
+                color           := get_texture(render_targets.color_buffer) // frame: image
+                depth           := get_texture(render_targets.depth_buffer) // frame: image
+                depth_pyramid   := get_texture(render_targets.depth_pyramid) // frame: image
+                swapchain_image := gpu.swapchain_images[gpu.image_index]
+                
+                color_format   := render_targets.color_format
+                depth_format   := render_targets.depth_format
+                pyramid_format := render_targets.pyramid_format
+                
+                gpu_image_barriers(cmd, { .BY_REGION },
+                    create_image_barrier_from_undefined(color.image,         color_format,         { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE                       }),
+                    create_image_barrier_from_undefined(depth.image,         depth_format,         { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE, .MEMORY_READ }), 
+                    create_image_barrier_from_undefined(depth_pyramid.image, pyramid_format,       { .COMPUTE_SHADER                                 }, { .MEMORY_READ, .MEMORY_WRITE                   }),
+                    create_image_barrier_from_undefined(swapchain_image,     gpu.swapchain_format, { .ALL_TRANSFER                                   }, { .TRANSFER_WRITE                               }),
+                )
             }
-            
-            gpu_barrier(cmd, { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }, { .ALL_TRANSFER })
-            
-            if !state.debug.display_pyramid {
-                vk.CmdCopyImage(cmd, source_image.image, .GENERAL, swapchain_image, .GENERAL, 1, &vk.ImageCopy {
-                    srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
-                    dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
-                    extent         = { gpu.swapchain_size.x, gpu.swapchain_size.y, 1 },
-                })
-            } else {
-                mip_index := cast(u32) state.debug.display_pyramid_mip_level
-                mip_size  := cast(iv2) render_targets.depth_pyramid_mips[mip_index].size
-                vk.CmdBlitImage(cmd, source_image.image, .GENERAL, swapchain_image, .GENERAL, 1, &vk.ImageBlit {
-                    srcSubresource = { aspectMask = { .COLOR }, layerCount = 1, mipLevel = mip_index },
-                    dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
-                    srcOffsets = { {0, 0, 0}, { mip_size.x, mip_size.y, 1 }},
-                    dstOffsets = { {0, 0, 0}, { cast(i32) gpu.swapchain_size.x, cast(i32) gpu.swapchain_size.y, 1 }},
-                }, .NEAREST)
-            }
-            
-            gpu_image_barriers(cmd, { .BY_REGION }, create_image_barrier(swapchain_image, gpu.swapchain_format, { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .GENERAL, {}, {}, .PRESENT_SRC_KHR))
             
             gpu_profile_zone_end()
-        }
-        
-        ////////////////////////////////////////////////
-        
-        gpu_profile_frame_end()
-        profile_zone_end()
-        
-        profile_zone_begin("submit and present queue")
-        gpu_submit(gpu.general_queue, {
-            { gpu.image_aquired_semaphores[frame.index], { .TRANSFER },     nil },
             
-            { gpu.render_completes[gpu.image_index],     { .ALL_COMMANDS }, 0 },
-            { frame_semaphore,                           { .ALL_COMMANDS }, next_frame },
-        }, cmd)
-        gpu_present(gpu, gpu.general_queue, gpu.render_completes[gpu.image_index])
-        
-        next_frame += 1
-        profile_zone_end()
+            ////////////////////////////////////////////////
+            
+            cull_and_render(cmd, .early, pipelines, shaders, &render_targets, state, scene, &frame, draw_buffer)
+            
+            generate_depth_pyramid(cmd, pipelines, shaders, render_targets, frame)
+            
+            cull_and_render(cmd, .late, pipelines, shaders, &render_targets, state, scene, &frame, draw_buffer)
+            
+            cull_and_render(cmd, .post, pipelines, shaders, &render_targets, state, scene, &frame, draw_buffer)
+            
+            if false {
+                render_ui(cmd, pipelines, render_targets, state, frame)
+            }
+            
+            ////////////////////////////////////////////////
+            
+            {
+                gpu_profile_zone_begin("copy to swapchain")
+                source_image    := get_texture(render_targets.color_buffer) // frame: image
+                swapchain_image := gpu.swapchain_images[gpu.image_index]
+                
+                if state.debug.display_pyramid {
+                    source_image = get_texture(render_targets.depth_pyramid)
+                }
+                
+                gpu_barrier(cmd, { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }, { .ALL_TRANSFER })
+                
+                if !state.debug.display_pyramid {
+                    vk.CmdCopyImage(cmd, source_image.image, .GENERAL, swapchain_image, .GENERAL, 1, &vk.ImageCopy {
+                        srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
+                        dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
+                        extent         = { gpu.swapchain_size.x, gpu.swapchain_size.y, 1 },
+                    })
+                } else {
+                    mip_index := cast(u32) state.debug.display_pyramid_mip_level
+                    mip_size  := cast(iv2) render_targets.depth_pyramid_mips[mip_index].size
+                    vk.CmdBlitImage(cmd, source_image.image, .GENERAL, swapchain_image, .GENERAL, 1, &vk.ImageBlit {
+                        srcSubresource = { aspectMask = { .COLOR }, layerCount = 1, mipLevel = mip_index },
+                        dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
+                        srcOffsets = { {0, 0, 0}, { mip_size.x, mip_size.y, 1 }},
+                        dstOffsets = { {0, 0, 0}, { cast(i32) gpu.swapchain_size.x, cast(i32) gpu.swapchain_size.y, 1 }},
+                    }, .NEAREST)
+                }
+                
+                gpu_image_barriers(cmd, { .BY_REGION }, create_image_barrier(swapchain_image, gpu.swapchain_format, { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .GENERAL, {}, {}, .PRESENT_SRC_KHR))
+                
+                gpu_profile_zone_end()
+            }
+            
+            ////////////////////////////////////////////////
+            
+            gpu_profile_frame_end()
+            profile_zone_end()
+            
+            profile_zone_begin("submit and present queue")
+            gpu_submit(gpu.general_queue, {
+                { gpu.image_aquired_semaphores[frame.index], { .TRANSFER },     nil },
+                
+                { gpu.render_completes[gpu.image_index],     { .ALL_COMMANDS }, 0 },
+                { frame_semaphore,                           { .ALL_COMMANDS }, next_frame },
+            }, cmd)
+            gpu_present(gpu, gpu.general_queue, gpu.render_completes[gpu.image_index])
+            
+            next_frame += 1
+            profile_zone_end()
+        }
         
         ////////////////////////////////////////////////
         
@@ -977,7 +1025,7 @@ main :: proc () {
     profile_zone_begin("assets")
     delete(watchers)
     
-    deinit_assets()
+    deinit_shader_manager()
     
     profile_zone_end()
     profile_zone_end()
@@ -1414,7 +1462,7 @@ grid_dimension_from_total_count :: proc (id: Shader_Id, x: u32 = 1, y: u32 = 1, 
 
 init_render_targets :: proc (render_targets: ^Render_Targets) {
     // @volatile we want a non-srgb format for the color buffer, but need to then match its component layout to make the "copy to swapchain" not mess up.
-    render_targets.color_format   = .B8G8R8A8_UNORM
+    render_targets.color_format   = .B8G8R8A8_UNORM // .B8G8R8A8_SRGB
     render_targets.depth_format   = .D32_SFLOAT
     render_targets.pyramid_format = .R32_SFLOAT
 }
@@ -1459,6 +1507,229 @@ destroy_render_targets :: proc (gpu: ^Gpu, render_targets: ^Render_Targets) {
     gpu_destroy_texture_view(gpu, render_targets.depth_view)
     
     clear(&render_targets.depth_pyramid_mips)
+}
+
+////////////////////////////////////////////////
+
+init_shader_manager :: proc (bytes_allocator: Allocator) {
+    manager := &the_shader_manager
+    
+    // Nils
+    append_nothing(&manager.shaders)
+    append_nothing(&manager.infos)
+    
+    manager.compilation_allocator = context.allocator
+    manager.bytes_allocator       = bytes_allocator
+    
+    manager.initialized = true
+}
+
+deinit_shader_manager :: proc () {
+    manager := get_shader_manager()
+    load_all_compiled_shaders() // finish all running compilations and clean them up
+    for shader in manager.shaders {
+        delete(shader.bytes, manager.bytes_allocator)
+    }
+    delete(manager.shaders)
+    delete(manager.infos)
+    delete(manager.shader_compilation_procs)
+    delete(manager.shader_compilation_infos)
+}
+
+get_shader_manager :: proc (loc := #caller_location) -> ^Shader_Manager {
+    manager := &the_shader_manager
+    assert(manager.initialized, loc = loc)
+    
+    return manager
+}
+
+////////////////////////////////////////////////
+
+make_shader :: proc () -> (Shader_Id, ^Shader_Info) {
+    manager := get_shader_manager()
+    
+    id := cast(Shader_Id) len(manager.infos)
+    info   := append_into(&manager.infos)
+    append_into(&manager.shaders)
+    
+    return id, info
+}
+
+get_shader :: proc (id: Shader_Id, immediately: bool = true, loc := #caller_location) -> ^Shader {
+    manager := get_shader_manager()
+    
+    id := id
+    if id >= auto_cast len(manager.shaders) {
+        id = Nil_Shader
+    } else {
+        load_compiled_shader(id, immediately)
+    }
+    
+    result := &manager.shaders[id]
+    if immediately {
+        assert(result.bytes != nil, "Failed to immediately get shader.", loc = loc)
+    }
+    
+    return result
+}
+
+get_shader_info :: proc (id: Shader_Id) -> ^Shader_Info {
+    manager := get_shader_manager()
+    
+    id := id
+    if id >= auto_cast len(manager.infos) {
+        id = Nil_Shader
+    }
+    
+    result := &manager.infos[id]
+    return result
+}
+
+make_shader_compilation :: proc () -> (^Procs, ^Shader_Compilation, Allocator) {
+    manager := get_shader_manager()
+    
+    comp  := append_into(&manager.shader_compilation_infos)
+    procs := &manager.shader_compilation_procs
+    alloc := manager.compilation_allocator
+    
+    return procs, comp, alloc
+}
+
+check_and_reset_shaders_was_modified :: proc (ids: ..Shader_Id) -> bool {
+    result := false
+    
+    for id in ids {
+        shader := get_shader(id, immediately = false)
+        result ||= shader.was_modified
+        shader.was_modified = false
+    }
+    
+    return result
+}
+
+load_all_compiled_shaders :: proc (immediately := false) {
+    load_compiled_shader(0, immediately)
+}
+
+// If id == 0 then all shaders will be loaded.
+load_compiled_shader :: proc (id: Shader_Id, immediately := false) {
+    manager := get_shader_manager()
+    if len(manager.shader_compilation_procs) == 0 { return }
+    
+    completed_count: int
+    for &p, index in manager.shader_compilation_procs {
+        info := &manager.shader_compilation_infos[index]
+        if id != 0 && info.id != id { continue }
+        
+        state, wait_err := os.process_wait(p, timeout = immediately ? os.TIMEOUT_INFINITE : 0)
+        done := true
+        if !immediately {
+            if wait_err == .Timeout || !state.exited {
+                done = false
+            }
+        } else {
+            assert(wait_err == nil)
+        }
+        
+        if done {
+            completed_count += 1
+            info.completed = true
+            
+            if state.exit_code != 0 {
+                fmt.printfln("Shader compilation failed for %q", info.input_path)
+            } else {
+                load_and_parse_shader(info^)
+            }
+        }
+        
+        if id != 0 { break }
+    }
+    
+    if completed_count != 0 {
+        if completed_count == len(manager.shader_compilation_procs) {
+            clear(&manager.shader_compilation_procs)
+            clear(&manager.shader_compilation_infos)
+        } else {
+            #reverse for info, index in manager.shader_compilation_infos {
+                if info.completed {
+                    unordered_remove(&manager.shader_compilation_procs, index)
+                    unordered_remove(&manager.shader_compilation_infos, index)
+                }
+            }
+        }
+    }
+}
+
+load_and_parse_shader :: proc (info: Shader_Compilation) {
+    manager := get_shader_manager()
+    
+    defer {
+        delete(info.input_path,    manager.compilation_allocator)
+        delete(info.shader_output, manager.compilation_allocator)
+    }
+    
+    shader_bytes, err := os.read_entire_file(info.shader_output, manager.bytes_allocator)
+    if err != nil {
+        fmt.printfln("Could not load the output file of %q, which is %q: %v", info.input_path, info.shader_output, os.error_string(err))
+        
+        if manager.shaders[info.id].bytes == nil {
+            assert(false, fmt.tprintf("Failed to initially load the shader %q", info.input_path))
+        }
+        return
+    }
+    
+    delete(info.old_bytes, manager.bytes_allocator)
+    
+    shader: Shader
+    shader.was_modified = true
+    shader.bytes = shader_bytes
+    parse_shader(&shader)
+    
+    manager.shaders[info.id] = shader
+}
+
+////////////////////////////////////////////////
+
+init_shader_and_watchers :: proc (watchers: ^Watchers, common_watcher: Watcher_Id, input: string, output_extension := ".spv") -> Shader_Id {
+    id, info := make_shader()
+    
+    info.source = watchers_make(watchers, input)
+    info.common = common_watcher
+    
+    watcher_depend_on(watchers, info.common)
+    watcher_depend_on(watchers, info.source)
+    
+    return id
+}
+
+recompile_shaders_if_needed :: proc (watchers: ^Watchers, shaders_ids: ..Shader_Id) {
+    for id in shaders_ids {
+        info := get_shader_info(id)^
+        
+        // This unusual form of x = bool || x instead of ||= is required so that even if 
+        // source returns true, common is still checked and reset if it also needs to be. 
+        // Otherwise the compiler will skip the call if the value is already true.
+        needs_recompile: bool
+        needs_recompile = watcher_check_and_reset(watchers, info.source) || needs_recompile
+        needs_recompile = watcher_check_and_reset(watchers, info.common) || needs_recompile
+        
+        if needs_recompile {
+            shader := get_shader(id, immediately = false)
+            
+            procs, comp, comp_allocator := make_shader_compilation()
+            
+            input_path  := watchers[info.source].path
+            output_path := compile_shader(input_path, procs = procs)
+            
+            comp^ = {
+                false,
+                id,
+                strings.clone(input_path,  comp_allocator),
+                strings.clone(output_path, comp_allocator),
+                shader.bytes,
+            }
+        }
+    }
 }
 
 ////////////////////////////////////////////////

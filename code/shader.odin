@@ -9,17 +9,144 @@ import "core:strings"
 
 import vk "../lib/vulkan"
 
-Shader_Info :: struct {
-    source: Watcher_Id,
-    common: Watcher_Id,
+compile_shader :: proc (input_path: string, output_directory := "build", output_extension := ".spv", procs: ^Procs = nil) -> string {
+    cmd: Cmd
+    cmd.allocator = context.temp_allocator
+    
+    input_directory, input_file := os.split_path(input_path)
+    
+    output_file := fmt.tprintf("%v%v", input_file, output_extension)
+    output_path, _ := os.join_path({input_directory, output_directory, output_file}, context.temp_allocator)
+    
+    compile_shader_begin(&cmd, output_path)
+    
+    // embed shader source code for renderdoc
+    if ODIN_DEBUG { append(&cmd, "-g") }
+    if Optimized  { append(&cmd, "-O") }
+    
+    append(&cmd, input_path)
+    
+    if !run_command(&cmd, or_exit = false, stdout = os.stdout, stderr = os.stderr, async = procs) {
+        assert(false, "Failing to run the command means that it is faulty.")
+    }
+    
+    return output_path
 }
 
-Shader :: struct {
-    was_modified: bool,
-    bytes:      [] u8,
-    stage:      vk.ShaderStageFlag,
-    local_size: uv3,
+parse_shader :: proc (shader: ^Shader) {
+    if shader.bytes == nil { return }
+    
+    shader_code := slice_from_parts(u32, raw_data(shader.bytes), len(shader.bytes) / 4)
+    
+    assert(shader_code[0] == SpvMagicNumber)
+    id_bound := shader_code[3]
+    
+    Id :: struct {
+        opcode:   SpvOp,
+        constant: u32,
+    }
+    
+    ////////////////////////////////////////////////
+    // copy-pasted from https://github.com/KhronosGroup/SPIRV-Headers/blob/main/include/spirv/unified1/spirv.h
+    
+    SpvMagicNumber :: 0x07230203
+    
+    SpvExecutionMode :: enum  u32 {
+        LocalSize = 17,
+        LocalSizeId = 38,
+        // all other values were omitted
+    }
+    
+    SpvExecutionModel :: enum u32 { 
+        Vertex = 0,
+        Fragment = 4,
+        GLCompute = 5,
+        TaskEXT = 5364,
+        MeshEXT = 5365,
+        // all other values were omitted
+    }
+    
+    SpvOp:: enum u32 {
+        EntryPoint = 15,
+        ExecutionMode = 16,
+        Constant = 43,
+        ExecutionModeId = 331,
+        // all other values were omitted
+    }
+    
+    ////////////////////////////////////////////////
+    
+    ids := make([] Id, id_bound, context.temp_allocator)
+    
+    code := shader_code[5:]
+    
+    local_size: [3] i32 = -1
+    
+    for len(code) != 0 {
+        opcode     := cast(SpvOp) cast(u16) ((code[0] >>  0) & 0xFFFF)
+        word_count := cast(u16) ((code[0] >> 16) & 0xFFFF)
+        
+        #partial switch opcode {
+            case .EntryPoint:
+                execution_model := cast(SpvExecutionModel) code[1]
+                
+                #partial switch execution_model {
+                    case .Vertex:     shader.stage = .VERTEX
+                    case .Fragment:   shader.stage = .FRAGMENT
+                    case .MeshEXT:    shader.stage = .MESH_EXT
+                    case .TaskEXT:    shader.stage = .TASK_EXT
+                    case .GLCompute:  shader.stage = .COMPUTE
+                }
+                
+                case .ExecutionMode:
+                    mode := cast(SpvExecutionMode) code[2]
+                    if mode == .LocalSize {
+                        shader.local_size = { code[3], code[4], code[5] }
+                    }
+                    
+                    case .ExecutionModeId:
+                        mode := cast(SpvExecutionMode) code[2]
+                        if mode == .LocalSizeId {
+                            local_size = { cast(i32) code[3], cast(i32) code[4], cast(i32) code[5] }
+                        }
+                        
+                        case .Constant:
+                            id := code[2]
+                            assert(ids[id].opcode == {})
+                            
+                            ids[id].opcode   = opcode
+                            ids[id].constant = code[3]
+                        }
+                        
+                        code = code[word_count:]
+                    }
+                    
+                    if shader.stage == .COMPUTE {
+                        for it in 0..<3 {
+                            if local_size[it] >= 0 {
+                                assert(ids[local_size[it]].opcode == .Constant)
+                                shader.local_size[it] = ids[local_size[it]].constant
+                            }
+                        }
+                        
+                        assert(shader.local_size != 0)
+                    }
 }
+
+compile_shader_begin :: proc (cmd: ^Cmd, shader_output: string) {
+    append(cmd, "glslc.exe")
+    append(cmd, "--target-env=vulkan1.4")
+    append(cmd, "-o", shader_output)
+}
+
+shader_grid_dimension_from_total_count :: proc (shader: ^Shader, x: u32 = 1, y: u32 = 1, z: u32 = 1) -> uv3 {
+    total_count := uv3 { x, y, z }
+    result := (total_count + shader.local_size-1) / shader.local_size
+    return result
+}
+
+////////////////////////////////////////////////
+// auto-generated API
 
 /*
     simple struct: 
@@ -181,179 +308,6 @@ generate_shader_api :: proc (output_file: string) {
     if error != nil {
         assert(false, fmt.tprintfln("Failed to generate shader api file `%v`: %v", output_file, error))
     }
-}
-
-init_shader_and_watchers :: proc (watchers: ^Watchers, common_watcher: Watcher_Id, input: string, output_extension := ".spv") -> Shader_Id {
-    id, info := make_shader()
-    
-    info.source = watchers_make(watchers, input)
-    info.common = common_watcher
-    
-    watcher_depend_on(watchers, info.common)
-    watcher_depend_on(watchers, info.source)
-    
-    return id
-}
-
-recompile_shaders_if_needed :: proc (watchers: ^Watchers, shaders_ids: ..Shader_Id) {
-    for id in shaders_ids {
-        info := get_shader_info(id)^
-        
-        // This unusual form of x = bool || x instead of ||= is required so that even if 
-        // source returns true, common is still checked and reset if it also needs to be. 
-        // Otherwise the compiler will skip the call if the value is already true.
-        needs_recompile: bool
-        needs_recompile = watcher_check_and_reset(watchers, info.source) || needs_recompile
-        needs_recompile = watcher_check_and_reset(watchers, info.common) || needs_recompile
-        
-        if needs_recompile {
-            shader := get_shader(id, immediately = false)
-            compile_shader(id, watchers[info.source].path, old_bytes = shader.bytes)
-        }
-    }
-}
-
-compile_shader :: proc (id: Shader_Id, input_path: string, output_directory := "build", output_extension := ".spv", old_bytes: [] u8 = nil) {
-    cmd: Cmd
-    cmd.allocator = context.temp_allocator
-    
-    input_directory, input_file := os.split_path(input_path)
-    
-    output_path, _ := os.join_path({input_directory, output_directory, input_file}, context.temp_allocator)
-    shader_output := fmt.tprintf("%v%v", output_path, output_extension)
-    
-    compile_shader_begin(&cmd, shader_output)
-    
-    // embed shader source code for renderdoc
-    if ODIN_DEBUG { append(&cmd, "-g") }
-    if Optimized  { append(&cmd, "-O") }
-    
-    append(&cmd, input_path)
-    
-    procs, comp, comp_allocator := make_shader_compilation()
-    comp^ = {
-        false,
-        id,
-        strings.clone(input_path,    comp_allocator),
-        strings.clone(shader_output, comp_allocator),
-        old_bytes,
-    }
-    
-    if !run_command(&cmd, or_exit = false, stdout = os.stdout, stderr = os.stderr, async = procs) {
-        assert(false, "Failing to run the command means that it is faulty.")
-    }
-}
-
-parse_shader :: proc (shader: ^Shader) {
-    if shader.bytes == nil { return }
-    
-    shader_code := slice_from_parts(u32, raw_data(shader.bytes), len(shader.bytes) / 4)
-    
-    assert(shader_code[0] == SpvMagicNumber)
-    id_bound := shader_code[3]
-    
-    Id :: struct {
-        opcode:   SpvOp,
-        constant: u32,
-    }
-    
-    ////////////////////////////////////////////////
-    // copy-pasted from https://github.com/KhronosGroup/SPIRV-Headers/blob/main/include/spirv/unified1/spirv.h
-    
-    SpvMagicNumber :: 0x07230203
-    
-    SpvExecutionMode :: enum  u32 {
-        LocalSize = 17,
-        LocalSizeId = 38,
-        // all other values were omitted
-    }
-    
-    SpvExecutionModel :: enum u32 { 
-        Vertex = 0,
-        Fragment = 4,
-        GLCompute = 5,
-        TaskEXT = 5364,
-        MeshEXT = 5365,
-        // all other values were omitted
-    }
-    
-    SpvOp:: enum u32 {
-        EntryPoint = 15,
-        ExecutionMode = 16,
-        Constant = 43,
-        ExecutionModeId = 331,
-        // all other values were omitted
-    }
-    
-    ////////////////////////////////////////////////
-    
-    ids := make([] Id, id_bound, context.temp_allocator)
-    
-    code := shader_code[5:]
-    
-    local_size: [3] i32 = -1
-    
-    for len(code) != 0 {
-        opcode     := cast(SpvOp) cast(u16) ((code[0] >>  0) & 0xFFFF)
-        word_count := cast(u16) ((code[0] >> 16) & 0xFFFF)
-        
-        #partial switch opcode {
-            case .EntryPoint:
-                execution_model := cast(SpvExecutionModel) code[1]
-                
-                #partial switch execution_model {
-                    case .Vertex:     shader.stage = .VERTEX
-                    case .Fragment:   shader.stage = .FRAGMENT
-                    case .MeshEXT:    shader.stage = .MESH_EXT
-                    case .TaskEXT:    shader.stage = .TASK_EXT
-                    case .GLCompute:  shader.stage = .COMPUTE
-                }
-                
-                case .ExecutionMode:
-                    mode := cast(SpvExecutionMode) code[2]
-                    if mode == .LocalSize {
-                        shader.local_size = { code[3], code[4], code[5] }
-                    }
-                    
-                    case .ExecutionModeId:
-                        mode := cast(SpvExecutionMode) code[2]
-                        if mode == .LocalSizeId {
-                            local_size = { cast(i32) code[3], cast(i32) code[4], cast(i32) code[5] }
-                        }
-                        
-                        case .Constant:
-                            id := code[2]
-                            assert(ids[id].opcode == {})
-                            
-                            ids[id].opcode   = opcode
-                            ids[id].constant = code[3]
-                        }
-                        
-                        code = code[word_count:]
-                    }
-                    
-                    if shader.stage == .COMPUTE {
-                        for it in 0..<3 {
-                            if local_size[it] >= 0 {
-                                assert(ids[local_size[it]].opcode == .Constant)
-                                shader.local_size[it] = ids[local_size[it]].constant
-                            }
-                        }
-                        
-                        assert(shader.local_size != 0)
-                    }
-}
-
-compile_shader_begin :: proc (cmd: ^Cmd, shader_output: string) {
-    append(cmd, "glslc.exe")
-    append(cmd, "--target-env=vulkan1.4")
-    append(cmd, "-o", shader_output)
-}
-
-shader_grid_dimension_from_total_count :: proc (shader: ^Shader, x: u32 = 1, y: u32 = 1, z: u32 = 1) -> uv3 {
-    total_count := uv3 { x, y, z }
-    result := (total_count + shader.local_size-1) / shader.local_size
-    return result
 }
 
 ////////////////////////////////////////////////
