@@ -14,7 +14,9 @@ import "vendor:cgltf"
 // have their access synchronized, so that no 2 threads use the same memory and that no thread uses
 // memory that was freed, if any buffer needed to be reallocated to grow.
 //
-load_gltf_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Draw, camera: ^Camera, texture_paths: ^[dynamic] string, sun_direction: ^v3) -> bool {
+Scene_Draw :: distinct Draw
+
+load_gltf_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic] Scene_Draw, camera: ^Camera, texture_paths: ^[dynamic] string, sun_direction: ^v3) -> bool {
     path := fmt.ctprint(filepath)
     
     options: cgltf.options
@@ -175,17 +177,18 @@ load_gltf_scene :: proc (geometry: ^Geometry, filepath: string, draws: ^[dynamic
                 
                 material := materials[draw.mesh_index - cast(u32) first_mesh_offset]
                 if material != nil {
+                    // @volatile texture index 0 is reserved to mean no texture
                     if material.pbr_metallic_roughness.base_color_texture.texture != nil {
-                        draw.albedo_texture = cast(u32) cgltf.texture_index(data, material.pbr_metallic_roughness.base_color_texture.texture)
+                        draw.albedo_texture = 1 + cast(u32) cgltf.texture_index(data, material.pbr_metallic_roughness.base_color_texture.texture)
                     } else if material.pbr_specular_glossiness.diffuse_texture.texture != nil {
-                        draw.albedo_texture = cast(u32) cgltf.texture_index(data, material.pbr_specular_glossiness.diffuse_texture.texture)
+                        draw.albedo_texture = 1 + cast(u32) cgltf.texture_index(data, material.pbr_specular_glossiness.diffuse_texture.texture)
                     }
                     if material.normal_texture.texture != nil {
-                        draw.normal_texture = cast(u32) cgltf.texture_index(data, material.normal_texture.texture)
+                        draw.normal_texture = 1 + cast(u32) cgltf.texture_index(data, material.normal_texture.texture)
                     }
                     // @todo load specular texture
                     if material.emissive_texture.texture != nil {
-                        draw.emmisive_texture = cast(u32) cgltf.texture_index(data, material.emissive_texture.texture)
+                        draw.emmisive_texture = 1 + cast(u32) cgltf.texture_index(data, material.emissive_texture.texture)
                     }
                 }
                 

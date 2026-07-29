@@ -19,7 +19,7 @@ Scene :: struct {
     draws: [dynamic] Draw,
     
     buffers:       Buffers,
-    textures:      [dynamic] Image, // @todo seperate hot and cold data into soa(texture itself vs. the info, memory of texture)
+    textures:      [dynamic] Texture_Handle,
     top_level:     Acceleration_Structure,
     bottom_levels: [dynamic] Acceleration_Structure,
 }
@@ -49,7 +49,7 @@ init_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
     scene_allocator := arena_allocator(&scene.arena)
     
     scene.draws         = make([dynamic] Draw,                   scene_allocator)
-    scene.textures      = make([dynamic] Image,                  scene_allocator)
+    scene.textures      = make([dynamic] Texture_Handle,         scene_allocator)
     scene.bottom_levels = make([dynamic] Acceleration_Structure, scene_allocator)
     
     scene.camera = { // May be overridden by the scene itself
@@ -69,30 +69,6 @@ deinit_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
     gpu_free(gpu, scene.buffers.draw_commands)
     gpu_free(gpu, scene.buffers.draw_visibility)
     gpu_free(gpu, scene.buffers.meshlet_visibility)
-}
-
-unload_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
-    profile_procedure()
-    
-    scene.loaded = false
-    
-    gpu_free(gpu, scene.buffers.vertices)
-    gpu_free(gpu, scene.buffers.indices)
-    gpu_free(gpu, scene.buffers.meshlets)
-    gpu_free(gpu, scene.buffers.meshlet_data)
-    gpu_free(gpu, scene.buffers.meshes)
-    
-    for it in scene.bottom_levels {
-        vk.DestroyAccelerationStructureKHR(gpu.device, it.acceleration_structure, nil)
-    }
-    vk.DestroyAccelerationStructureKHR(gpu.device, scene.top_level.acceleration_structure, nil)
-    
-    gpu_free(gpu, scene.buffers.bottom_level_acceleration_structures)
-    gpu_free(gpu, scene.buffers.top_level_acceleration_structures)
-    
-    for texture in scene.textures {
-        gpu_free_image(gpu, texture)
-    }
 }
 
 load_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
@@ -120,7 +96,8 @@ load_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
             print("\nLoading scene: %v\n", path)
             
             profile_zone_begin("load scene")
-            if !load_gltf_scene(&geometry, path, &scene.draws, &scene.camera, &texture_paths, &scene.sun_direction) {
+            draws := make([dynamic] Scene_Draw, scene_loading_allocator)
+            if !load_gltf_scene(&geometry, path, &draws, &scene.camera, &texture_paths, &scene.sun_direction) {
                 runtime.exit(1)
             }
             profile_zone_end()
@@ -129,6 +106,7 @@ load_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
             print("  Loading textures\n")
             
             reserve(&scene.textures, len(texture_paths))
+            reserve(&scene.draws,    len(draws))
             
             //
             // @speed Moving the copies to a queue will speedup the loading from ssd(~22%). It may or may not help
@@ -189,11 +167,27 @@ load_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
                     read, read_error := os.read_full(file, buffer); assert(read_error == nil); assert(read == pixel_size)
                     os.close(file)
                     
-                    texture := gpu_allocate_texture(gpu, texture_descs[index])
-                    gpu_copy_to_texture_immediately(gpu, texture, buffer)
+                    handle  := create_texture(gpu, **texture_descs[index])
+                    texture := get_texture(handle)
+                    gpu_copy_to_texture_immediately(gpu, texture^, buffer)
                     
-                    append(&scene.textures, texture)
+                    append(&scene.textures, handle)
                 }
+            }
+            
+            for raw, index in draws {
+                draw := cast(Draw) raw
+                // @volatile see mesh.odin material texture indices
+                if raw.albedo_texture != 0 {
+                    draw.albedo_texture   = get_texture(scene.textures[raw.albedo_texture-1]).sampled_index
+                }
+                if raw.normal_texture != 0 {
+                    draw.normal_texture   = get_texture(scene.textures[raw.normal_texture-1]).sampled_index
+                }
+                if raw.emmisive_texture != 0 {
+                    draw.emmisive_texture = get_texture(scene.textures[raw.emmisive_texture-1]).sampled_index
+                }
+                append(&scene.draws, draw)
             }
             
             print("  Loaded textures: %vb\n\n", view_magnitude(total_size))
@@ -275,6 +269,30 @@ load_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
     }
     
     profile_zone_end()
+}
+
+unload_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
+    profile_procedure()
+    
+    scene.loaded = false
+    
+    gpu_free(gpu, scene.buffers.vertices)
+    gpu_free(gpu, scene.buffers.indices)
+    gpu_free(gpu, scene.buffers.meshlets)
+    gpu_free(gpu, scene.buffers.meshlet_data)
+    gpu_free(gpu, scene.buffers.meshes)
+    
+    for it in scene.bottom_levels {
+        vk.DestroyAccelerationStructureKHR(gpu.device, it.acceleration_structure, nil)
+    }
+    vk.DestroyAccelerationStructureKHR(gpu.device, scene.top_level.acceleration_structure, nil)
+    
+    gpu_free(gpu, scene.buffers.bottom_level_acceleration_structures)
+    gpu_free(gpu, scene.buffers.top_level_acceleration_structures)
+    
+    for texture in scene.textures {
+        free_texture(gpu, texture)
+    }
 }
 
 ////////////////////////////////////////////////

@@ -34,29 +34,28 @@ layout(location = 0) out vec4 pixel_result;
 
 void main() {
     vec4 albedo   = vec4(.5, .5, .5, 1);
-    vec3 nnormal  = vec3(0, 0, 1); // @naming
+    vec3 normal_tbn  = vec3(0, 0, 1);
     vec3 emmisive = vec3(0);
     {
         Draw draw = data.draw_buffer[draw_index].v;
         vec2 uv = mesh_result.uv;
         
-        // @volatile the draws should have the correct index *or* the data should provide the per frame offset
         // @speed if the texture index is uniform over the lanes, then nonuniformEXT() is a pessimisation.
         if (draw.albedo_texture > 0) {
-            albedo = texture(sampler2D(Textures[nonuniformEXT(data.frame_heap_offset + draw.albedo_texture)], Samplers[Sampler_Texture]), uv);
+            albedo = texture(sampler2D(Textures[nonuniformEXT(draw.albedo_texture)], Samplers[Sampler_Texture]), uv);
         }
         if (draw.normal_texture > 0) {
-            nnormal = texture(sampler2D(Textures[nonuniformEXT(data.frame_heap_offset + draw.normal_texture)], Samplers[Sampler_Texture]), uv).rgb;
-            nnormal = nnormal * 2 - 1;
+            normal_tbn = texture(sampler2D(Textures[nonuniformEXT(draw.normal_texture)], Samplers[Sampler_Texture]), uv).rgb;
+            normal_tbn = normal_tbn * 2 - 1;
         }
         if (draw.emmisive_texture > 0) {
-            emmisive = texture(sampler2D(Textures[nonuniformEXT(data.frame_heap_offset + draw.emmisive_texture)], Samplers[Sampler_Texture]), uv).rgb;
+            emmisive = texture(sampler2D(Textures[nonuniformEXT(draw.emmisive_texture)], Samplers[Sampler_Texture]), uv).rgb;
         }
     }
     
     vec3 binormal = cross(mesh_result.normal, mesh_result.tangent.xyz) * mesh_result.tangent.w;
     
-    vec3 normal = normalize(nnormal.x * mesh_result.tangent.xyz + nnormal.y * binormal + nnormal.z * mesh_result.normal);
+    vec3 normal = normalize(normal_tbn.x * mesh_result.tangent.xyz + normal_tbn.y * binormal + normal_tbn.z * mesh_result.normal);
     
     vec3 sun_direction = normalize(data.sun_direction);
     float ndotl = max(dot(normal, sun_direction), 0);

@@ -79,16 +79,21 @@ Pipeline :: struct {
     bind_point: vk.PipelineBindPoint,
 }
 
-Image :: struct {
+Specialization_Constant :: struct #raw_union {
+    u: u32,
+    b: b32,
+}
+
+Image :: struct { // @todo delete
     image:  vk.Image,
+    sampled_index: u32,
+    storage_index: u32,
+    
     memory: vk.DeviceMemory,
     
     format:    vk.Format,
     size:      uv3,
     mip_count: u32,
-    
-    sampled_index: u32,
-    storage_index: u32,
 }
 
 Acceleration_Structure :: struct {
@@ -97,25 +102,6 @@ Acceleration_Structure :: struct {
 }
 
 ////////////////////////////////////////////////
-
-/* 
-
-// @todo
-
-Usage :: { VERTEX, UNIFORM, ... }
-// named parameters and default values
-create_buffer(debugname bytesize usage: Usage = ...) -> Handle(Buffer)
-create_texture(debugname, dimensions, format, initial_data = xxx) -> Handle(Texture)
-create_shader(
-    debugName
-    vs = { bytecode, entryFunctionName },
-    ps = { bytecode, entryFunctionName },
-    graphicsstate = {
-        depthTest = COMPARE,
-        // binding layouts <- we dont do that here
-    }
-) -> Handle(Shader)
-*/
 
 Gpu_Slice :: struct ($E: typeid) {
     cpu: [] E,
@@ -173,7 +159,6 @@ DefaultBlendDesc :: Blend_Desc {
     src_alpha_factor = .ONE,
     color_write_mask = { .R, .G, .B, .A },
 }
-
 
 Color_Mask :: vk.ColorComponentFlags
 
@@ -940,7 +925,7 @@ gpu_allocate_type :: proc (gpu: ^Gpu, $T: typeid, alignment: umm = align_of(T), 
     return result
 }
 
-gpu_free :: proc { gpu_free_pointer, gpu_free_address, gpu_free_slice }
+gpu_free :: proc { gpu_free_pointer, gpu_free_address, gpu_free_slice, gpu_free_image }
 gpu_free_pointer :: proc (gpu: ^Gpu, pointer: vk.DeviceAddress) {
     alloc := gpu_reflect_get_allocation(pointer)
     assert(alloc.offset == 0)
@@ -953,7 +938,6 @@ gpu_free_address :: proc (gpu: ^Gpu, address: Gpu_Address($T)) {
 gpu_free_slice :: proc (gpu: ^Gpu, slice: Gpu_Slice($T)) {
     gpu_free_pointer(gpu, slice.gpu.p)
 }
-
 
 
 
@@ -1007,7 +991,7 @@ gpu_allocate_texture :: proc (gpu: ^Gpu, desc: Texture_Desc, loc := #caller_loca
     return result
 }
 
-gpu_copy_to_texture_immediately :: proc (gpu: ^Gpu, texture: Image, data: [] u8) {
+gpu_copy_to_texture_immediately :: proc (gpu: ^Gpu, texture: Texture, data: [] u8) {
     transition_info := vk.HostImageLayoutTransitionInfo {
         sType = .HOST_IMAGE_LAYOUT_TRANSITION_INFO,
         image = texture.image,
@@ -1152,9 +1136,9 @@ gpu_create_image_view :: proc (gpu: ^Gpu, image: Image, mip_base: u32, mip_count
     return result
 }
 
-gpu_free_image :: proc (gpu: ^Gpu, image: Image) {
-    vk.DestroyImage(gpu.device, image.image, nil)
-    vk.FreeMemory(gpu.device,   image.memory, nil)
+gpu_free_image :: proc (gpu: ^Gpu, image: vk.Image, memory: vk.DeviceMemory) {
+    vk.FreeMemory(gpu.device,   memory, nil)
+    vk.DestroyImage(gpu.device, image,  nil)
 }
 
 gpu_destroy_texture_view :: proc (gpu: ^Gpu, view: vk.ImageView) {
@@ -1165,11 +1149,6 @@ gpu_destroy_texture_view :: proc (gpu: ^Gpu, view: vk.ImageView) {
 
 ////////////////////////////////////////////////
 // Pipelines 
-
-Specialization_Constant :: struct #raw_union {
-    u: u32,
-    b: b32,
-}
 
 // This is a helper struct and proc to wrangle all the pointers between structs in one place.
 // It must be allocated(on the stack) by the caller, to ensure the internal pointers are valid
@@ -1774,7 +1753,7 @@ gpu_barrier :: proc (cmd: vk.CommandBuffer, before, after: vk.PipelineStageFlags
     vk.CmdPipelineBarrier2(cmd, &info)
 }
 
-create_image_barrier :: proc (image: ^Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout) -> vk.ImageMemoryBarrier2 {
+create_image_barrier :: proc (image: Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout) -> vk.ImageMemoryBarrier2 {
     aspect_mask := get_image_aspect_mask(image.format)
     
     result := vk.ImageMemoryBarrier2 {
@@ -1792,7 +1771,7 @@ create_image_barrier :: proc (image: ^Image, src_stage: vk.PipelineStageFlags2, 
     return result
 }
 
-create_image_barrier_from_undefined :: proc (image: ^Image, stage: vk.PipelineStageFlags2, access: vk.AccessFlags2) -> vk.ImageMemoryBarrier2 {
+create_image_barrier_from_undefined :: proc (image: Image, stage: vk.PipelineStageFlags2, access: vk.AccessFlags2) -> vk.ImageMemoryBarrier2 {
     result := create_image_barrier(image, { .ALL_COMMANDS }, {}, .UNDEFINED, stage, access, .GENERAL)
     return result
 }
