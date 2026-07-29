@@ -88,15 +88,6 @@ Render_Targets :: struct {
 
 ////////////////////////////////////////////////
 
-Geometry :: struct {
-    vertices:     [dynamic] Vertex,
-    indices:      [dynamic] u32,
-    meshlets:     [dynamic] Meshlet,
-    meshlet_data: [dynamic] u32,
-    
-    meshes: [dynamic] Mesh,
-}
-
 Depth_Mip :: struct {
     size: uv2,
     sampled_index: u32,
@@ -132,12 +123,8 @@ Debug :: struct {
     
     cpu_time:  f64,
     gpu_time:  f64,
-    cull_time_early: f64,
-    cull_time_late:  f64,
-    cull_time_post:  f64,
-    rendering_time_early: f64,
-    rendering_time_late:  f64,
-    rendering_time_post:  f64,
+    cull_time:      [Stage] f64,
+    rendering_time: [Stage] f64,
 }
 
 Camera :: struct {
@@ -598,89 +585,7 @@ main :: proc () {
             ////////////////////////////////////////////////
             
             if state.absolute_frame_index >= MaxFramesInFlight+1 {
-                profile_scope("GPU profiling")
-                
-                triangle_count: u64
-                if state.absolute_frame_index >= MaxFramesInFlight {
-                    profile_scope("count triangles")
-                    
-                    last_finished_stats_pool := stats_pools[frame.index]
-                    
-                    stats_result: [128] u64
-                    size := cast(int) size_of_slice(stats_result[:])
-                    
-                    check(vk.GetQueryPoolResults(gpu.device, last_finished_stats_pool, 0, 1, size, &stats_result[0], size_of(stats_result[0]), { ._64 }))
-                    
-                    for i in 0..<stats_count {
-                        triangle_count += stats_result[i]
-                    }
-                }
-                
-                gpu_profile_collate_events(gpu, frame.index)
-                
-                gpu_delta             := gpu_profile_get_zone_duration(gpu, frame.index, "Frame")
-                cull_delta_early      := gpu_profile_get_zone_duration(gpu, frame.index, "early culling")
-                cull_delta_late       := gpu_profile_get_zone_duration(gpu, frame.index, "late culling")
-                cull_delta_post       := gpu_profile_get_zone_duration(gpu, frame.index, "post culling")
-                rendering_delta_early := gpu_profile_get_zone_duration(gpu, frame.index, "early rendering pass")
-                rendering_delta_late  := gpu_profile_get_zone_duration(gpu, frame.index, "late rendering pass")
-                rendering_delta_post  := gpu_profile_get_zone_duration(gpu, frame.index, "post rendering pass")
-                
-                blend_factor_k := time_smoothed_blend_factor(7, cpu_delta)
-                
-                debug := &state.debug
-                debug.cpu_time             = linear_blend(cpu_delta,             debug.cpu_time,             blend_factor_k)
-                debug.cull_time_early      = linear_blend(cull_delta_early,      debug.cull_time_early,      blend_factor_k)
-                debug.cull_time_late       = linear_blend(cull_delta_late,       debug.cull_time_late,       blend_factor_k)
-                debug.cull_time_post       = linear_blend(cull_delta_post,       debug.cull_time_post,       blend_factor_k)
-                debug.rendering_time_early = linear_blend(rendering_delta_early, debug.rendering_time_early, blend_factor_k)
-                debug.rendering_time_late  = linear_blend(rendering_delta_late,  debug.rendering_time_late,  blend_factor_k)
-                debug.rendering_time_post  = linear_blend(rendering_delta_post,  debug.rendering_time_post,  blend_factor_k)
-                // this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
-                if gpu_delta >= 0 {
-                    debug.gpu_time = linear_blend(gpu_delta, debug.gpu_time, blend_factor_k)
-                }
-                
-                view :: proc (seconds: f64) -> time.Duration {
-                    return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
-                }
-                
-                profile_zone_begin("Update window title")
-                sb := strings.builder_make(context.temp_allocator)
-                fmt.sbprintf(&sb, "%v tri, cpu: %.3v, gpu: %.3v (early cull %.3v, early render %.3v, late cull %.3v, late render %.3v, post cull %.3v, post render %.3v)", 
-                    view_magnitude(triangle_count, kind = .Count),
-                    view(debug.cpu_time), view(debug.gpu_time), 
-                    view(debug.cull_time_early), view(debug.rendering_time_early), 
-                    view(debug.cull_time_late), view(debug.rendering_time_late),
-                    view(debug.cull_time_post), view(debug.rendering_time_post),
-                )
-                fmt.sbprintf(&sb, ", [ ")
-                if debug.vsync {
-                    fmt.sbprintf(&sb, "VSync ")
-                }
-                if debug.culling_enabled {
-                    fmt.sbprintf(&sb, "Culling ")
-                }
-                if debug.lod_enabled {
-                    fmt.sbprintf(&sb, "LOD ")
-                }
-                if debug.occlusion_enabled {
-                    fmt.sbprintf(&sb, "Occlusion ")
-                }
-                extra: string
-                if debug.display_pyramid {
-                    extra = fmt.sbprintf(&sb, ", displaying depth mip level %v ", debug.display_pyramid_mip_level)
-                }
-                fmt.sbprintf(&sb, "]")
-                
-                title := strings.to_cstring(&sb)
-                sdl.SetWindowTitle(window, title)
-            
-                profile_zone_end()
-                
-                if frame.print_profile {
-                    gpu_print_profile(gpu, frame.index)
-                }
+                update_title_and_print_gpu_profile(gpu, stats_pools[:], stats_count, &state, frame, cpu_delta, window)
             }
             
             ////////////////////////////////////////////////
@@ -691,95 +596,7 @@ main :: proc () {
             
             ////////////////////////////////////////////////
             
-            {
-                {
-                    // 
-                    // @todo the work of loading the bytes and parsing them could be moved to a thread. The modified flag 
-                    // then needs to be expanded into a state { Invalid, Loading, Valid }.
-                    // The checking itself can also be done on a different thread, and does not need to be done in sync with
-                    // the renderer frames.
-                    // 
-                    // The main thread would then just check if the shader.bytes themselves have been updated by checking a
-                    // flag and then use the already loaded bytes to recreate the pipeline. The remaining question then is 
-                    // how often the watchers-thread should check the files, but maybe there already is an asynchronous OS
-                    // api which then can just be used and we suspend the thread and let the OS wake it when a file was 
-                    // modified?
-                    //
-                    
-                    watchers_check_files_for_modification(&watchers)
-                    
-                    recompile_shaders_if_needed(&watchers, shaders.culling)
-                    recompile_shaders_if_needed(&watchers, shaders.meshlet_task, shaders.meshlet_mesh, shaders.meshlet_frag)
-                    recompile_shaders_if_needed(&watchers, shaders.depth_reduce)
-                    recompile_shaders_if_needed(&watchers, shaders.ui_vert, shaders.ui_frag)
-                    
-                    load_all_compiled_shaders(immediately = false)
-                }
-                
-                reloaded_cull_shader := check_and_reset_shaders_was_modified(shaders.culling)
-                for &cull_pipeline, stage in pipelines.culling {
-                    if !pipeline_is_valid(cull_pipeline) || reloaded_cull_shader {
-                        immediately := !pipeline_is_valid(cull_pipeline)
-                        destroy_pipeline(gpu, cull_pipeline)
-                        
-                        compute := get_shader(shaders.culling, immediately)
-                        constants := [] Specialization_Constant { /* late = */ { b = stage != .early }, /* post = */ { b = stage == .post } }
-                        
-                        cull_pipeline = gpu_create_compute_pipeline(gpu, compute, constants)
-                        
-                        print("Recreated %v cull_pipeline.\n", stage)
-                    }
-                }
-                
-                if !pipeline_is_valid(pipelines.depth_reduce) || check_and_reset_shaders_was_modified(shaders.depth_reduce) {
-                    immediately := !pipeline_is_valid(pipelines.depth_reduce)
-                    destroy_pipeline(gpu, pipelines.depth_reduce)
-                    
-                    compute := get_shader(shaders.depth_reduce, immediately)
-                    pipelines.depth_reduce = gpu_create_compute_pipeline(gpu, compute)
-                    
-                    print("Recreated depth_pipeline.\n")
-                }
-                
-                reloaded_meshlet_shaders := check_and_reset_shaders_was_modified(shaders.meshlet_task, shaders.meshlet_mesh, shaders.meshlet_frag)
-                for &meshlet_pipeline, stage in pipelines.meshlets {
-                    if !pipeline_is_valid(meshlet_pipeline) || reloaded_meshlet_shaders {
-                        immediately := !pipeline_is_valid(meshlet_pipeline)
-                        destroy_pipeline(gpu, meshlet_pipeline)
-                        
-                        raster_description: Raster_Desc
-                        raster_description.depth_format = render_targets.depth_format
-                        raster_description.color_target_formats = { render_targets.color_format }
-                        raster_description.blendstate = &Blend_Desc{ **DefaultBlendDesc }
-                        // :Stencil: 
-                        
-                        task, mesh, frag := get_shader(shaders.meshlet_task, immediately), get_shader(shaders.meshlet_mesh, immediately), get_shader(shaders.meshlet_frag, immediately)
-                        constants := [] Specialization_Constant { /* late = */ { b = stage != .early }, /* post = */ { b = stage == .post } }
-                        
-                        meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(gpu, task, mesh, frag, raster_description, constants)
-                        
-                        print("Recreated %v meshlet_pipeline.\n", stage)
-                    }
-                }    
-                
-                if !pipeline_is_valid(pipelines.ui) || check_and_reset_shaders_was_modified(shaders.ui_vert, shaders.ui_frag) {
-                    immediately := !pipeline_is_valid(pipelines.ui)
-                    destroy_pipeline(gpu, pipelines.ui)
-                    
-                    raster_description: Raster_Desc
-                    raster_description.color_target_formats = { render_targets.color_format } // hotreload shader: format
-                    raster_description.blendstate = &Blend_Desc { **DefaultBlendDesc }
-                    raster_description.blendstate.src_color_factor = .SRC_ALPHA
-                    raster_description.blendstate.dst_color_factor = .ONE_MINUS_SRC_ALPHA
-                    raster_description.blendstate.src_alpha_factor = .ONE
-                    raster_description.blendstate.dst_alpha_factor = .ONE_MINUS_SRC_ALPHA
-                    
-                    vert, frag := get_shader(shaders.ui_vert, immediately), get_shader(shaders.ui_frag, immediately)
-                    pipelines.ui = gpu_create_graphics_pipeline(gpu, vert, frag, raster_description)
-                    
-                    print("Recreated ui_pipeline.\n")
-                }
-            }
+            hotreload_shaders_and_recreate_pipelines(gpu, &watchers, shaders, &pipelines, &frame, render_targets)
             
             ////////////////////////////////////////////////
             
@@ -1139,6 +956,93 @@ print_cpu_profile :: proc (zones: [] profiler.Zone) {
             print(" - %v", zone.name)
             print("\n")
         }
+    }
+}
+
+update_title_and_print_gpu_profile :: proc (gpu: ^Gpu, stats_pools: [] vk.QueryPool, stats_count: u32, state: ^State, frame: Frame, cpu_delta: f64, window: ^sdl.Window) {
+    profile_scope("GPU profiling")
+    
+    triangle_count: u64
+    if state.absolute_frame_index >= MaxFramesInFlight {
+        profile_scope("count triangles")
+        
+        last_finished_stats_pool := stats_pools[frame.index]
+        
+        stats_result: [128] u64
+        size := cast(int) size_of_slice(stats_result[:])
+        
+        check(vk.GetQueryPoolResults(gpu.device, last_finished_stats_pool, 0, 1, size, &stats_result[0], size_of(stats_result[0]), { ._64 }))
+        
+        for i in 0..<stats_count {
+            triangle_count += stats_result[i]
+        }
+    }
+    
+    gpu_profile_collate_events(gpu, frame.index)
+    
+    gpu_delta             := gpu_profile_get_zone_duration(gpu, frame.index, "Frame")
+    cull_delta, rendering_delta: [Stage] f64
+    cull_delta[.early]     = gpu_profile_get_zone_duration(gpu, frame.index, "early culling")
+    cull_delta[.late]      = gpu_profile_get_zone_duration(gpu, frame.index, "late culling")
+    cull_delta[.post]      = gpu_profile_get_zone_duration(gpu, frame.index, "post culling")
+    rendering_delta[.early] = gpu_profile_get_zone_duration(gpu, frame.index, "early rendering pass")
+    rendering_delta[.late]  = gpu_profile_get_zone_duration(gpu, frame.index, "late rendering pass")
+    rendering_delta[.post]  = gpu_profile_get_zone_duration(gpu, frame.index, "post rendering pass")
+    
+    blend_factor_k := time_smoothed_blend_factor(7, cpu_delta)
+    
+    debug := &state.debug
+    debug.cpu_time = linear_blend(cpu_delta, debug.cpu_time, blend_factor_k)
+    for stage in Stage {
+        debug.cull_time[stage]      = linear_blend(cull_delta[stage],      debug.cull_time[stage],      blend_factor_k)
+        debug.rendering_time[stage] = linear_blend(rendering_delta[stage], debug.rendering_time[stage], blend_factor_k)
+    }
+    // this might have happened when a validation error occurred, causing the smooth value to be messed for a very long time
+    if gpu_delta >= 0 {
+        debug.gpu_time = linear_blend(gpu_delta, debug.gpu_time, blend_factor_k)
+    }
+    
+    view :: proc (seconds: f64) -> time.Duration {
+        return time.duration_round(cast(time.Duration) (seconds * cast(f64) time.Second), 1 * time.Microsecond)
+    }
+    
+    profile_zone_begin("Update window title")
+    sb := strings.builder_make(context.temp_allocator)
+    fmt.sbprintf(&sb, "%v tri, cpu: %.3v, gpu: %.3v (", 
+        view_magnitude(triangle_count, kind = .Count),
+        view(debug.cpu_time), view(debug.gpu_time), 
+    )
+    
+    for stage in Stage {
+        if stage != .early { fmt.sbprintf(&sb, ",") }
+        fmt.sbprintf(&sb, "%v cull %.3v, %v render %.3v", stage, view(debug.cull_time[stage]), stage, view(debug.rendering_time[stage]))
+    }
+    fmt.sbprintf(&sb, "), [ ") 
+    if debug.vsync {
+        fmt.sbprintf(&sb, "VSync ")
+    }
+    if debug.culling_enabled {
+        fmt.sbprintf(&sb, "Culling ")
+    }
+    if debug.lod_enabled {
+        fmt.sbprintf(&sb, "LOD ")
+    }
+    if debug.occlusion_enabled {
+        fmt.sbprintf(&sb, "Occlusion ")
+    }
+    extra: string
+    if debug.display_pyramid {
+        extra = fmt.sbprintf(&sb, ", displaying depth mip level %v ", debug.display_pyramid_mip_level)
+    }
+    fmt.sbprintf(&sb, "]")
+
+    title := strings.to_cstring(&sb)
+    sdl.SetWindowTitle(window, title)
+
+    profile_zone_end()
+
+    if frame.print_profile {
+        gpu_print_profile(gpu, frame.index)
     }
 }
 
@@ -1729,6 +1633,106 @@ recompile_shaders_if_needed :: proc (watchers: ^Watchers, shaders_ids: ..Shader_
                 shader.bytes,
             }
         }
+    }
+}
+
+////////////////////////////////////////////////
+
+hotreload_shaders_and_recreate_pipelines :: proc (gpu: ^Gpu, watchers: ^Watchers, shaders: Shaders, pipelines: ^Pipelines, frame: ^Frame, render_targets: Render_Targets) {
+    profile_procedure()
+    {
+        profile_scope("recompile shaders")
+        // 
+        // @todo the work of loading the bytes and parsing them could be moved to a thread. The modified flag 
+        // then needs to be expanded into a state { Invalid, Loading, Valid }.
+        // The checking itself can also be done on a different thread, and does not need to be done in sync with
+        // the renderer frames.
+        // 
+        // The main thread would then just check if the shader.bytes themselves have been updated by checking a
+        // flag and then use the already loaded bytes to recreate the pipeline. The remaining question then is 
+        // how often the watchers-thread should check the files, but maybe there already is an asynchronous OS
+        // api which then can just be used and we suspend the thread and let the OS wake it when a file was 
+        // modified?
+        //
+        
+        watchers_check_files_for_modification(watchers)
+        
+        recompile_shaders_if_needed(watchers, 
+            shaders.culling,
+            shaders.meshlet_task, shaders.meshlet_mesh, shaders.meshlet_frag,
+            shaders.depth_reduce,
+            shaders.ui_vert, shaders.ui_frag,
+        )
+        
+        load_all_compiled_shaders(immediately = false)
+    }
+    
+    reloaded_cull_shader := check_and_reset_shaders_was_modified(shaders.culling)
+    for &cull_pipeline, stage in pipelines.culling {
+        if !pipeline_is_valid(cull_pipeline) || reloaded_cull_shader {
+            immediately := !pipeline_is_valid(cull_pipeline)
+            destroy_pipeline(gpu, cull_pipeline)
+            
+            compute := get_shader(shaders.culling, immediately)
+            constants := [] Specialization_Constant { /* late = */ { b = stage != .early }, /* post = */ { b = stage == .post } }
+            
+            cull_pipeline = gpu_create_compute_pipeline(gpu, compute, constants)
+            
+            print("Recreated %v cull_pipeline.\n", stage)
+            frame.print_profile = true
+        }
+    }
+    
+    if !pipeline_is_valid(pipelines.depth_reduce) || check_and_reset_shaders_was_modified(shaders.depth_reduce) {
+        immediately := !pipeline_is_valid(pipelines.depth_reduce)
+        destroy_pipeline(gpu, pipelines.depth_reduce)
+        
+        compute := get_shader(shaders.depth_reduce, immediately)
+        pipelines.depth_reduce = gpu_create_compute_pipeline(gpu, compute)
+        
+        print("Recreated depth_pipeline.\n")
+        frame.print_profile = true
+    }
+    
+    reloaded_meshlet_shaders := check_and_reset_shaders_was_modified(shaders.meshlet_task, shaders.meshlet_mesh, shaders.meshlet_frag)
+    for &meshlet_pipeline, stage in pipelines.meshlets {
+        if !pipeline_is_valid(meshlet_pipeline) || reloaded_meshlet_shaders {
+            immediately := !pipeline_is_valid(meshlet_pipeline)
+            destroy_pipeline(gpu, meshlet_pipeline)
+            
+            raster_description: Raster_Desc
+            raster_description.depth_format = render_targets.depth_format
+            raster_description.color_target_formats = { render_targets.color_format }
+            raster_description.blendstate = &Blend_Desc{ **DefaultBlendDesc }
+            // :Stencil: 
+            
+            task, mesh, frag := get_shader(shaders.meshlet_task, immediately), get_shader(shaders.meshlet_mesh, immediately), get_shader(shaders.meshlet_frag, immediately)
+            constants := [] Specialization_Constant { /* late = */ { b = stage != .early }, /* post = */ { b = stage == .post } }
+            
+            meshlet_pipeline = gpu_create_graphics_meshlet_pipeline(gpu, task, mesh, frag, raster_description, constants)
+            
+            print("Recreated %v meshlet_pipeline.\n", stage)
+            frame.print_profile = true
+        }
+    }    
+    
+    if !pipeline_is_valid(pipelines.ui) || check_and_reset_shaders_was_modified(shaders.ui_vert, shaders.ui_frag) {
+        immediately := !pipeline_is_valid(pipelines.ui)
+        destroy_pipeline(gpu, pipelines.ui)
+        
+        raster_description: Raster_Desc
+        raster_description.color_target_formats = { render_targets.color_format } // hotreload shader: format
+        raster_description.blendstate = &Blend_Desc { **DefaultBlendDesc }
+        raster_description.blendstate.src_color_factor = .SRC_ALPHA
+        raster_description.blendstate.dst_color_factor = .ONE_MINUS_SRC_ALPHA
+        raster_description.blendstate.src_alpha_factor = .ONE
+        raster_description.blendstate.dst_alpha_factor = .ONE_MINUS_SRC_ALPHA
+        
+        vert, frag := get_shader(shaders.ui_vert, immediately), get_shader(shaders.ui_frag, immediately)
+        pipelines.ui = gpu_create_graphics_pipeline(gpu, vert, frag, raster_description)
+        
+        print("Recreated ui_pipeline.\n")
+        frame.print_profile = true
     }
 }
 

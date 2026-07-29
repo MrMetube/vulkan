@@ -31,6 +31,8 @@ watchers_make :: proc (watchers: ^Watchers, path: string) -> Watcher_Id {
 ////////////////////////////////////////////////
 
 watchers_check_files_for_modification :: proc (watchers: ^Watchers) {
+    profile_procedure()
+    
     for &watcher in watchers {
         info, err := os.stat(watcher.path, context.temp_allocator)
         if err != nil {

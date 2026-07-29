@@ -40,6 +40,15 @@ Buffers :: struct {
     top_level_acceleration_structures:    vk.DeviceAddress,
 }
 
+Geometry :: struct {
+    vertices:     [dynamic] Vertex,
+    indices:      [dynamic] u32,
+    meshlets:     [dynamic] Meshlet,
+    meshlet_data: [dynamic] u32,
+    
+    meshes: [dynamic] Mesh,
+}
+
 init_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
     profile_procedure()
     
