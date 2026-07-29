@@ -199,13 +199,12 @@ recompile_shaders_if_needed :: proc (watchers: ^Watchers, shaders_ids: ..Shader_
     for id in shaders_ids {
         info := get_shader_info(id)^
         
+        // This unusual form of x = bool || x instead of ||= is required so that even if 
+        // source returns true, common is still checked and reset if it also needs to be. 
+        // Otherwise the compiler will skip the call if the value is already true.
         needs_recompile: bool
-        // @study does this prevent "early return" optimizations that would cause the second check to 
-        // be skipped, if the first one is already true? If not then we will recompile once for the 
-        // source and once for the header if both are modified at once, because we optimistically skip
-        // the second check.
-        needs_recompile ||= watcher_check_and_reset(watchers, info.source)
-        needs_recompile ||= watcher_check_and_reset(watchers, info.common)
+        needs_recompile = watcher_check_and_reset(watchers, info.source) || needs_recompile
+        needs_recompile = watcher_check_and_reset(watchers, info.common) || needs_recompile
         
         if needs_recompile {
             shader := get_shader(id, immediately = false)

@@ -667,11 +667,11 @@ main :: proc () {
                 load_all_compiled_shaders(immediately = false)
             }
             
-            reloaded_cull_shader := test_and_reset_shaders_was_modified(shaders.culling)
+            reloaded_cull_shader := check_and_reset_shaders_was_modified(shaders.culling)
             for &cull_pipeline, stage in pipelines.culling {
                 if !pipeline_is_valid(cull_pipeline) || reloaded_cull_shader {
-                    destroy_pipeline(gpu, cull_pipeline)
                     immediately := !pipeline_is_valid(cull_pipeline)
+                    destroy_pipeline(gpu, cull_pipeline)
                     
                     compute := get_shader(shaders.culling, immediately)
                     constants := [] Specialization_Constant { /* late = */ { b = stage != .early }, /* post = */ { b = stage == .post } }
@@ -682,9 +682,9 @@ main :: proc () {
                 }
             }
             
-            if !pipeline_is_valid(pipelines.depth_reduce) || test_and_reset_shaders_was_modified(shaders.depth_reduce) {
-                destroy_pipeline(gpu, pipelines.depth_reduce)
+            if !pipeline_is_valid(pipelines.depth_reduce) || check_and_reset_shaders_was_modified(shaders.depth_reduce) {
                 immediately := !pipeline_is_valid(pipelines.depth_reduce)
+                destroy_pipeline(gpu, pipelines.depth_reduce)
                 
                 compute := get_shader(shaders.depth_reduce, immediately)
                 pipelines.depth_reduce = gpu_create_compute_pipeline(gpu, compute)
@@ -692,11 +692,11 @@ main :: proc () {
                 print("Recreated depth_pipeline.\n")
             }
             
-            reloaded_meshlet_shaders := test_and_reset_shaders_was_modified(shaders.meshlet_task, shaders.meshlet_mesh, shaders.meshlet_frag)
+            reloaded_meshlet_shaders := check_and_reset_shaders_was_modified(shaders.meshlet_task, shaders.meshlet_mesh, shaders.meshlet_frag)
             for &meshlet_pipeline, stage in pipelines.meshlets {
                 if !pipeline_is_valid(meshlet_pipeline) || reloaded_meshlet_shaders {
-                    destroy_pipeline(gpu, meshlet_pipeline)
                     immediately := !pipeline_is_valid(meshlet_pipeline)
+                    destroy_pipeline(gpu, meshlet_pipeline)
                     
                     raster_description: Raster_Desc
                     raster_description.depth_format = render_targets.depth_buffer.format
@@ -713,9 +713,9 @@ main :: proc () {
                 }
             }    
             
-            if !pipeline_is_valid(pipelines.ui) || test_and_reset_shaders_was_modified(shaders.ui_vert, shaders.ui_frag) {
-                destroy_pipeline(gpu, pipelines.ui)
+            if !pipeline_is_valid(pipelines.ui) || check_and_reset_shaders_was_modified(shaders.ui_vert, shaders.ui_frag) {
                 immediately := !pipeline_is_valid(pipelines.ui)
+                destroy_pipeline(gpu, pipelines.ui)
                 
                 raster_description: Raster_Desc
                 raster_description.color_target_formats = { render_targets.color_buffer.format }

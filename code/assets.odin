@@ -120,7 +120,7 @@ make_shader_compilation :: proc () -> (^Procs, ^Shader_Compilation, Allocator) {
     return procs, comp, alloc
 }
 
-test_and_reset_shaders_was_modified :: proc (ids: ..Shader_Id) -> bool {
+check_and_reset_shaders_was_modified :: proc (ids: ..Shader_Id) -> bool {
     result := false
     
     for id in ids {
