@@ -72,6 +72,7 @@ deinit_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
 }
 
 load_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
+    profile_procedure()
     defer scene.loaded = true
     
     scene_allocator         := arena_allocator(&scene.arena)
@@ -90,12 +91,20 @@ load_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
         geometry.meshlet_data.allocator = scene_loading_allocator
         geometry.meshes.allocator       = scene_loading_allocator
         
+        // @todo @speed move this work into a work_queue with threads.
+        // Mutex around 
+        // - the draws 
+        // - gpu/heap access
+        // - permanent and temp allocations
+        // First just load all the geometry synchronously and just thread
+        // the textures, that way we dont have to mutex the geometry buffers.
+        // 
         {
             path := "niagara_bistro/bistro.gltf"
             texture_paths := make([dynamic] string, scene_loading_allocator)
             print("\nLoading scene: %v\n", path)
             
-            profile_zone_begin("load scene")
+            profile_zone_begin("load gltf scene")
             draws := make([dynamic] Scene_Draw, scene_loading_allocator)
             if !load_gltf_scene(&geometry, path, &draws, &scene.camera, &texture_paths, &scene.sun_direction) {
                 runtime.exit(1)
@@ -167,9 +176,10 @@ load_scene :: proc (gpu: ^Gpu, scene: ^Scene) {
                     read, read_error := os.read_full(file, buffer); assert(read_error == nil); assert(read == pixel_size)
                     os.close(file)
                     
-                    handle  := create_texture(gpu, **texture_descs[index])
+                    desc := texture_descs[index]
+                    handle  := create_texture(gpu, **desc)
                     texture := get_texture(handle)
-                    gpu_copy_to_texture_immediately(gpu, texture^, buffer)
+                    gpu_copy_to_texture_immediately(gpu, texture.image, desc.format, buffer, desc.size.xy, desc.mip_count)
                     
                     append(&scene.textures, handle)
                 }

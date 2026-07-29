@@ -33,9 +33,9 @@ layout(descriptor_heap, descriptor_stride = 32) uniform accelerationStructureEXT
 layout(location = 0) out vec4 pixel_result;
 
 void main() {
-    vec4 albedo   = vec4(.5, .5, .5, 1);
-    vec3 normal_tbn  = vec3(0, 0, 1);
-    vec3 emmisive = vec3(0);
+    vec4 albedo     = vec4(.5, .5, .5, 1);
+    vec3 normal_tbn = vec3(0, 0, 1);
+    vec3 emmisive   = vec3(0, 0, 0);
     {
         Draw draw = data.draw_buffer[draw_index].v;
         vec2 uv = mesh_result.uv;

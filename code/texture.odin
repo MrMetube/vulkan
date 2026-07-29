@@ -1,3 +1,4 @@
+#+vet explicit-allocators !unused-procedures
 package main
 
 import vk "../lib/vulkan"
@@ -20,22 +21,17 @@ create_shader(
 ) -> Handle(Shader)
 */
 
-last_used_texture: u32
-textures: [4096] Texture
+last_used_texture: Texture_Handle
+textures:      [4096] Texture
+texture_infos: [4096] vk.DeviceMemory
 
 last_used_heap_index: u32 // @todo 
 
 Texture :: struct {
-    // @todo split by access frequency
     image:  vk.Image,
+    
     sampled_index: u32,
     storage_index: u32,
-    
-    memory: vk.DeviceMemory,
-    
-    format:    vk.Format,
-    size:      uv3,
-    mip_count: u32,
 }
 
 Texture_Handle :: distinct u32
@@ -50,11 +46,10 @@ create_texture :: proc (gpu: ^Gpu,
     
     loc := #caller_location,
 ) -> Texture_Handle {
-    image := gpu_allocate_texture(gpu, {kind, size, format, mip_count, sample_count, usage}, loc)
+    image, memory := gpu_allocate_texture(gpu, {kind, size, format, mip_count, sample_count, usage}, loc)
     
     last_used_texture += 1
-    index := last_used_texture
-    slot  := &textures[index]
+    result := last_used_texture
     
     // @volatile
     sampled_index: u32
@@ -62,43 +57,47 @@ create_texture :: proc (gpu: ^Gpu,
     if .SAMPLED in usage {
         heap_index := last_used_heap_index
         last_used_heap_index += 1
-        write_texture_to_heap(gpu, heap_index, image, .SAMPLED_IMAGE)
+        write_texture_to_heap(gpu, heap_index, image, format, .SAMPLED_IMAGE)
         sampled_index = heap_index
     }
     if .STORAGE in usage {
         heap_index := last_used_heap_index
         last_used_heap_index += 1
-        write_texture_to_heap(gpu, heap_index, image, .STORAGE_IMAGE)
+        write_texture_to_heap(gpu, heap_index, image, format, .STORAGE_IMAGE)
         storage_index = heap_index
     }
     
-    slot^ = {
-        image = image.image,
+    textures[result] = {
+        image  = image,
         sampled_index = sampled_index,
         storage_index = storage_index,
-        
-        memory = image.memory,
-        
-        format    = image.format,
-        size      = image.size,
-        mip_count = image.mip_count,
     }
+    texture_infos[result] = memory
     
-    result := cast(Texture_Handle) index
-    return result
-}
-
-get_texture :: proc (handle: Texture_Handle) -> ^Texture {
-    result: ^Texture
-    if handle <= cast(Texture_Handle) last_used_texture {
-        result = &textures[handle]
-    }
     return result
 }
 
 free_texture :: proc (gpu: ^Gpu, handle: Texture_Handle) {
     texture := get_texture(handle)
+    memory  := get_texture_memory(handle)
     // @todo this should mark the slots as deleted and the pool should then delete memory.
     // This allows for suballocating textures if that is wanted.
-    gpu_free_image(gpu, texture.image, texture.memory)
+    gpu_free_image(gpu, texture.image, memory^)
+}
+
+get_texture :: proc (handle: Texture_Handle) -> ^Texture {
+    result := &textures[check_handle(handle, last_used_texture)]
+    return result
+}
+get_texture_memory :: proc (handle: Texture_Handle) -> ^vk.DeviceMemory {
+    result := &texture_infos[check_handle(handle, last_used_texture)]
+    return result
+}
+
+check_handle :: proc (handle: Texture_Handle, cap: Texture_Handle) -> Texture_Handle {
+    result: Texture_Handle
+    if handle <= cap {
+        result = handle
+    }
+    return result
 }

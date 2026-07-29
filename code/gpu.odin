@@ -46,18 +46,17 @@ Gpu :: struct {
     transfer_queue: vk.Queue,
     transfer_command_pool: vk.CommandPool,
     
-    swapchain_state:  Swapchain_State,
-    swapchain_format: vk.Format,
-    image_index: u32, 
-    
     descriptor_heap: Descriptor_Heap,
     
     ////////////////////////////////////////////////
     
-    swapchain_size: uv2,
-    
+    swapchain_state: Swapchain_State,
     swapchain: vk.SwapchainKHR,
-    swapchain_images: [dynamic] Image, // technically only the vk.Image and size: uv2 are used
+    swapchain_size: uv2,
+    swapchain_format: vk.Format,
+    
+    image_index: u32, 
+    swapchain_images: [dynamic] vk.Image,
     render_completes: [dynamic] vk.Semaphore,
 }
 
@@ -82,18 +81,6 @@ Pipeline :: struct {
 Specialization_Constant :: struct #raw_union {
     u: u32,
     b: b32,
-}
-
-Image :: struct { // @todo delete
-    image:  vk.Image,
-    sampled_index: u32,
-    storage_index: u32,
-    
-    memory: vk.DeviceMemory,
-    
-    format:    vk.Format,
-    size:      uv3,
-    mip_count: u32,
 }
 
 Acceleration_Structure :: struct {
@@ -819,14 +806,7 @@ gpu_recreate_swapchain_if_needed :: proc (gpu: ^Gpu, vsync: bool, force_recreati
         }
     }
     
-    images: [dynamic; 16] vk.Image
-    assert(image_count <= cap(images))
-    resize(&images, image_count)
-    check(vk.GetSwapchainImagesKHR(gpu.device, gpu.swapchain, &image_count, &images[0]))
-    for image, index in images {
-        gpu.swapchain_images[index].image = image
-        gpu.swapchain_images[index].size  = { gpu.swapchain_size.x, gpu.swapchain_size.y, 1 }
-    }
+    check(vk.GetSwapchainImagesKHR(gpu.device, gpu.swapchain, &image_count, &gpu.swapchain_images[0]))
     
     gpu.swapchain_state = .Was_Resized
     return true
@@ -943,7 +923,7 @@ gpu_free_slice :: proc (gpu: ^Gpu, slice: Gpu_Slice($T)) {
 ////////////////////////////////////////////////
 // Textures
 
-gpu_allocate_texture :: proc (gpu: ^Gpu, desc: Texture_Desc, loc := #caller_location) -> Image {
+gpu_allocate_texture :: proc (gpu: ^Gpu, desc: Texture_Desc, loc := #caller_location) -> (vk.Image, vk.DeviceMemory) {
     samples: vk.SampleCountFlag
     switch desc.sample_count {
     case  1: samples = ._1
@@ -953,11 +933,6 @@ gpu_allocate_texture :: proc (gpu: ^Gpu, desc: Texture_Desc, loc := #caller_loca
     case 16: samples = ._16
     case: unreachable()
     }
-    
-    result: Image
-    result.format    = desc.format
-    result.size      = desc.size
-    result.mip_count = desc.mip_count
     
     create_info := vk.ImageCreateInfo {
         sType = .IMAGE_CREATE_INFO,
@@ -972,40 +947,41 @@ gpu_allocate_texture :: proc (gpu: ^Gpu, desc: Texture_Desc, loc := #caller_loca
         initialLayout = .UNDEFINED,
     }
     
-    check(vk.CreateImage(gpu.device, &create_info, nil, &result.image))
+    image: vk.Image
+    check(vk.CreateImage(gpu.device, &create_info, nil, &image))
     
     requirements: vk.MemoryRequirements
-    vk.GetImageMemoryRequirements(gpu.device, result.image, &requirements)
+    vk.GetImageMemoryRequirements(gpu.device, image, &requirements)
     
-    result.memory = select_memory_type_and_allocate(gpu, requirements, .GPU)
+    memory := select_memory_type_and_allocate(gpu, requirements, .GPU)
     
-    check(vk.BindImageMemory(gpu.device, result.image, result.memory, 0))
+    check(vk.BindImageMemory(gpu.device, image, memory, 0))
     
     if Validation {
-        gpu_debug_name_handle(gpu, .IMAGE,         result.image,  loc)
-        gpu_debug_name_handle(gpu, .DEVICE_MEMORY, result.memory, loc)
+        gpu_debug_name_handle(gpu, .IMAGE,         image,  loc)
+        gpu_debug_name_handle(gpu, .DEVICE_MEMORY, memory, loc)
     }
     
-    return result
+    return image, memory
 }
 
-gpu_copy_to_texture_immediately :: proc (gpu: ^Gpu, texture: Texture, data: [] u8) {
+gpu_copy_to_texture_immediately :: proc (gpu: ^Gpu, image: vk.Image, format: vk.Format, data: [] u8, size: uv2, mip_count: u32) {
     transition_info := vk.HostImageLayoutTransitionInfo {
         sType = .HOST_IMAGE_LAYOUT_TRANSITION_INFO,
-        image = texture.image,
+        image = image,
         oldLayout = .UNDEFINED,
         newLayout = .GENERAL,
-        subresourceRange = { aspectMask = { .COLOR }, levelCount = texture.mip_count, layerCount = 1 },
+        subresourceRange = { aspectMask = { .COLOR }, levelCount = mip_count, layerCount = 1 },
     }
     vk.TransitionImageLayout(gpu.device, 1, &transition_info)
     
     copies: [dynamic; 32] vk.MemoryToImageCopy
     
-    block_size := get_block_size_from_format(texture.format)
+    block_size := get_block_size_from_format(format)
     
     mip_offset: int
-    mip_size := texture.size.xy
-    for mip_level in 0..<texture.mip_count {
+    mip_size := size
+    for mip_level in 0..<mip_count {
         copy := vk.MemoryToImageCopy {
             sType = .MEMORY_TO_IMAGE_COPY,
             pHostPointer     = &data[mip_offset],
@@ -1024,13 +1000,12 @@ gpu_copy_to_texture_immediately :: proc (gpu: ^Gpu, texture: Texture, data: [] u
     
     info := vk.CopyMemoryToImageInfo {
         sType = .COPY_MEMORY_TO_IMAGE_INFO,
-        dstImage       = texture.image,
+        dstImage       = image,
         dstImageLayout = .GENERAL,
         regionCount    = cast(u32) len(copies),
         pRegions       = raw_data(&copies),
     }
     vk.CopyMemoryToImage(gpu.device, &info)
-    
 }
 
 select_memory_type_and_allocate :: proc (gpu: ^Gpu, requirements: vk.MemoryRequirements, memory: Memory_Kind, add_device_address_flag := false) -> vk.DeviceMemory {
@@ -1113,14 +1088,14 @@ get_image_aspect_mask :: proc (format: vk.Format) -> vk.ImageAspectFlags {
     return result
 }
 
-gpu_create_image_view :: proc (gpu: ^Gpu, image: Image, mip_base: u32, mip_count: u32, loc := #caller_location) -> vk.ImageView {
-    aspect_mask := get_image_aspect_mask(image.format)
+gpu_create_image_view :: proc (gpu: ^Gpu, image: vk.Image, format: vk.Format, mip_base: u32, mip_count: u32, loc := #caller_location) -> vk.ImageView {
+    aspect_mask := get_image_aspect_mask(format)
     
     view_create_info := vk.ImageViewCreateInfo {
         sType = .IMAGE_VIEW_CREATE_INFO,
-        image    = image.image,
+        image    = image,
         viewType = .D2,
-        format   = image.format,
+        format   = format,
         subresourceRange = { aspectMask = aspect_mask, baseMipLevel = mip_base, levelCount = mip_count, layerCount = 1 },
     }
     
@@ -1688,13 +1663,13 @@ gpu_copy :: proc (cmd: vk.CommandBuffer, destination: any, source: pmm) {
     unimplemented()
 }
 
-gpu_copy_to_texture :: proc (cmd: vk.CommandBuffer, destination: Image, source: vk.DeviceAddress, mip_level: u32 = 0, mip_offset: int = 0, mip_size: uv2 = 0) {
+gpu_copy_to_texture :: proc (cmd: vk.CommandBuffer, destination: vk.Image, size: uv3, source: vk.DeviceAddress, mip_level: u32 = 0, mip_offset: int = 0, mip_size: uv2 = 0) {
     alloc := gpu_reflect_get_allocation(source)
     
     region := vk.BufferImageCopy {
         bufferOffset = alloc.offset + cast(vk.DeviceSize) mip_offset,
         imageSubresource = { aspectMask = { .COLOR }, mipLevel = mip_level, layerCount = 1 },
-        imageExtent      = { **destination.size },
+        imageExtent      = { **size },
     }
     
     if mip_level != 0 {
@@ -1702,10 +1677,10 @@ gpu_copy_to_texture :: proc (cmd: vk.CommandBuffer, destination: Image, source: 
         region.imageExtent = { mip_size.x, mip_size.y, 1 }
     }
     
-    vk.CmdCopyBufferToImage(cmd, alloc.buffer, destination.image, .GENERAL, 1, &region)
+    vk.CmdCopyBufferToImage(cmd, alloc.buffer, destination, .GENERAL, 1, &region)
 }
 
-gpu_copy_from_texture :: proc (cmd: vk.CommandBuffer, destination: vk.DeviceAddress, source: Image, size: uv3) {
+gpu_copy_from_texture :: proc (cmd: vk.CommandBuffer, destination: vk.DeviceAddress, source: vk.Image, size: uv3) {
     alloc := gpu_reflect_get_allocation(destination)
     
     region := vk.BufferImageCopy {
@@ -1714,7 +1689,7 @@ gpu_copy_from_texture :: proc (cmd: vk.CommandBuffer, destination: vk.DeviceAddr
         imageExtent      = { **size },
     }
     
-    vk.CmdCopyImageToBuffer(cmd, source.image, .GENERAL, alloc.buffer, 1, &region)
+    vk.CmdCopyImageToBuffer(cmd, source, .GENERAL, alloc.buffer, 1, &region)
 }
 
 gpu_fill_memory :: proc { gpu_fill_memory_address, gpu_fill_memory_slice }
@@ -1751,8 +1726,8 @@ gpu_barrier :: proc (cmd: vk.CommandBuffer, before, after: vk.PipelineStageFlags
     vk.CmdPipelineBarrier2(cmd, &info)
 }
 
-create_image_barrier :: proc (image: Image, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout) -> vk.ImageMemoryBarrier2 {
-    aspect_mask := get_image_aspect_mask(image.format)
+create_image_barrier :: proc (image: vk.Image, format: vk.Format, src_stage: vk.PipelineStageFlags2, src_access: vk.AccessFlags2, old_layout: vk.ImageLayout, dst_stage: vk.PipelineStageFlags2, dst_access: vk.AccessFlags2, new_layout: vk.ImageLayout) -> vk.ImageMemoryBarrier2 {
+    aspect_mask := get_image_aspect_mask(format)
     
     result := vk.ImageMemoryBarrier2 {
         sType = .IMAGE_MEMORY_BARRIER_2,
@@ -1762,15 +1737,15 @@ create_image_barrier :: proc (image: Image, src_stage: vk.PipelineStageFlags2, s
         dstStageMask  = dst_stage,
         oldLayout = old_layout,
         newLayout = new_layout,
-        image = image.image,
+        image = image,
         subresourceRange = { aspectMask = aspect_mask, levelCount = vk.REMAINING_MIP_LEVELS, layerCount = vk.REMAINING_ARRAY_LAYERS },
     }
     
     return result
 }
 
-create_image_barrier_from_undefined :: proc (image: Image, stage: vk.PipelineStageFlags2, access: vk.AccessFlags2) -> vk.ImageMemoryBarrier2 {
-    result := create_image_barrier(image, { .ALL_COMMANDS }, {}, .UNDEFINED, stage, access, .GENERAL)
+create_image_barrier_from_undefined :: proc (image: vk.Image, format: vk.Format, stage: vk.PipelineStageFlags2, access: vk.AccessFlags2) -> vk.ImageMemoryBarrier2 {
+    result := create_image_barrier(image, format, { .ALL_COMMANDS }, {}, .UNDEFINED, stage, access, .GENERAL)
     return result
 }
 
@@ -2070,16 +2045,16 @@ gpu_set_active_heap :: proc (cmd: vk.CommandBuffer, heap: Descriptor_Heap) {
     vk.CmdBindResourceHeapEXT(cmd, &resource_info)
 }
 
-write_texture_to_heap :: proc (gpu: ^Gpu, index: u32, image: Image, image_type: vk.DescriptorType, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) {
-    aspect_mask := get_image_aspect_mask(image.format)
+write_texture_to_heap :: proc (gpu: ^Gpu, index: u32, image: vk.Image, format: vk.Format, image_type: vk.DescriptorType, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) {
+    aspect_mask := get_image_aspect_mask(format)
     
     image_info := vk.ImageDescriptorInfoEXT {
         sType = .IMAGE_DESCRIPTOR_INFO_EXT,
         pView = &vk.ImageViewCreateInfo {
             sType = .IMAGE_VIEW_CREATE_INFO,
-            image    = image.image,
+            image    = image,
             viewType = .D2,
-            format   = image.format,
+            format   = format,
             subresourceRange = { aspectMask = aspect_mask, baseMipLevel = mip_base, levelCount = mip_count, layerCount = 1 },
         },
         layout = .GENERAL,

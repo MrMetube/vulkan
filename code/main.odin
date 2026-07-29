@@ -70,13 +70,19 @@ Frame :: struct {
 }
 
 Render_Targets :: struct {
-    color_buffer: Texture_Handle,
-    depth_buffer: Texture_Handle,
+    color_buffer:  Texture_Handle,
+    depth_buffer:  Texture_Handle,
+    depth_pyramid: Texture_Handle,
+    
     color_view: vk.ImageView,
     depth_view: vk.ImageView,
     
-    depth_pyramid: Texture_Handle,
+    depth_pyramid_size: uv2,
     depth_pyramid_mips: [dynamic; 16] Depth_Mip,
+    
+    color_format:   vk.Format,
+    depth_format:   vk.Format,
+    pyramid_format: vk.Format,
 }
 
 ////////////////////////////////////////////////
@@ -204,9 +210,10 @@ Draw :: struct { // :Shader:
     p:           v3,
     scale:       f32,
     
-    albedo_texture:   u32, // @todo make proper zero values for these: 1x1 white pixel
-    normal_texture:   u32, // @todo make proper zero values for these: ??
-    emmisive_texture: u32, // @todo make proper zero values for these: 1x1 black pixel
+    // @todo make proper zero values for these: see the shader defaults outside the nil-test
+    albedo_texture:   u32,
+    normal_texture:   u32,
+    emmisive_texture: u32,
     
     mesh_index:    u32,
     post_pass:     b32,
@@ -349,17 +356,8 @@ main :: proc () {
         gpu^ = gpu_init(hinstance, state.debug.vsync)
     }
     
-    profile_zone_begin("Create Render Target")
-    
     render_targets: Render_Targets
-    recreate_render_targets(gpu, &render_targets, .D32_SFLOAT)
-    
-    profile_zone_end()
-    
-    ////////////////////////////////////////////////
-    
-    scene: Scene
-    init_scene(gpu, &scene)
+    init_render_targets(&render_targets)
     
     ////////////////////////////////////////////////
     
@@ -413,27 +411,34 @@ main :: proc () {
     profile_zone_end()
     
     ////////////////////////////////////////////////
+
+    scene: Scene
+    init_scene(gpu, &scene)
     
     profile_zone_end()
     
+    {
+        events := profiler.swap_active_array_and_get_events(the_cpu_profiler)
+        profiler.collate_events(events, &the_cpu_profile_zones, nil)
+        print_cpu_profile(the_cpu_profile_zones[:])
+        // Drop the print_cpu_profile event, the printing code assumes there only one root, 
+        // but with this extra zone there are two root nodes without a parent.
+        // @todo handmade hero used a frame marker event to cleanly seperate frames and then 
+        // collected events into a ring buffer of N frames for historical data.
+        profiler.swap_active_array_and_get_events(the_cpu_profiler)
+    }
+    
     for {
-        {
-            events := profiler.swap_active_array_and_get_events(the_cpu_profiler)
-            profiler.collate_events(events, &the_cpu_profile_zones, nil)
-        }
-        
-        profile_scope("Frame")
+        profile_zone_begin("Frame")
         free_all(context.temp_allocator)
         
         ////////////////////////////////////////////////
         
+        frame: Frame
         // @cleanup move into Frame
         mouse_delta: v2
         mouse_wheel_delta: f32
         vsync_changed: bool
-        
-        frame: Frame
-        if state.absolute_frame_index == 0 { frame.print_profile = true }
         
         profile_zone_begin("Input Events")
         
@@ -514,6 +519,7 @@ main :: proc () {
             // @speed move as much of the work into a work queue
             load_scene(gpu, &scene)
             frame.clear_dvb_and_mvb = true
+            frame.print_profile = true
         }
         
         ////////////////////////////////////////////////
@@ -533,7 +539,7 @@ main :: proc () {
         
         if gpu.swapchain_state == .Was_Resized {
             gpu.swapchain_state = .Ok
-            recreate_render_targets(gpu, &render_targets, get_texture(render_targets.depth_buffer).format)
+            recreate_render_targets(gpu, &render_targets)
         }
         
         assert(gpu.swapchain_state != .Dirty)
@@ -549,7 +555,7 @@ main :: proc () {
             
             triangle_count: u64
             if state.absolute_frame_index >= MaxFramesInFlight {
-                profile_scope("collect and print shader stats")
+                profile_scope("count triangles")
                 
                 last_finished_stats_pool := stats_pools[frame.index]
                 
@@ -624,11 +630,10 @@ main :: proc () {
             sdl.SetWindowTitle(window, title)
            
             profile_zone_end()
-        }
-        
-        if frame.print_profile {
-            gpu_print_profile(gpu, frame.index)
-            print_cpu_profile(the_cpu_profile_zones[:])
+            
+            if frame.print_profile {
+                gpu_print_profile(gpu, frame.index)
+            }
         }
         
         ////////////////////////////////////////////////
@@ -696,8 +701,8 @@ main :: proc () {
                     destroy_pipeline(gpu, meshlet_pipeline)
                     
                     raster_description: Raster_Desc
-                    raster_description.depth_format = get_texture(render_targets.depth_buffer).format
-                    raster_description.color_target_formats = { get_texture(render_targets.color_buffer).format }
+                    raster_description.depth_format = render_targets.depth_format
+                    raster_description.color_target_formats = { render_targets.color_format }
                     raster_description.blendstate = &Blend_Desc{ **DefaultBlendDesc }
                     // :Stencil: 
                     
@@ -715,7 +720,7 @@ main :: proc () {
                 destroy_pipeline(gpu, pipelines.ui)
                 
                 raster_description: Raster_Desc
-                raster_description.color_target_formats = { get_texture(render_targets.color_buffer).format }
+                raster_description.color_target_formats = { render_targets.color_format } // hotreload shader: format
                 raster_description.blendstate = &Blend_Desc { **DefaultBlendDesc }
                 raster_description.blendstate.src_color_factor = .SRC_ALPHA
                 raster_description.blendstate.dst_color_factor = .ONE_MINUS_SRC_ALPHA
@@ -781,11 +786,11 @@ main :: proc () {
             
             profile_scope("Setup Descriptor Heap")
             
-            write_texture :: proc (gpu: ^Gpu, index_offset: ^u32, image: Image, sampled: bool, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) -> u32 {
+            write_texture :: proc (gpu: ^Gpu, index_offset: ^u32, image: vk.Image, format: vk.Format, sampled: bool, mip_base: u32 = 0, mip_count: u32 = vk.REMAINING_MIP_LEVELS) -> u32 {
                 result := index_offset^
                 index_offset^ += 1
                 // @speed this can write multiple descriptors in a single call, so we could expose a version that passes a base index and then a slice of images
-                write_texture_to_heap(gpu, result, image, sampled ? .SAMPLED_IMAGE : .STORAGE_IMAGE, mip_base, mip_count)
+                write_texture_to_heap(gpu, result, image, format, sampled ? .SAMPLED_IMAGE : .STORAGE_IMAGE, mip_base, mip_count)
                 return result
             }
             
@@ -796,10 +801,11 @@ main :: proc () {
             descriptor_offset += 1
             descriptor_offset += last_used_heap_index // @todo we must not override the textures, but this is not the correct count
             
-            depth_pyramid := Image { **get_texture(render_targets.depth_pyramid)^ }
+            // @todo this doesnt need to happen every frame
+            depth_pyramid := get_texture(render_targets.depth_pyramid)^
             for &mip, mip_level in render_targets.depth_pyramid_mips {
-                mip.sampled_index = write_texture(gpu, &descriptor_offset, depth_pyramid, true,  cast(u32) mip_level, 1)
-                mip.storage_index = write_texture(gpu, &descriptor_offset, depth_pyramid, false, cast(u32) mip_level, 1)
+                mip.sampled_index = write_texture(gpu, &descriptor_offset, depth_pyramid.image, render_targets.pyramid_format, true,  cast(u32) mip_level, 1)
+                mip.storage_index = write_texture(gpu, &descriptor_offset, depth_pyramid.image, render_targets.pyramid_format, false, cast(u32) mip_level, 1)
             }
             
             write_acceleration_structure_to_heap(gpu, descriptor_offset, scene.top_level)
@@ -825,12 +831,23 @@ main :: proc () {
         
         ////////////////////////////////////////////////
         
-        gpu_image_barriers(cmd, { .BY_REGION },
-            create_image_barrier_from_undefined(Image { **get_texture(render_targets.color_buffer)^ },                    { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE                       }),
-            create_image_barrier_from_undefined(Image { **get_texture(render_targets.depth_buffer)^ },                    { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE, .MEMORY_READ }), 
-            create_image_barrier_from_undefined(Image { **get_texture(render_targets.depth_pyramid)^ },                   { .COMPUTE_SHADER                                 }, { .MEMORY_READ, .MEMORY_WRITE                   }),
-            create_image_barrier_from_undefined(gpu.swapchain_images[gpu.image_index], { .ALL_TRANSFER                                   }, { .TRANSFER_WRITE                               }),
-        )
+        {
+            color           := get_texture(render_targets.color_buffer) // frame: image
+            depth           := get_texture(render_targets.depth_buffer) // frame: image
+            depth_pyramid   := get_texture(render_targets.depth_pyramid) // frame: image
+            swapchain_image := gpu.swapchain_images[gpu.image_index]
+            
+            color_format   := render_targets.color_format
+            depth_format   := render_targets.depth_format
+            pyramid_format := render_targets.pyramid_format
+            
+            gpu_image_barriers(cmd, { .BY_REGION },
+                create_image_barrier_from_undefined(color.image,         color_format,         { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS }, { .COLOR_ATTACHMENT_WRITE                       }),
+                create_image_barrier_from_undefined(depth.image,         depth_format,         { .COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS }, { .DEPTH_STENCIL_ATTACHMENT_WRITE, .MEMORY_READ }), 
+                create_image_barrier_from_undefined(depth_pyramid.image, pyramid_format,       { .COMPUTE_SHADER                                 }, { .MEMORY_READ, .MEMORY_WRITE                   }),
+                create_image_barrier_from_undefined(swapchain_image,     gpu.swapchain_format, { .ALL_TRANSFER                                   }, { .TRANSFER_WRITE                               }),
+            )
+        }
         
         gpu_profile_zone_end()
         
@@ -852,7 +869,7 @@ main :: proc () {
         
         {
             gpu_profile_zone_begin("copy to swapchain")
-            source_image    := get_texture(render_targets.color_buffer)
+            source_image    := get_texture(render_targets.color_buffer) // frame: image
             swapchain_image := gpu.swapchain_images[gpu.image_index]
             
             if state.debug.display_pyramid {
@@ -862,23 +879,23 @@ main :: proc () {
             gpu_barrier(cmd, { .COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS, .DRAW_INDIRECT, .PRE_RASTERIZATION_SHADERS }, { .ALL_TRANSFER })
             
             if !state.debug.display_pyramid {
-                vk.CmdCopyImage(cmd, source_image.image, .GENERAL, swapchain_image.image, .GENERAL, 1, &vk.ImageCopy {
+                vk.CmdCopyImage(cmd, source_image.image, .GENERAL, swapchain_image, .GENERAL, 1, &vk.ImageCopy {
                     srcSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
-                    extent         = { **swapchain_image.size },
+                    extent         = { gpu.swapchain_size.x, gpu.swapchain_size.y, 1 },
                 })
             } else {
                 mip_index := cast(u32) state.debug.display_pyramid_mip_level
                 mip_size  := cast(iv2) render_targets.depth_pyramid_mips[mip_index].size
-                vk.CmdBlitImage(cmd, source_image.image, .GENERAL, swapchain_image.image, .GENERAL, 1, &vk.ImageBlit {
+                vk.CmdBlitImage(cmd, source_image.image, .GENERAL, swapchain_image, .GENERAL, 1, &vk.ImageBlit {
                     srcSubresource = { aspectMask = { .COLOR }, layerCount = 1, mipLevel = mip_index },
                     dstSubresource = { aspectMask = { .COLOR }, layerCount = 1 },
                     srcOffsets = { {0, 0, 0}, { mip_size.x, mip_size.y, 1 }},
-                    dstOffsets = { {0, 0, 0}, { **(cast(iv3) swapchain_image.size) }},
+                    dstOffsets = { {0, 0, 0}, { cast(i32) gpu.swapchain_size.x, cast(i32) gpu.swapchain_size.y, 1 }},
                 }, .NEAREST)
             }
             
-            gpu_image_barriers(cmd, { .BY_REGION }, create_image_barrier(swapchain_image, { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .GENERAL, {}, {}, .PRESENT_SRC_KHR))
+            gpu_image_barriers(cmd, { .BY_REGION }, create_image_barrier(swapchain_image, gpu.swapchain_format, { .ALL_TRANSFER }, { .TRANSFER_WRITE }, .GENERAL, {}, {}, .PRESENT_SRC_KHR))
             
             gpu_profile_zone_end()
         }
@@ -899,8 +916,19 @@ main :: proc () {
         
         next_frame += 1
         profile_zone_end()
+        
+        ////////////////////////////////////////////////
+        
+        profile_zone_end() // Frame
+        {
+            events := profiler.swap_active_array_and_get_events(the_cpu_profiler)
+            profiler.collate_events(events, &the_cpu_profile_zones, nil)
+            
+            if frame.print_profile {
+                print_cpu_profile(the_cpu_profile_zones[:])
+            }
+        }
     }
-    
     
     ////////////////////////////////////////////////
     // Cleanup and Shutdown
@@ -1141,7 +1169,7 @@ cull_and_render :: proc (cmd: vk.CommandBuffer, stage: Stage, pipelines: Pipelin
         
         //
         
-        pyramid_size = cast(v2) get_texture(render_targets.depth_pyramid).size.xy,
+        pyramid_size = cast(v2) render_targets.depth_pyramid_size,
         
         lod_base = 10,
         lod_step = 1.5,
@@ -1384,7 +1412,16 @@ grid_dimension_from_total_count :: proc (id: Shader_Id, x: u32 = 1, y: u32 = 1, 
 
 ////////////////////////////////////////////////
 
-recreate_render_targets :: proc (gpu: ^Gpu, render_targets: ^Render_Targets, depth_buffer_format: Format) {
+init_render_targets :: proc (render_targets: ^Render_Targets) {
+    // @volatile we want a non-srgb format for the color buffer, but need to then match its component layout to make the "copy to swapchain" not mess up.
+    render_targets.color_format   = .B8G8R8A8_UNORM
+    render_targets.depth_format   = .D32_SFLOAT
+    render_targets.pyramid_format = .R32_SFLOAT
+}
+
+recreate_render_targets :: proc (gpu: ^Gpu, render_targets: ^Render_Targets) {
+    profile_procedure()
+    
     destroy_render_targets(gpu, render_targets)
     
     // Ensures that all reductions are at most 2x2 which makes sure they are conservative.
@@ -1392,10 +1429,17 @@ recreate_render_targets :: proc (gpu: ^Gpu, render_targets: ^Render_Targets, dep
     // Each mip level is a quarter of the size of the previous, as we half both dimensions each time.
     mip_count := 1 + max(integer_log2(pyramid_size.x), integer_log2(pyramid_size.y))
     
-    render_targets.depth_pyramid = create_texture(gpu, size = {pyramid_size.x,       pyramid_size.y,       1}, format = .R32_SFLOAT,         usage = { .SAMPLED, .STORAGE, .TRANSFER_SRC },   mip_count = mip_count)
-    render_targets.depth_buffer  = create_texture(gpu, size = {gpu.swapchain_size.x, gpu.swapchain_size.y, 1}, format = depth_buffer_format, usage = { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED })
-    // @volatile we want a non-srgb format for the color buffer, but need to then match its component layout to make the "copy to swapchain" not mess up.
-    render_targets.color_buffer  = create_texture(gpu, size = {gpu.swapchain_size.x, gpu.swapchain_size.y, 1}, format = .B8G8R8A8_UNORM,     usage = { .COLOR_ATTACHMENT, .TRANSFER_SRC })
+    render_targets.depth_pyramid_size = pyramid_size
+    
+    render_targets.color_buffer  = create_texture(gpu, size = {gpu.swapchain_size.x, gpu.swapchain_size.y, 1}, format = render_targets.color_format,   usage = { .COLOR_ATTACHMENT, .TRANSFER_SRC })
+    render_targets.depth_buffer  = create_texture(gpu, size = {gpu.swapchain_size.x, gpu.swapchain_size.y, 1}, format = render_targets.depth_format,   usage = { .DEPTH_STENCIL_ATTACHMENT, .SAMPLED })
+    render_targets.depth_pyramid = create_texture(gpu, size = {pyramid_size.x,       pyramid_size.y,       1}, format = render_targets.pyramid_format, usage = { .SAMPLED, .STORAGE, .TRANSFER_SRC },   mip_count = mip_count)
+    
+    depth := get_texture(render_targets.depth_buffer)
+    color := get_texture(render_targets.color_buffer)
+    // @todo we dont even need the aspect mask, if this is only used for beginRendering as a depth target, as that mask is ignored
+    render_targets.depth_view = gpu_create_image_view(gpu, depth.image, render_targets.depth_format, 0, 1)
+    render_targets.color_view = gpu_create_image_view(gpu, color.image, render_targets.color_format, 0, 1)
     
     for i in 0..<mip_count {
         mip_size := pyramid_size
@@ -1404,18 +1448,15 @@ recreate_render_targets :: proc (gpu: ^Gpu, render_targets: ^Render_Targets, dep
         mip_size = vec_max(mip_size, 1)
         append(&render_targets.depth_pyramid_mips, Depth_Mip { mip_size, 0, 0})
     }
-    // @todo we dont even need the aspect mask, if this is only used for beginRendering as a depth target, as that mask is ignored
-    render_targets.depth_view = gpu_create_image_view(gpu, Image { ** get_texture(render_targets.depth_buffer)^ }, 0, 1)
-    render_targets.color_view = gpu_create_image_view(gpu, Image { ** get_texture(render_targets.color_buffer)^ }, 0, 1)
 }
 
 destroy_render_targets :: proc (gpu: ^Gpu, render_targets: ^Render_Targets) {
-    free_texture(gpu, render_targets.depth_pyramid)
-    free_texture(gpu, render_targets.depth_buffer)
     free_texture(gpu, render_targets.color_buffer)
+    free_texture(gpu, render_targets.depth_buffer)
+    free_texture(gpu, render_targets.depth_pyramid)
     
-    gpu_destroy_texture_view(gpu, render_targets.depth_view)
     gpu_destroy_texture_view(gpu, render_targets.color_view)
+    gpu_destroy_texture_view(gpu, render_targets.depth_view)
     
     clear(&render_targets.depth_pyramid_mips)
 }
