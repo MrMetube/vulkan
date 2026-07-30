@@ -42,6 +42,7 @@ State :: struct {
     // something we determine. It is just here, because we don't have a real input system and just directly take the 
     // sdl events which only notify us of changes and not states themselves.
     left_down: bool,
+    right_down: bool,
     mouse_p:   v2,
     last_time: time.Tick,
     quit: bool,
@@ -487,8 +488,12 @@ main :: proc () {
                 state.mouse_p = { event.motion.x, cast(f32) gpu.swapchain_size.y - event.motion.y }
                 mouse_delta   = { event.motion.xrel, event.motion.yrel }
                 
-            case .MOUSE_BUTTON_DOWN: if event.button.button == sdl.BUTTON_LEFT { state.left_down = true  }
-            case .MOUSE_BUTTON_UP:   if event.button.button == sdl.BUTTON_LEFT { state.left_down = false }
+            case .MOUSE_BUTTON_DOWN: 
+                if event.button.button == sdl.BUTTON_LEFT  { state.left_down  = true  }
+                if event.button.button == sdl.BUTTON_RIGHT { state.right_down = true  }
+            case .MOUSE_BUTTON_UP:   
+                if event.button.button == sdl.BUTTON_LEFT  { state.left_down  = false }
+                if event.button.button == sdl.BUTTON_RIGHT { state.right_down = false }
             
             case .KEY_DOWN:
                 debug := &state.debug
@@ -538,12 +543,21 @@ main :: proc () {
             frame.delta_time = cast(f32) cpu_delta
             state.last_time  = current_time
             
-            if mouse_wheel_delta != 0 {
-                scene.camera.p.z += mouse_wheel_delta * -10 * frame.delta_time
+            if mouse_delta != 0 {
+                if state.left_down {
+                    scene.camera.p += la.mul(scene.camera.orientation, v3{ 1, 0, 0 } * (mouse_delta.x * -1 * 5) * frame.delta_time)
+                    scene.camera.p += la.mul(scene.camera.orientation, v3{ 0, 1, 0 } * (mouse_delta.y *  1 * 5) * frame.delta_time)
+                }
+                if state.right_down {
+                    yaw   := -mouse_delta.x * 0.001
+                    pitch := -mouse_delta.y * 0.001
+                    q := scene.camera.orientation
+                    q = la.quaternion_angle_axis(yaw, v3 { 0, 1, 0 }) * la.quaternion_angle_axis(pitch, la.mul(q, v3{1,0,0})) * q
+                    scene.camera.orientation = la.normalize(q)
+                }
             }
-            
-            if mouse_delta != 0 && state.left_down {
-                scene.camera.p.xy += mouse_delta * {-1, 1} * frame.delta_time * 5
+            if mouse_wheel_delta != 0 {
+                scene.camera.p += la.mul(scene.camera.orientation, v3{ 0, 0, -1 } * (mouse_wheel_delta * -100) * frame.delta_time)
             }
         }
         
