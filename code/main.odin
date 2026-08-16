@@ -674,6 +674,13 @@ main :: proc () {
                 
                 descriptor_offset := cast(u32) (frame.index * DescriptorPerFrameLimit)
                 
+                // :AccelerationStructureFromHeap:
+                write_acceleration_structure_to_heap(gpu, TopLevelAccelerationStucture_HeapOffset, scene.top_level)
+                descriptor_offset += TopLevelAccelerationStucture_HeapOffset
+                write_acceleration_structure_to_heap(gpu, descriptor_offset, scene.top_level)
+                // frame.top_level_acceleration_structure_index = descriptor_offset
+                // descriptor_offset += 1
+                
                 // @todo add a null texture, which is a bright debug color so that uninitialized indices(0) are easy to find
                 // nil_index := append_texture(gpu, &descriptor_heap, &descriptor_offset, nil_texture, true)
                 descriptor_offset += 1
@@ -686,9 +693,6 @@ main :: proc () {
                     mip.storage_index = write_texture(gpu, &descriptor_offset, depth_pyramid.image, render_targets.pyramid_format, false, cast(u32) mip_level, 1)
                 }
                 
-                write_acceleration_structure_to_heap(gpu, descriptor_offset, scene.top_level)
-                frame.top_level_acceleration_structure_index = descriptor_offset
-                descriptor_offset += 1
                 
                 // @todo can we just offset the heap's address when we bind it? this removes the need for the frame.frame_heap_offset, if we then also store the correct offset and not the absolute index for the top_level_acceleration_structure
                 gpu_set_active_heap(cmd, gpu.descriptor_heap)

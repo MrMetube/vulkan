@@ -44,7 +44,7 @@ Gpu :: struct {
     image_aquired_semaphores: [MaxFramesInFlight] vk.Semaphore,
     
     transfer_queue: vk.Queue,
-    transfer_command_pool: vk.CommandPool,
+    transfer_command_pool: vk.CommandPool, // @todo .Transient flag on creation of pool
     
     descriptor_heap: Descriptor_Heap,
     
@@ -1126,8 +1126,14 @@ gpu_destroy_texture_view :: proc (gpu: ^Gpu, view: vk.ImageView) {
 // This is a helper struct and proc to wrangle all the pointers between structs in one place.
 // It must be allocated(on the stack) by the caller, to ensure the internal pointers are valid
 // after the return of the helper function.
+//
+// @hack :AccelerationStructureFromHeap:
+// The NVIDIA drivers (610.74) are bugged and any use of a top-level acceleration structure
+// via the descriptor heap loses the device. To work around this issue we hardcode mapping just 
+// for that descriptor.
+//
 Pipeline_Info :: struct {
-    mappings:               [2] vk.DescriptorSetAndBindingMappingEXT,
+    mappings:               [3] vk.DescriptorSetAndBindingMappingEXT,
     heap_mapping:           vk.ShaderDescriptorSetAndBindingMappingInfoEXT,
     flags2:                 vk.PipelineCreateFlags2CreateInfo,
     
@@ -1139,16 +1145,17 @@ Pipeline_Info :: struct {
     
     is_mesh_pipeline: bool,
 }
+TopLevelAccelerationStucture_HeapOffset :: 1
 
 make_pipeline_info :: proc (info: ^Pipeline_Info, gpu: ^Gpu, shaders: [] ^Shader, constants: [] Specialization_Constant) {
     // universal Descriptor Heap mapping
     info.mappings[0] = { // resource descriptors
         sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
         descriptorSet = 1,
-        firstBinding = 0,
-        bindingCount = 1,
-        resourceMask =  vk.SpirvResourceTypeFlagsEXT_ALL,
-        source = .HEAP_WITH_CONSTANT_OFFSET,
+        firstBinding  = 0,
+        bindingCount  = 1,
+        resourceMask  = vk.SpirvResourceTypeFlagsEXT_ALL,
+        source        = .HEAP_WITH_CONSTANT_OFFSET,
         
         sourceData = { constantOffset = { heapArrayStride = gpu.descriptor_heap.resource_size } },
     }
@@ -1156,12 +1163,23 @@ make_pipeline_info :: proc (info: ^Pipeline_Info, gpu: ^Gpu, shaders: [] ^Shader
     info.mappings[1] = { // sampler descriptors
         sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
         descriptorSet = 2,
-        firstBinding = 0,
-        bindingCount = DescriptorSamplerLimit,
-        resourceMask = vk.SpirvResourceTypeFlagsEXT_ALL,
-        source = .HEAP_WITH_CONSTANT_OFFSET,
+        firstBinding  = 0,
+        bindingCount  = DescriptorSamplerLimit,
+        resourceMask  = vk.SpirvResourceTypeFlagsEXT_ALL,
+        source        = .HEAP_WITH_CONSTANT_OFFSET,
         
         sourceData = { constantOffset = { heapArrayStride = gpu.descriptor_heap.resource_size } },
+    }
+    
+    info.mappings[2] = { // see :AccelerationStructureFromHeap:
+        sType = .DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
+        descriptorSet = 0,
+        firstBinding  = 0,
+        bindingCount  = 1,
+        resourceMask  = { .ACCELERATION_STRUCTURE },
+        source        = .HEAP_WITH_CONSTANT_OFFSET,
+        
+        sourceData = { constantOffset = { heapOffset = TopLevelAccelerationStucture_HeapOffset * gpu.descriptor_heap.resource_size, heapArrayStride = 0 } },
     }
     
     info.heap_mapping = vk.ShaderDescriptorSetAndBindingMappingInfoEXT { 

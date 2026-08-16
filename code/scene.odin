@@ -363,7 +363,7 @@ build_bottom_level_acceleration_structures :: proc (gpu: ^Gpu, queue: vk.Queue, 
                         vertexFormat = .R32G32B32_SFLOAT,
                         vertexData   = { deviceAddress = buffers.vertices.gpu.p + cast(vk.DeviceAddress) (size_of(Vertex) * source_mesh.vertex_offset) },
                         vertexStride = size_of(Vertex),
-                        maxVertex    = source_mesh.vertex_count,
+                        maxVertex    = source_mesh.vertex_count-1,
                         
                         indexType    = .UINT32,
                         indexData    = { deviceAddress = buffers.indices.gpu.p  + cast(vk.DeviceAddress) (size_of(u32)    * lod.index_offset) },

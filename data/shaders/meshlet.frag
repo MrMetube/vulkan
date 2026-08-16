@@ -1,6 +1,6 @@
 #version 460
 
-#define Raytrace 0
+#define Raytrace 1
 
 #if Raytrace
 #extension GL_EXT_ray_query: require
@@ -26,7 +26,9 @@ layout(location = 6) flat   in uint debug_index;
 layout(descriptor_heap) uniform texture2D Textures[];
 layout(descriptor_heap) uniform sampler   Samplers[];
 #if Raytrace
-layout(descriptor_heap, descriptor_stride = 32) uniform accelerationStructureEXT top_levels[];
+// :AccelerationStructureFromHeap:
+layout(set = 0, binding = 0) uniform accelerationStructureEXT top_level;
+// layout(descriptor_heap, descriptor_stride = 32) uniform accelerationStructureEXT top_levels[];
 #endif // Raytrace
 
 
@@ -61,14 +63,19 @@ void main() {
     float ndotl = max(dot(normal, sun_direction), 0);
     
 #if Raytrace
-    uint top_level_index = data.top_level_acceleration_structure_index;
     
     rayQueryEXT ray_query;
-    rayQueryInitializeEXT(ray_query, top_levels[top_level_index], gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, mesh_result.p, 0.01, sun_direction, 100);
-    // rayQueryProceedEXT(ray_query);
+    // :AccelerationStructureFromHeap:
+    rayQueryInitializeEXT(ray_query, top_level, gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, mesh_result.p, 0.01, vec3(0,1,0), 1000);
+    // uint top_level_index = data.top_level_acceleration_structure_index;
+    // rayQueryInitializeEXT(ray_query, top_levels[top_level_index], gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, mesh_result.p, 0.01, sun_direction, 100);
+    rayQueryProceedEXT(ray_query);
     
-    if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
-        ndotl *= 0.1;
+    if (rayQueryGetIntersectionTypeEXT(ray_query, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+        albedo.rgb = vec3(1,0,0);
+        ndotl *= 100;
+    } else {
+        albedo.rgb = vec3(0,0,1);
     }
 #endif // Raytrace
     
